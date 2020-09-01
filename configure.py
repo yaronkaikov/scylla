@@ -503,6 +503,7 @@ arg_parser.add_argument('--verbose', dest='verbose', action='store_true',
 arg_parser.add_argument('--test-repeat', dest='test_repeat', action='store', type=str, default='1',
                          help='Set number of times to repeat each unittest.')
 arg_parser.add_argument('--test-timeout', dest='test_timeout', action='store', type=str, default='7200')
+arg_parser.add_argument("--full-build-and-test", dest='full_build', type=bool, nargs='?', const=True, default=False, help="Build including packages while running ninja test")
 args = arg_parser.parse_args()
 
 defines = ['XXH_PRIVATE_API',
@@ -1621,9 +1622,10 @@ with open(buildfile_tmp, 'w') as f:
         )
 
         f.write(
-            'build {mode}-test: test.{mode} {test_executables} $builddir/{mode}/test/tools/cql_repl $builddir/{mode}/scylla\n'.format(
+            'build {mode}-test: test.{mode} {include_dist_target} {test_executables} $builddir/{mode}/test/tools/cql_repl $builddir/{mode}/scylla\n'.format(
                 mode=mode,
                 test_executables=' '.join(['$builddir/{}/{}'.format(mode, binary) for binary in tests]),
+                include_dist_target = f'dist-{mode}' if args.full_build and args.enable_dist is None or args.enable_dist else '',
             )
         )
         f.write(
