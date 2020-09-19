@@ -1738,8 +1738,8 @@ with open(buildfile_tmp, 'w') as f:
             'build build: phony {}\n'.format(' '.join([f'{mode}-build' for mode in build_modes]))
     )
     f.write(
-            'build test: phony {}\n'.format(' '.join(['{mode}-test'.format(mode=mode) for mode in build_modes]))
-    )
+            'build test: phony {}\n'.format(' '.join(['dist-{mode} {mode}-test'.format(mode=mode) for mode in build_modes]))
+     )
     f.write(
             'build check: phony {}\n'.format(' '.join(['{mode}-check'.format(mode=mode) for mode in build_modes]))
     )
