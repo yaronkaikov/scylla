@@ -1827,7 +1827,7 @@ with open(buildfile_tmp, 'w') as f:
         build $builddir/{mode}/dist/tar/scylla-tools-package.tar.gz: copy tools/java/build/scylla-tools-package.tar.gz
         build $builddir/{mode}/dist/tar/scylla-jmx-package.tar.gz: copy tools/jmx/build/scylla-jmx-package.tar.gz
 
-        build dist-{mode}: phony dist-server-{mode} dist-python3 dist-tools dist-jmx
+        build dist-{mode}: phony dist-server-{mode} dist-python3 dist-tools dist-jmx dist-unified
         build dist-check-{mode}: dist-check
           mode = {mode}
             '''))
