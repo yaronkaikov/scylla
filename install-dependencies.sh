@@ -107,6 +107,9 @@ fedora_packages=(
     rust
     cargo
 
+    moreutils
+    iproute
+    llvm
     openldap-servers
     openldap-devel
     toxiproxy
