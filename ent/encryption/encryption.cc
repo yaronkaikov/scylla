@@ -132,14 +132,18 @@ bytes calculate_md5(const bytes& b, size_t off, size_t len) {
     return res;
 }
 
+bytes calculate_sha256(bytes_view b) {
+    bytes res{bytes::initialized_later(), SHA256_DIGEST_LENGTH};
+    SHA256(reinterpret_cast<const uint8_t*>(b.data()), b.size(), reinterpret_cast<uint8_t *>(res.data()));
+    return res;
+}
+
 bytes calculate_sha256(const bytes& b, size_t off, size_t len) {
     if (off >= b.size()) {
         throw std::out_of_range("Invalid offset");
     }
     len = std::min(len, b.size() - off);
-    bytes res{bytes::initialized_later(), SHA256_DIGEST_LENGTH};
-    SHA256(reinterpret_cast<const uint8_t*>(b.data() + off), len, reinterpret_cast<uint8_t *>(res.data()));
-    return res;
+    return calculate_sha256(bytes_view(b.data() + off, len));
 }
 
 future<temporary_buffer<char>> read_text_file_fully(const sstring& filename) {
