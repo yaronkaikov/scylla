@@ -134,6 +134,7 @@ public:
 class encryption_config;
 class system_key;
 class kmip_host;
+class kms_host;
 
 /**
  * Context is a singleton object, shared across shards. I.e. even though there are obvious mutating
@@ -149,6 +150,7 @@ public:
     virtual shared_ptr<key_provider> get_provider(const options&) = 0;
     virtual shared_ptr<system_key> get_system_key(const sstring&) = 0;
     virtual shared_ptr<kmip_host> get_kmip_host(const sstring&) = 0;
+    virtual shared_ptr<kms_host> get_kms_host(const sstring&) = 0;
 
     virtual shared_ptr<key_provider> get_cached_provider(const sstring& id) const = 0;
     virtual void cache_provider(const sstring& id, shared_ptr<key_provider>) = 0;
