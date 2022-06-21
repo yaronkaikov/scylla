@@ -24,6 +24,7 @@ public:
     named_value<sstring> config_encryption_key_name;
     named_value<string_map> system_info_encryption;
     named_value<string_string_map> kmip_hosts;
+    named_value<string_string_map> kms_hosts;
 };
 
 }
