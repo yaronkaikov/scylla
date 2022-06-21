@@ -20,6 +20,7 @@
 #include <openssl/rand.h>
 #include <openssl/md5.h>
 #include <openssl/sha.h>
+#include <openssl/hmac.h>
 
 #include <boost/range/adaptor/map.hpp>
 #include <boost/filesystem.hpp>
@@ -144,6 +145,18 @@ bytes calculate_sha256(const bytes& b, size_t off, size_t len) {
     }
     len = std::min(len, b.size() - off);
     return calculate_sha256(bytes_view(b.data() + off, len));
+}
+
+bytes hmac_sha256(bytes_view msg, bytes_view key) {
+    bytes res{bytes::initialized_later(), SHA256_DIGEST_LENGTH};
+
+    std::unique_ptr<HMAC_CTX, void (*)(HMAC_CTX*)> ctxt(HMAC_CTX_new(), &HMAC_CTX_free);
+
+    HMAC_Init_ex(ctxt.get(), key.data(), static_cast<int>(key.size()), EVP_sha256(), nullptr);
+    HMAC_Update(ctxt.get(), reinterpret_cast<const uint8_t*>(msg.data()), msg.size());
+    unsigned length;
+    HMAC_Final(ctxt.get(), reinterpret_cast<uint8_t*>(res.data()), &length);
+    return res;
 }
 
 future<temporary_buffer<char>> read_text_file_fully(const sstring& filename) {
