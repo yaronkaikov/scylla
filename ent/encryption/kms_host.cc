@@ -137,8 +137,6 @@ public:
     future<> init();
     future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&);
     future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const key_info&);
-
-    static const inline key_info master_key_info = { "<none>", 0 };
 private:
     class httpclient;
     using key_and_id_type = std::tuple<shared_ptr<symmetric_key>, id_type>;
@@ -646,7 +644,23 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
     co_return body;
 }
 
+future<> encryption::kms_host::impl::init() {
+    if (_initialized) {
+        co_return;
+    }
+
+    kms_log.debug("Looking up master key");
+
+    auto query = rjson::empty_object();
+    rjson::add(query, "KeyId", _options.master_key);
+    auto response = co_await post("DescribeKey", query);
+    kms_log.debug("Master key exists");
+
+    _initialized = true;
+}
+
 future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::create_key(const key_info& info) {
+
     /**
      * AWS KMS does _not_ allow us to actually have "named keys" that can be used externally,
      * i.e. exported to us, here, for bulk encryption.
@@ -696,31 +710,7 @@ future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::
         };
     }
 
-    // we use a special (illegal) info object to signal we want to find master 
-    // key
-    if (&info == &master_key_info) {
-        kms_log.debug("Looking up master key");
-
-        auto query = rjson::empty_object();
-        rjson::add(query, "KeyId", _options.master_key);
-        auto response = co_await post("DescribeKey", query);
-        kms_log.debug("Master key exists");
-
-        _initialized = true;
-
-        co_return key_and_id_type{
-            nullptr, // no key
-            bytes(_options.master_key.begin(), _options.master_key.end())
-        };
-    }
-
-    // before getting any "real" key, we must always ensure we 
-    // have an existing master
-    if (!_initialized) {
-        co_await get_or_create_key(master_key_info);
-    }
-
-    // normal. note: since external keys are _not_ stored,
+    // note: since external keys are _not_ stored,
     // there is nothing we can "look up" or anything. Always 
     // new key here.
 
@@ -818,8 +808,7 @@ encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name
 encryption::kms_host::~kms_host() = default;
 
 future<> encryption::kms_host::init() {
-    // precreate master key
-    co_await get_or_create_key(impl::master_key_info);
+    return _impl->init();
 }
 
 future<std::tuple<shared_ptr<encryption::symmetric_key>, encryption::kms_host::id_type>> encryption::kms_host::get_or_create_key(const key_info& info) {
