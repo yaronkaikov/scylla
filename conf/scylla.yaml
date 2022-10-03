@@ -637,7 +637,7 @@ consistent_cluster_management: true
 # The directory where system keys are kept
 # This directory should have 700 permissions and belong to the scylla user
 #
-# system_key_directory: resources/system_keys
+# system_key_directory: /etc/scylla/conf/resources/system_keys
 #
 
 #

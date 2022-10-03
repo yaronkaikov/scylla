@@ -20,7 +20,7 @@ encryption::encryption_config::encryption_config()
                 : config_file()
 // BEGIN entry definitions
 
-        , system_key_directory(this, "system_key_directory", value_status::Used, "resources/system_keys",
+        , system_key_directory(this, "system_key_directory", value_status::Used, "/etc/scylla/conf/resources/system_keys",
                                 R"foo(The directory where system keys are kept
 
 This directory should have 700 permissions and belong to the scylla user)foo")
