@@ -242,7 +242,7 @@ public:
 
     virtual future<::shared_ptr<cql_transport::messages::result_message>> execute_prepared(
         cql3::prepared_cache_key_type id,
-        std::vector<cql3::raw_value> values,
+        cql3::raw_value_vector_with_unset values,
         db::consistency_level cl = db::consistency_level::ONE) override {
 
         const auto& so = cql3::query_options::specific_options::DEFAULT;
@@ -772,7 +772,7 @@ public:
                 std::ref(sl_controller)).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
-            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, *cfg, db::table_selector::all()).get();
+            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, db::table_selector::all()).get();
 
             auto& ks = db.local().find_keyspace(db::system_keyspace::NAME);
             parallel_for_each(ks.metadata()->cf_meta_data(), [&ks] (auto& pair) {

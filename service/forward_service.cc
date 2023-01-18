@@ -364,6 +364,13 @@ future<query::forward_result> forward_service::dispatch_to_shards(
     });
 }
 
+static lowres_clock::time_point compute_timeout(const query::forward_request& req) {
+    lowres_system_clock::duration time_left = req.timeout - lowres_system_clock::now();
+    lowres_clock::time_point timeout_point = lowres_clock::now() + time_left;
+
+    return timeout_point;
+}
+
 // This function executes forward_request on a shard.
 // It retains partition ranges owned by this shard from requested partition
 // ranges vector, so that only owned ones are queried.
@@ -382,7 +389,7 @@ future<query::forward_result> forward_service::execute_on_this_shard(
 
     schema_ptr schema = local_schema_registry().get(req.cmd.schema_version);
 
-    auto timeout = req.timeout;
+    auto timeout = compute_timeout(req);
     auto now = gc_clock::now();
 
     auto selection = mock_selection(req, schema, _db.local());
@@ -549,7 +556,6 @@ future<query::forward_result> forward_service::dispatch(query::forward_request r
                         [&req, addr = std::move(addr), &result_, tr_state_ = std::move(tr_state_)] (
                             query::forward_result partial_result
                         ) mutable {
-                            forward_aggregates aggrs(req);
                             auto partial_printer = seastar::value_of([&req, &partial_result] { 
                                 return query::forward_result::printer {
                                     .functions = get_functions(req),
@@ -559,8 +565,10 @@ future<query::forward_result> forward_service::dispatch(query::forward_request r
                             tracing::trace(tr_state_, "Received forward_result={} from {}", partial_printer, addr);
                             flogger.debug("received forward_result={} from {}", partial_printer, addr);
                             
-                            return aggrs.with_thread_if_needed([&result_, &aggrs, partial_result = std::move(partial_result)] () mutable {
-                                aggrs.merge(result_, std::move(partial_result));
+                            return do_with(forward_aggregates(req), [&result_, partial_result = std::move(partial_result)] (forward_aggregates& aggrs) mutable {
+                                return aggrs.with_thread_if_needed([&result_, &aggrs, partial_result = std::move(partial_result)] () mutable {
+                                    aggrs.merge(result_, std::move(partial_result));
+                                });
                             });
                     });       
                 }

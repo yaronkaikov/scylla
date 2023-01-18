@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include <algorithm>
 #include <functional>
 
 #include <seastar/util/closeable.hh>
@@ -1080,7 +1081,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // described here: https://github.com/scylladb/scylla/issues/1014
             supervisor::notify("loading system sstables");
             auto system_keyspace_sel = db::table_selector::all_in_keyspace(db::system_keyspace::NAME);
-            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, *cfg, *system_keyspace_sel).get();
+            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, *system_keyspace_sel).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
                 engine().update_blocked_reactor_notify_ms(blocked_reactor_notify_ms);
@@ -1214,7 +1215,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // Needs to be before system_keyspace::setup(), which writes to schema tables.
             supervisor::notify("loading system_schema sstables");
             auto schema_keyspace_sel = db::table_selector::all_in_keyspace(db::schema_tables::NAME);
-            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, *cfg, *schema_keyspace_sel).get();
+            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, *schema_keyspace_sel).get();
 
             // schema migration, if needed, is also done on shard 0
             db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
@@ -1791,10 +1792,8 @@ int main(int ac, char** av) {
 
     if (recognized) {
         // shift args to consume the recognized tool name
+        std::shift_left(av + 1, av + ac, 1);
         --ac;
-        for (int i = 1; i < ac; ++i) {
-            std::swap(av[i], av[i + 1]);
-        }
     }
 
     // Even on the environment which causes error during initalize Scylla,
