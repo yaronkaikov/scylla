@@ -30,6 +30,8 @@ raw_value make_smallint_raw(int16_t val);
 raw_value make_int_raw(int32_t val);
 raw_value make_bigint_raw(int64_t val);
 raw_value make_text_raw(const sstring_view& text);
+raw_value make_float_raw(float val);
+raw_value make_double_raw(double val);
 
 constant make_empty_const(data_type type);
 constant make_bool_const(bool val);
@@ -38,6 +40,17 @@ constant make_smallint_const(int16_t val);
 constant make_int_const(int32_t val);
 constant make_bigint_const(int64_t val);
 constant make_text_const(const sstring_view& text);
+constant make_float_const(float val);
+constant make_double_const(double val);
+
+untyped_constant make_int_untyped(const char* raw_text);
+untyped_constant make_float_untyped(const char* raw_text);
+untyped_constant make_string_untyped(const char* raw_text);
+untyped_constant make_bool_untyped(const char* raw_text);
+untyped_constant make_duration_untyped(const char* raw_text);
+untyped_constant make_uuid_untyped(const char* raw_text);
+untyped_constant make_hex_untyped(const char* raw_text);
+untyped_constant make_null_untyped();
 
 // This function implements custom serialization of collection values.
 // Some tests require the collection to contain unset_value or an empty value,
@@ -70,12 +83,12 @@ constant make_map_const(const std::vector<std::pair<constant, constant>>& vals,
 constant make_tuple_const(const std::vector<raw_value>& vals, const std::vector<data_type>& element_types);
 constant make_tuple_const(const std::vector<constant>& vals, const std::vector<data_type>& element_types);
 
-raw_value make_int_list_raw(const std::vector<int32_t>& values);
+raw_value make_int_list_raw(const std::vector<std::optional<int32_t>>& values);
 raw_value make_int_set_raw(const std::vector<int32_t>& values);
 
 raw_value make_int_int_map_raw(const std::vector<std::pair<int32_t, int32_t>>& values);
 
-constant make_int_list_const(const std::vector<int32_t>& values);
+constant make_int_list_const(const std::vector<std::optional<int32_t>>& values);
 constant make_int_set_const(const std::vector<int32_t>& values);
 constant make_int_int_map_const(const std::vector<std::pair<int32_t, int32_t>>& values);
 

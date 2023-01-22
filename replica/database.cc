@@ -356,7 +356,9 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
             max_count_streaming_concurrent_reads,
             max_memory_streaming_concurrent_reads(),
             "_streaming_concurrency_sem",
-            std::numeric_limits<size_t>::max())
+            std::numeric_limits<size_t>::max(),
+            utils::updateable_value(std::numeric_limits<uint32_t>::max()),
+            utils::updateable_value(std::numeric_limits<uint32_t>::max()))
     // No limits, just for accounting.
     , _compaction_concurrency_sem(reader_concurrency_semaphore::no_limits{}, "compaction")
     , _system_read_concurrency_sem(
@@ -364,7 +366,9 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
             max_count_concurrent_reads,
             max_memory_system_concurrent_reads(),
             "_system_read_concurrency_sem",
-            std::numeric_limits<size_t>::max())
+            std::numeric_limits<size_t>::max(),
+            utils::updateable_value(std::numeric_limits<uint32_t>::max()),
+            utils::updateable_value(std::numeric_limits<uint32_t>::max()))
     , _row_cache_tracker(cache_tracker::register_metrics::yes)
     , _apply_stage("db_apply", &database::do_apply)
     , _version(empty_version)
@@ -385,7 +389,9 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _feat(feat)
     , _shared_token_metadata(stm)
     , _sst_dir_semaphore(sst_dir_sem)
-    , _reader_concurrency_semaphores_group(max_memory_concurrent_reads(), max_count_concurrent_reads, max_inactive_queue_length())
+    , _reader_concurrency_semaphores_group(max_memory_concurrent_reads(), max_count_concurrent_reads, max_inactive_queue_length(),
+        _cfg.reader_concurrency_semaphore_serialize_limit_multiplier,
+        _cfg.reader_concurrency_semaphore_kill_limit_multiplier)
     , _wasm_engine(wasmtime::create_engine(cfg.wasm_udf_memory_limit()))
     , _stop_barrier(std::move(barrier))
     , _update_memtable_flush_static_shares_action([this, &cfg] { return _memtable_controller.update_static_shares(cfg.memtable_flush_static_shares()); })

@@ -23,16 +23,21 @@ class reader_concurrency_semaphore_group {
     size_t _total_weight;
     size_t _max_concurrent_reads;
     size_t _max_queue_length;
+    utils::updateable_value<uint32_t> _serialize_limit_multiplier;
+    utils::updateable_value<uint32_t> _kill_limit_multiplier;
+
     friend class database_test;
 
     struct weighted_reader_concurrency_semaphore {
         size_t weight;
         ssize_t memory_share;
         reader_concurrency_semaphore sem;
-        weighted_reader_concurrency_semaphore(size_t shares, int count, sstring name, size_t max_queue_length)
+        weighted_reader_concurrency_semaphore(size_t shares, int count, sstring name, size_t max_queue_length,
+                utils::updateable_value<uint32_t> serialize_limit_multiplier,
+                utils::updateable_value<uint32_t> kill_limit_multiplier)
                 : weight(shares)
                 , memory_share(0)
-                , sem(count, 0, name, max_queue_length) {}
+                , sem(count, 0, name, max_queue_length, std::move(serialize_limit_multiplier), std::move(kill_limit_multiplier)) {}
     };
 
     std::unordered_map<scheduling_group, weighted_reader_concurrency_semaphore> _semaphores;
@@ -41,11 +46,15 @@ class reader_concurrency_semaphore_group {
     future<> change_weight(weighted_reader_concurrency_semaphore& sem, size_t new_weight);
 
 public:
-    reader_concurrency_semaphore_group(size_t memory, size_t max_concurrent_reads, size_t max_queue_length)
+    reader_concurrency_semaphore_group(size_t memory, size_t max_concurrent_reads, size_t max_queue_length,
+            utils::updateable_value<uint32_t> serialize_limit_multiplier,
+            utils::updateable_value<uint32_t> kill_limit_multiplier)
             : _total_memory(memory)
             , _total_weight(0)
             , _max_concurrent_reads(max_concurrent_reads)
             ,  _max_queue_length(max_queue_length)
+            , _serialize_limit_multiplier(std::move(serialize_limit_multiplier))
+            , _kill_limit_multiplier(std::move(kill_limit_multiplier))
             , _operations_serializer(1) { }
 
     ~reader_concurrency_semaphore_group() {

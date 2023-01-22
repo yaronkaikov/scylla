@@ -107,6 +107,7 @@ cql_test_config::cql_test_config(shared_ptr<db::config> cfg)
     db_config->add_per_partition_rate_limit_extension();
 
     db_config->flush_schema_tables_after_modification.set(false);
+    db_config->commitlog_use_o_dsync(false);
 }
 
 cql_test_config::cql_test_config(const cql_test_config&) = default;
@@ -494,6 +495,12 @@ public:
                 debug::the_database = nullptr;
             });
             auto cfg = cfg_in.db_config;
+            if (!cfg->reader_concurrency_semaphore_serialize_limit_multiplier.is_set()) {
+                cfg->reader_concurrency_semaphore_serialize_limit_multiplier.set(std::numeric_limits<uint32_t>::max());
+            }
+            if (!cfg->reader_concurrency_semaphore_kill_limit_multiplier.is_set()) {
+                cfg->reader_concurrency_semaphore_kill_limit_multiplier.set(std::numeric_limits<uint32_t>::max());
+            }
             tmpdir data_dir;
             auto data_dir_path = data_dir.path().string();
             if (!cfg->data_file_directories.is_set()) {
@@ -979,10 +986,4 @@ cql_test_config raft_cql_test_config() {
     cql_test_config c;
     c.db_config->consistent_cluster_management(true);
     return c;
-}
-
-namespace debug {
-
-seastar::sharded<replica::database>* the_database;
-
 }

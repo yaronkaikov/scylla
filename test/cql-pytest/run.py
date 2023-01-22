@@ -206,6 +206,7 @@ def run_scylla_cmd(pid, dir):
         '--max-networking-io-control-blocks', '100',
         '--unsafe-bypass-fsync', '1',
         '--kernel-page-cache', '1',
+        '--commitlog-use-o-dsync', '0',
         '--flush-schema-tables-after-modification', 'false',
         '--api-address', ip,
         '--rpc-address', ip,
