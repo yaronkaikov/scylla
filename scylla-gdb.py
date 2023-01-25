@@ -2066,7 +2066,12 @@ class scylla_memory(gdb.Command):
 
     @staticmethod
     def format_semaphore_stats(semaphore):
-        semaphore_name = "{} sstable reads:".format(str(semaphore['_name'])[1:-1].split("_")[1])
+        exploded_name = str(semaphore['_name'])[1:-1].split("_")
+        if exploded_name[0] == '':
+            short_name = exploded_name[1]
+        else:
+            short_name = exploded_name[0]
+        semaphore_name = "{} sstable reads:".format(short_name)
         initial_count = int(semaphore["_initial_resources"]["count"])
         initial_memory = int(semaphore["_initial_resources"]["memory"])
         used_count = initial_count - int(semaphore["_resources"]["count"])
@@ -2084,17 +2089,15 @@ class scylla_memory(gdb.Command):
             return
 
         per_service_level_sem = []
-        for sem in [weighted_sem["sem"] for (name, weighted_sem) in unordered_map(db["_reader_concurrency_semaphores_group"]["_semaphores"])]:
-            per_service_level_sem.append(weighted_sem.sem)
-            
+        for sg, sem in unordered_map(db["_reader_concurrency_semaphores_group"]["_semaphores"]):
+            per_service_level_sem.append(scylla_memory.format_semaphore_stats(sem["sem"]))
+
         database_typename = lookup_type(['replica::database', 'database'])[1].name
         gdb.write('Replica:\n')
         gdb.write('  Read Concurrency Semaphores:\n    {}\n    {}\n    {}\n'.format(
-                scylla_memory.format_semaphore_stats(db['_read_concurrency_sem']),
+                '\n    '.join(per_service_level_sem),
                 scylla_memory.format_semaphore_stats(db['_streaming_concurrency_sem']),
                 scylla_memory.format_semaphore_stats(db['_system_read_concurrency_sem'])))
-        for sem in per_service_level_sem:
-            gdb.write('    {}\n'.format(sem))
 
         gdb.write('  Execution Stages:\n')
         for es_path in [('_apply_stage',)]:
