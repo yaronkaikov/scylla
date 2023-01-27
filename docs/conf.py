@@ -11,18 +11,19 @@ sys.path.insert(0, os.path.abspath(".."))
 
 # -- Global variables
 
+# Set the base URL for the documentation site.
 BASE_URL = 'https://enterpise.docs.scylladb.com'
-# Build documentation for the following tags and branches
+# Build documentation for the following tags and branches.
 TAGS = []
 BRANCHES = ["enterprise"]
 # Set the latest version.
 LATEST_VERSION = "enterprise"
 # Set which versions are not released yet.
 UNSTABLE_VERSIONS = ["enterprise"]
-# Set which versions are deprecated
+# Set which versions are deprecated.
 DEPRECATED_VERSIONS = [""]
-# Set to enterprise or opensource
-TAGS = ["enterprise"]
+# Set to enterprise or opensource.
+FLAGS = ["enterprise"]
 
 # -- General configuration ------------------------------------------------
 
@@ -57,15 +58,15 @@ exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'lib', 'lib64','**/_comm
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = "sphinx"
 
-# List of substitutions
+# List of substitutions.
 rst_prolog = """
 .. |mon_root| replace::  `Scylla Monitoring Stack <https://monitoring.docs.scylladb.com>`__
 .. |cql-version| replace:: 3.3.1
 """
 
-# Add tags to the project
-for tag in TAGS:
-    tags.add(tag)
+# Add tags to the project.
+for flag in FLAGS:
+    tags.add(flag)
 
 # -- Options for not found extension ---------------------------------------
 
