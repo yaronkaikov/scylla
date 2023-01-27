@@ -106,15 +106,15 @@ html_theme = "sphinx_scylladb_theme"
 # documentation.
 html_theme_options = {
     "conf_py_path": "docs/",
-    "hide_edit_this_page_button": "false",
+    "hide_edit_this_page_button": "true",
     "github_issues_repository": "scylladb/scylladb",
-    "github_repository": "scylladb/scylladb",
+    "github_repository": "scylladb/scylla-enterprise",
     "versions_unstable": UNSTABLE_VERSIONS,
     "versions_deprecated": DEPRECATED_VERSIONS,
     'banner_button_text': 'Say Hello',
     'banner_button_url': 'https://forum.scylladb.com/t/say-hello-how-are-you-using-scylladb/35/4',
     'banner_title_text': 'Check out our new community forum!',
-    'hide_banner': 'false',
+    'hide_banner': 'true',
     "collapse_navigation": 'true',
 }
 
