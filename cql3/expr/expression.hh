@@ -365,7 +365,6 @@ untyped_constant make_untyped_null();
 // Represents a constant value with known value and type
 // For null and unset the type can sometimes be set to empty_type
 struct constant {
-    // A value serialized using the internal (latest) cql_serialization_format
     cql3::raw_value value;
 
     // Never nullptr, for NULL and UNSET might be empty_type
@@ -373,7 +372,6 @@ struct constant {
 
     constant(cql3::raw_value value, data_type type);
     static constant make_null(data_type val_type = empty_type);
-    static constant make_unset_value(data_type val_type = empty_type);
     static constant make_bool(bool bool_val);
 
     bool is_null() const;
@@ -694,7 +692,7 @@ std::optional<expression> try_prepare_expression(const expression& expr, data_di
 
 // Prepares a binary operator received from the parser.
 // Does some basic type checks but no advanced validation.
-extern binary_operator prepare_binary_operator(binary_operator binop, data_dictionary::database db, schema_ptr schema);
+extern binary_operator prepare_binary_operator(binary_operator binop, data_dictionary::database db, const schema& table_schema);
 
 
 /**
@@ -738,8 +736,8 @@ cql3::raw_value evaluate(const expression& e, const evaluation_inputs&);
 
 cql3::raw_value evaluate(const expression& e, const query_options&);
 
-utils::chunked_vector<managed_bytes> get_list_elements(const cql3::raw_value&);
-utils::chunked_vector<managed_bytes> get_set_elements(const cql3::raw_value&);
+utils::chunked_vector<managed_bytes_opt> get_list_elements(const cql3::raw_value&);
+utils::chunked_vector<managed_bytes_opt> get_set_elements(const cql3::raw_value&);
 std::vector<managed_bytes_opt> get_tuple_elements(const cql3::raw_value&, const abstract_type& type);
 std::vector<managed_bytes_opt> get_user_type_elements(const cql3::raw_value&, const abstract_type& type);
 std::vector<std::pair<managed_bytes, managed_bytes>> get_map_elements(const cql3::raw_value&);

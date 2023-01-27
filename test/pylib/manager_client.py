@@ -9,7 +9,8 @@
    Manages driver refresh when cluster is cycled.
 """
 
-from typing import List, Optional, Callable, NamedTuple, Any
+from typing import List, Optional, Callable, Any
+from time import time
 import logging
 from test.pylib.rest_client import UnixRESTClient, ScyllaRESTAPIClient
 from test.pylib.util import wait_for
@@ -76,7 +77,7 @@ class ManagerClient():
         if dirty:
             self.driver_close()  # Close driver connection to old cluster
         try:
-            cluster_str = await self.client.get_text(f"/cluster/before-test/{test_case_name}")
+            cluster_str = await self.client.get_text(f"/cluster/before-test/{test_case_name}", timeout=600)
             logger.info(f"Using cluster: {cluster_str} for test {test_case_name}")
         except aiohttp.ClientError as exc:
             raise RuntimeError(f"Failed before test check {exc}") from exc
@@ -117,7 +118,7 @@ class ManagerClient():
         except RuntimeError as exc:
             raise Exception("Failed to get list of running servers") from exc
         assert isinstance(server_info_list, list), "running_servers got unknown data type"
-        return [ServerInfo(ServerNum(int(info[0])), IPAddress(info[1]))
+        return [ServerInfo(ServerNum(int(info[0])), IPAddress(info[1]), HostID(info[2]))
                 for info in server_info_list]
 
     async def mark_dirty(self) -> None:
@@ -160,7 +161,8 @@ class ManagerClient():
             raise Exception("Failed to add server") from exc
         try:
             s_info = ServerInfo(ServerNum(int(server_info["server_id"])),
-                                IPAddress(server_info["ip_addr"]))
+                                IPAddress(server_info["ip_addr"]),
+                                HostID(server_info["host_id"]))
         except Exception as exc:
             raise RuntimeError(f"server_add got invalid server data {server_info}") from exc
         logger.debug("ManagerClient added %s", s_info)

@@ -21,9 +21,6 @@ sets::setter::execute(mutation& m, const clustering_key_prefix& row_key, const u
 
 void
 sets::setter::execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params, const column_definition& column, const cql3::raw_value& value) {
-    if (value.is_unset_value()) {
-        return;
-    }
     if (column.type->is_multi_cell()) {
         // Delete all cells first, then add new ones
         collection_mutation_description mut;
@@ -36,9 +33,6 @@ sets::setter::execute(mutation& m, const clustering_key_prefix& row_key, const u
 void
 sets::adder::execute(mutation& m, const clustering_key_prefix& row_key, const update_parameters& params) {
     const cql3::raw_value value = expr::evaluate(*_e, params._options);
-    if (value.is_unset_value()) {
-        return;
-    }
     assert(column.type->is_multi_cell()); // "Attempted to add items to a frozen set";
     do_add(m, row_key, params, value, column);
 }
@@ -52,7 +46,7 @@ sets::adder::do_add(mutation& m, const clustering_key_prefix& row_key, const upd
             return;
         }
 
-        utils::chunked_vector<managed_bytes> set_elements = expr::get_set_elements(value);
+        utils::chunked_vector<managed_bytes_opt> set_elements = expr::get_set_elements(value);
 
         if (set_elements.empty()) {
             return;
@@ -62,12 +56,18 @@ sets::adder::do_add(mutation& m, const clustering_key_prefix& row_key, const upd
         collection_mutation_description mut;
 
         for (auto&& e : set_elements) {
-            mut.cells.emplace_back(to_bytes(e), params.make_cell(*set_type.value_comparator(), bytes_view(), atomic_cell::collection_member::yes));
+            if (!e) {
+                throw exceptions::invalid_request_exception("Invalid NULL value in set");
+            }
+            mut.cells.emplace_back(to_bytes(*e), params.make_cell(*set_type.value_comparator(), bytes_view(), atomic_cell::collection_member::yes));
         }
 
         m.set_cell(row_key, column, mut.serialize(set_type));
     } else if (!value.is_null()) {
         // for frozen sets, we're overwriting the whole cell
+        value.view().with_value([&] (const FragmentedView auto& v) {
+            set_type.validate_for_storage(v);
+        });
         m.set_cell(row_key, column, params.make_cell(*column.type, value.view()));
     } else {
         m.set_cell(row_key, column, params.make_dead_cell());
@@ -79,15 +79,18 @@ sets::discarder::execute(mutation& m, const clustering_key_prefix& row_key, cons
     assert(column.type->is_multi_cell()); // "Attempted to remove items from a frozen set";
 
     cql3::raw_value svalue = expr::evaluate(*_e, params._options);
-    if (svalue.is_null_or_unset()) {
+    if (svalue.is_null()) {
         return;
     }
 
     collection_mutation_description mut;
-    utils::chunked_vector<managed_bytes> set_elements = expr::get_set_elements(svalue);
+    utils::chunked_vector<managed_bytes_opt> set_elements = expr::get_set_elements(svalue);
     mut.cells.reserve(set_elements.size());
     for (auto&& e : set_elements) {
-        mut.cells.push_back({to_bytes(e), params.make_dead_cell()});
+        if (!e) {
+            throw exceptions::invalid_request_exception("Invalid NULL value in set");
+        }
+        mut.cells.push_back({to_bytes(*e), params.make_dead_cell()});
     }
     m.set_cell(row_key, column, mut.serialize(*column.type));
 }

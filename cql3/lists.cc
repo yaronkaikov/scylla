@@ -37,9 +37,6 @@ lists::setter::execute(mutation& m, const clustering_key_prefix& prefix, const u
 
 void
 lists::setter::execute(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params, const column_definition& column, const cql3::raw_value& value) {
-    if (value.is_unset_value()) {
-        return;
-    }
     if (column.type->is_multi_cell()) {
         // Delete all cells first, then append new ones
         collection_mutation_view_description mut;
@@ -70,13 +67,7 @@ lists::setter_by_index::execute(mutation& m, const clustering_key_prefix& prefix
     if (index.is_null()) {
         throw exceptions::invalid_request_exception("Invalid null value for list index");
     }
-    if (index.is_unset_value()) {
-        throw exceptions::invalid_request_exception("Invalid unset value for list index");
-    }
     auto value = expr::evaluate(*_e, params._options);
-    if (value.is_unset_value()) {
-        return;
-    }
 
     auto idx = index.view().deserialize<int32_t>(*int32_type);
     auto&& existing_list_opt = params.get_prefetched_list(m.key(), prefix, column);
@@ -122,10 +113,6 @@ lists::setter_by_uuid::execute(mutation& m, const clustering_key_prefix& prefix,
         throw exceptions::invalid_request_exception("Invalid null value for list index");
     }
 
-    if (index.is_unset_value()) {
-        throw exceptions::invalid_request_exception("Invalid unset value for list index");
-    }
-
     auto ltype = static_cast<const list_type_impl*>(column.type.get());
 
     collection_mutation_description mut;
@@ -145,9 +132,6 @@ lists::setter_by_uuid::execute(mutation& m, const clustering_key_prefix& prefix,
 void
 lists::appender::execute(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params) {
     const cql3::raw_value value = expr::evaluate(*_e, params._options);
-    if (value.is_unset_value()) {
-        return;
-    }
     assert(column.type->is_multi_cell()); // "Attempted to append to a frozen list";
     do_append(value, m, prefix, column, params);
 }
@@ -161,7 +145,7 @@ lists::do_append(const cql3::raw_value& list_value,
     if (column.type->is_multi_cell()) {
         // If we append null, do nothing. Note that for Setter, we've
         // already removed the previous value so we're good here too
-        if (list_value.is_null_or_unset()) {
+        if (list_value.is_null()) {
             return;
         }
 
@@ -176,20 +160,27 @@ lists::do_append(const cql3::raw_value& list_value,
                     std::chrono::microseconds{params.timestamp()},
                     params._options.next_list_append_seq());
                 auto uuid = bytes(reinterpret_cast<const int8_t*>(uuid1.data()), uuid1.size());
+                if (!e) {
+                    throw exceptions::invalid_request_exception("Invalid NULL element in list");
+                }
                 // FIXME: can e be empty?
                 appended.cells.emplace_back(
                     std::move(uuid),
-                    params.make_cell(*ltype->value_comparator(), e, atomic_cell::collection_member::yes));
+                    params.make_cell(*ltype->value_comparator(), *e, atomic_cell::collection_member::yes));
             } catch (utils::timeuuid_submicro_out_of_range&) {
                 throw exceptions::invalid_request_exception("Too many list values per single CQL statement or batch");
             }
         }
         m.set_cell(prefix, column, appended.serialize(*ltype));
     } else {
+        auto ltype = static_cast<const list_type_impl*>(column.type.get());
         // for frozen lists, we're overwriting the whole cell value
         if (list_value.is_null()) {
             m.set_cell(prefix, column, params.make_dead_cell());
         } else {
+            list_value.view().with_value([&] (const FragmentedView auto& v) {
+                ltype->validate_for_storage(v);
+            });
             m.set_cell(prefix, column, params.make_cell(*column.type, list_value.view()));
         }
     }
@@ -199,7 +190,7 @@ void
 lists::prepender::execute(mutation& m, const clustering_key_prefix& prefix, const update_parameters& params) {
     assert(column.type->is_multi_cell()); // "Attempted to prepend to a frozen list";
     cql3::raw_value lvalue = expr::evaluate(*_e, params._options);
-    if (lvalue.is_null_or_unset()) {
+    if (lvalue.is_null()) {
         return;
     }
 
@@ -226,7 +217,7 @@ lists::prepender::execute(mutation& m, const clustering_key_prefix& prefix, cons
     }
 
     collection_mutation_description mut;
-    utils::chunked_vector<managed_bytes> list_elements = expr::get_list_elements(lvalue);
+    utils::chunked_vector<managed_bytes_opt> list_elements = expr::get_list_elements(lvalue);
     mut.cells.reserve(list_elements.size());
 
     auto ltype = static_cast<const list_type_impl*>(column.type.get());
@@ -234,7 +225,10 @@ lists::prepender::execute(mutation& m, const clustering_key_prefix& prefix, cons
     for (auto&& v : list_elements) {
         try {
             auto uuid = utils::UUID_gen::get_time_UUID_bytes_from_micros_and_submicros(std::chrono::microseconds{micros}, clockseq++);
-            mut.cells.emplace_back(bytes(uuid.data(), uuid.size()), params.make_cell(*ltype->value_comparator(), v, atomic_cell::collection_member::yes));
+            if (!v) {
+                throw exceptions::invalid_request_exception("Invalid NULL element in list");
+            }
+            mut.cells.emplace_back(bytes(uuid.data(), uuid.size()), params.make_cell(*ltype->value_comparator(), *v, atomic_cell::collection_member::yes));
         } catch (utils::timeuuid_submicro_out_of_range&) {
             throw exceptions::invalid_request_exception("Too many list values per single CQL statement or batch");
         }
@@ -265,7 +259,7 @@ lists::discarder::execute(mutation& m, const clustering_key_prefix& prefix, cons
         return;
     }
 
-    if (lvalue.is_null_or_unset()) {
+    if (lvalue.is_null()) {
         return;
     }
 
@@ -277,10 +271,16 @@ lists::discarder::execute(mutation& m, const clustering_key_prefix& prefix, cons
     // toDiscard will be small and keeping a list will be more efficient.
     auto&& to_discard = expr::get_list_elements(lvalue);
     collection_mutation_description mnew;
+    auto ensure = [] (const managed_bytes_opt& v) {
+        if (!v) {
+            // Note: for discarder operation, we might just ignore NULLs
+            throw exceptions::invalid_request_exception("Invalid NULL value in list");
+        }
+    };
     for (auto&& cell : elist) {
         auto has_value = [&] (bytes_view value) {
             return std::find_if(to_discard.begin(), to_discard.end(),
-                                [ltype, value] (auto&& v) { return ltype->get_elements_type()->equal(v, value); })
+                                [ltype, value, &ensure] (auto&& v) { ensure(v); return ltype->get_elements_type()->equal(*v, value); })
                                          != to_discard.end();
         };
         bytes eidx = cell.first.type()->decompose(cell.first);
@@ -303,9 +303,6 @@ lists::discarder_by_index::execute(mutation& m, const clustering_key_prefix& pre
     cql3::raw_value index = expr::evaluate(*_e, params._options);
     if (index.is_null()) {
         throw exceptions::invalid_request_exception("Invalid null value for list index");
-    }
-    if (index.is_unset_value()) {
-        return;
     }
 
     auto&& existing_list_opt = params.get_prefetched_list(m.key(), prefix, column);

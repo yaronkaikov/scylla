@@ -509,7 +509,9 @@ static void set_from_cli(const char* name, app_template& app, utils::config_file
     }
 }
 
-int main(int argc, char** argv) {
+namespace perf {
+
+int scylla_simple_query_main(int argc, char** argv) {
     namespace bpo = boost::program_options;
     app_template app;
     app.add_options()
@@ -616,3 +618,5 @@ int main(int argc, char** argv) {
         });
     });
 }
+
+} // namespace perf

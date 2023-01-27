@@ -180,18 +180,6 @@ get_value(const subscript& s, const evaluation_inputs& inputs) {
         // not an error.
         return std::nullopt;
     }
-    if (key.is_unset_value()) {
-        // An m[?] with ? bound to UNSET_VALUE is a invalid query.
-        // We could have detected it earlier while binding, but since
-        // we currently don't, we must protect the following code
-        // which can't work with an UNSET_VALUE. Note that the
-        // placement of this check here means that in an empty table,
-        // where we never need to evaluate the filter expression, this
-        // error will not be detected.
-        throw exceptions::invalid_request_exception(
-            format("Unsupported unset map key for column {}",
-                cdef->name_as_text()));
-    }
     if (col_type->is_map()) {
         const auto& data_map = value_cast<map_type_impl::native_type>(deserialized);
         const auto found = key.view().with_linearized([&] (bytes_view key_bv) {
@@ -251,9 +239,6 @@ public:
 /// True iff lhs's value equals rhs.
 bool_or_null equal(const expression& lhs, const managed_bytes_opt& rhs_bytes, const evaluation_inputs& inputs) {
     raw_value lhs_value = evaluate(lhs, inputs);
-    if (lhs_value.is_unset_value()) {
-        throw exceptions::invalid_request_exception("unset value found on left-hand side of an equality operator");
-    }
     if (lhs_value.is_null() || !rhs_bytes.has_value()) {
         return bool_or_null::null();
     }
@@ -269,14 +254,6 @@ static std::optional<std::pair<managed_bytes, managed_bytes>> evaluate_binop_sid
     raw_value lhs_value = evaluate(lhs, inputs);
     raw_value rhs_value = evaluate(rhs, inputs);
 
-    if (lhs_value.is_unset_value()) {
-        throw exceptions::invalid_request_exception(
-            format("unset value found on left-hand side of a binary operator with operation {}", op));
-    }
-    if (rhs_value.is_unset_value()) {
-        throw exceptions::invalid_request_exception(
-            format("unset value found on right-hand side of a binary operator with operation {}", op));
-    }
     if (lhs_value.is_null() || rhs_value.is_null()) {
         return std::nullopt;
     }
@@ -481,8 +458,8 @@ bool_or_null is_one_of(const expression& lhs, const expression& rhs, const evalu
     auto [lhs_bytes, rhs_bytes] = std::move(*sides_bytes);
 
     expression lhs_constant = constant(raw_value::make_value(std::move(lhs_bytes)), type_of(lhs));
-    utils::chunked_vector<managed_bytes> list_elems = get_list_elements(raw_value::make_value(std::move(rhs_bytes)));
-    for (const managed_bytes& elem : list_elems) {
+    utils::chunked_vector<managed_bytes_opt> list_elems = get_list_elements(raw_value::make_value(std::move(rhs_bytes)));
+    for (const managed_bytes_opt& elem : list_elems) {
         if (equal(lhs_constant, elem, evaluation_inputs{}).is_true()) {
             return true;
         }
@@ -492,14 +469,7 @@ bool_or_null is_one_of(const expression& lhs, const expression& rhs, const evalu
 
 bool is_not_null(const expression& lhs, const expression& rhs, const evaluation_inputs& inputs) {
     cql3::raw_value lhs_val = evaluate(lhs, inputs);
-    if (lhs_val.is_unset_value()) {
-        throw exceptions::invalid_request_exception("unset value found on left hand side of IS NOT operator");
-    }
-
     cql3::raw_value rhs_val = evaluate(rhs, inputs);
-    if (rhs_val.is_unset_value()) {
-        throw exceptions::invalid_request_exception("unset value found on right hand side of IS NOT operator");
-    }
     if (!rhs_val.is_null()) {
         throw exceptions::invalid_request_exception("IS NOT operator accepts only NULL as its right side");
     }
@@ -553,9 +523,6 @@ bool is_satisfied_by(const binary_operator& opr, const evaluation_inputs& inputs
 
     if (binop_eval_result.is_null()) {
         return false;
-    }
-    if (binop_eval_result.is_unset_value()) {
-        on_internal_error(expr_logger, format("is_satisfied_by: binary operator evaluated to unset value: {}", opr));
     }
     if (binop_eval_result.is_empty_value()) {
         on_internal_error(expr_logger, format("is_satisfied_by: binary operator evaluated to EMPTY_VALUE: {}", opr));
@@ -644,13 +611,10 @@ value_list get_IN_values(
         const expression& e, const query_options& options, const serialized_compare& comparator,
         sstring_view column_name) {
     const cql3::raw_value in_list = evaluate(e, options);
-    if (in_list.is_unset_value()) {
-        throw exceptions::invalid_request_exception(format("Invalid unset value for column {}", column_name));
-    }
     if (in_list.is_null()) {
         return value_list();
     }
-    utils::chunked_vector<managed_bytes> list_elems = get_list_elements(in_list);
+    utils::chunked_vector<managed_bytes_opt> list_elems = get_list_elements(in_list);
     return to_sorted_vector(std::move(list_elems) | non_null | deref, comparator);
 }
 
@@ -1107,8 +1071,6 @@ std::ostream& operator<<(std::ostream& os, const expression::printer& pr) {
                 } else {
                     if (v.value.is_null()) {
                         os << "null";
-                    } else if (v.value.is_unset_value()) {
-                        os << "unset";
                     } else {
                         v.value.view().with_value([&](const FragmentedView auto& bytes_view) {
                             data_value deser_val = v.type->deserialize(bytes_view);
@@ -1132,7 +1094,7 @@ std::ostream& operator<<(std::ostream& os, const expression::printer& pr) {
                     } else if (opr.op == oper_t::IN && is<constant>(opr.rhs) && as<constant>(opr.rhs).type->without_reversed().is_list()) {
                         tuple_constructor rhs_tuple;
                         const list_type_impl* list_typ = dynamic_cast<const list_type_impl*>(&as<constant>(opr.rhs).type->without_reversed());
-                        for (const managed_bytes& elem : get_list_elements(as<constant>(opr.rhs).value)) {
+                        for (const managed_bytes_opt& elem : get_list_elements(as<constant>(opr.rhs).value)) {
                             rhs_tuple.elements.push_back(constant(raw_value::make_value(elem), list_typ->get_elements_type()));
                         }
                         os << to_printer(opr.lhs) << ' ' << opr.op << ' ' << to_printer(rhs_tuple);
@@ -1618,10 +1580,6 @@ constant constant::make_null(data_type val_type) {
     return constant(cql3::raw_value::make_null(), std::move(val_type));
 }
 
-constant constant::make_unset_value(data_type val_type) {
-    return constant(cql3::raw_value::make_unset_value(), std::move(val_type));
-}
-
 constant constant::make_bool(bool bool_val) {
     return constant(raw_value::make_value(boolean_type->decompose(bool_val)), boolean_type);
 }
@@ -1630,20 +1588,12 @@ bool constant::is_null() const {
     return value.is_null();
 }
 
-bool constant::is_unset_value() const {
-    return value.is_unset_value();
-}
-
 bool constant::has_empty_value_bytes() const {
-    if (is_null_or_unset()) {
+    if (is_null()) {
         return false;
     }
 
     return value.view().size_bytes() == 0;
-}
-
-bool constant::is_null_or_unset() const {
-    return is_null() || is_unset_value();
 }
 
 cql3::raw_value_view constant::view() const {
@@ -1655,7 +1605,7 @@ std::optional<bool> get_bool_value(const constant& constant_val) {
         return std::nullopt;
     }
 
-    if (constant_val.is_null_or_unset()) {
+    if (constant_val.is_null()) {
         return std::nullopt;
     }
 
@@ -1714,7 +1664,7 @@ cql3::raw_value evaluate(const binary_operator& binop, const evaluation_inputs& 
 // NULL is treated as an "unkown value" - maybe true maybe false.
 // `TRUE AND NULL` evaluates to NULL because it might be true but also might be false.
 // `FALSE AND NULL` evaluates to FALSE because no matter what value NULL acts as, the result will still be FALSE.
-// Unset and empty values are not allowed.
+// Empty values are not allowed.
 //
 // Usually in CQL the rule is that when NULL occurs in an operation the whole expression
 // becomes NULL, but here we decided to deviate from this behavior.
@@ -1734,9 +1684,6 @@ cql3::raw_value evaluate(const conjunction& conj, const evaluation_inputs& input
         if (element_val.is_null()) {
             has_null = true;
             continue;
-        }
-        if (element_val.is_unset_value()) {
-            throw exceptions::invalid_request_exception("unset value found inside AND conjunction");
         }
         if (element_val.is_empty_value()) {
             throw exceptions::invalid_request_exception("empty value found inside AND conjunction");
@@ -1811,63 +1758,69 @@ cql3::raw_value evaluate(const expression& e, const query_options& options) {
 // Takes a value and reserializes it where needs_to_be_reserialized() says it's needed
 template <FragmentedView View>
 static managed_bytes reserialize_value(View value_bytes,
-                                       const abstract_type& type,
-                                       const cql_serialization_format& sf) {
+                                       const abstract_type& type) {
     if (type.is_list()) {
-        utils::chunked_vector<managed_bytes> elements = partially_deserialize_listlike(value_bytes, sf);
+        utils::chunked_vector<managed_bytes_opt> elements = partially_deserialize_listlike(value_bytes);
 
         const abstract_type& element_type = dynamic_cast<const list_type_impl&>(type).get_elements_type()->without_reversed();
-        if (element_type.bound_value_needs_to_be_reserialized(sf)) {
-            for (managed_bytes& element : elements) {
-                element = reserialize_value(managed_bytes_view(element), element_type, sf);
+        if (element_type.bound_value_needs_to_be_reserialized()) {
+            for (managed_bytes_opt& element_opt : elements) {
+                if (element_opt) {
+                    element_opt = reserialize_value(managed_bytes_view(*element_opt), element_type);
+                }
             }
         }
 
         return collection_type_impl::pack_fragmented(
             elements.begin(),
             elements.end(),
-            elements.size(), cql_serialization_format::internal()
+            elements.size()
         );
     }
 
     if (type.is_set()) {
-        utils::chunked_vector<managed_bytes> elements = partially_deserialize_listlike(value_bytes, sf);
+        utils::chunked_vector<managed_bytes_opt> elements = partially_deserialize_listlike(value_bytes);
 
         const abstract_type& element_type = dynamic_cast<const set_type_impl&>(type).get_elements_type()->without_reversed();
-        if (element_type.bound_value_needs_to_be_reserialized(sf)) {
-            for (managed_bytes& element : elements) {
-                element = reserialize_value(managed_bytes_view(element), element_type, sf);
+        if (element_type.bound_value_needs_to_be_reserialized()) {
+            for (managed_bytes_opt& element_opt : elements) {
+                if (element_opt) {
+                    element_opt = reserialize_value(managed_bytes_view(*element_opt), element_type);
+                }
             }
         }
 
         std::set<managed_bytes, serialized_compare> values_set(element_type.as_less_comparator());
-        for (managed_bytes& element : elements) {
-            values_set.emplace(std::move(element));
+        for (managed_bytes_opt& element_opt : elements) {
+            if (!element_opt) {
+                throw exceptions::invalid_request_exception("Invalid NULL value in set");
+            }
+            values_set.emplace(std::move(*element_opt));
         }
 
         return collection_type_impl::pack_fragmented(
             values_set.begin(),
             values_set.end(),
-            values_set.size(), cql_serialization_format::internal()
+            values_set.size()
         );
     }
 
     if (type.is_map()) {
-        std::vector<std::pair<managed_bytes, managed_bytes>> elements = partially_deserialize_map(value_bytes, sf);
+        std::vector<std::pair<managed_bytes, managed_bytes>> elements = partially_deserialize_map(value_bytes);
 
         const map_type_impl mapt = dynamic_cast<const map_type_impl&>(type);
         const abstract_type& key_type = mapt.get_keys_type()->without_reversed();
         const abstract_type& value_type = mapt.get_values_type()->without_reversed();
 
-        if (key_type.bound_value_needs_to_be_reserialized(sf)) {
+        if (key_type.bound_value_needs_to_be_reserialized()) {
             for (std::pair<managed_bytes, managed_bytes>& element : elements) {
-                element.first = reserialize_value(managed_bytes_view(element.first), key_type, sf);
+                element.first = reserialize_value(managed_bytes_view(element.first), key_type);
             }
         }
 
-        if (value_type.bound_value_needs_to_be_reserialized(sf)) {
+        if (value_type.bound_value_needs_to_be_reserialized()) {
             for (std::pair<managed_bytes, managed_bytes>& element : elements) {
-                element.second = reserialize_value(managed_bytes_view(element.second), value_type, sf);
+                element.second = reserialize_value(managed_bytes_view(element.second), value_type);
             }
         }
 
@@ -1885,8 +1838,8 @@ static managed_bytes reserialize_value(View value_bytes,
 
         for (std::size_t i = 0; i < elements.size(); i++) {
             const abstract_type& element_type = ttype.all_types().at(i)->without_reversed();
-            if (elements[i].has_value() && element_type.bound_value_needs_to_be_reserialized(sf)) {
-                elements[i] = reserialize_value(managed_bytes_view(*elements[i]), element_type, sf);
+            if (elements[i].has_value() && element_type.bound_value_needs_to_be_reserialized()) {
+                elements[i] = reserialize_value(managed_bytes_view(*elements[i]), element_type);
             }
         }
 
@@ -1909,21 +1862,17 @@ static cql3::raw_value evaluate(const bind_variable& bind_var, const evaluation_
         return cql3::raw_value::make_null();
     }
 
-    if (value.is_unset_value()) {
-        return cql3::raw_value::make_unset_value();
-    }
-
     const abstract_type& value_type = bind_var.receiver->type->without_reversed();
     try {
-        value.validate(value_type, inputs.options->get_cql_serialization_format());
+        value.validate(value_type);
     } catch (const marshal_exception& e) {
         throw exceptions::invalid_request_exception(format("Exception while binding column {:s}: {:s}",
                                                            bind_var.receiver->name->to_cql_string(), e.what()));
     }
 
-    if (value_type.bound_value_needs_to_be_reserialized(inputs.options->get_cql_serialization_format())) {
+    if (value_type.bound_value_needs_to_be_reserialized()) {
         managed_bytes new_value = value.with_value([&] (const FragmentedView auto& value_bytes) {
-            return reserialize_value(value_bytes, value_type, inputs.options->get_cql_serialization_format());
+            return reserialize_value(value_bytes, value_type);
         });
 
         return raw_value::make_value(std::move(new_value));
@@ -1943,10 +1892,6 @@ static cql3::raw_value evaluate(const tuple_constructor& tuple, const evaluation
 
     for (size_t i = 0; i < tuple.elements.size(); i++) {
         cql3::raw_value elem_val = evaluate(tuple.elements[i], inputs);
-        if (elem_val.is_unset_value()) {
-            throw exceptions::invalid_request_exception(format("Invalid unset value for tuple field number {:d}", i));
-        }
-
         tuple_elements.emplace_back(std::move(elem_val).to_managed_bytes_opt());
     }
 
@@ -1958,50 +1903,40 @@ static cql3::raw_value evaluate(const tuple_constructor& tuple, const evaluation
 
 // Range of managed_bytes
 template <typename Range>
-requires requires (Range listlike_range) { {*listlike_range.begin()} -> std::convertible_to<const managed_bytes&>; }
+requires requires (Range listlike_range) { {*listlike_range.begin()} -> std::convertible_to<const managed_bytes_opt&>; }
 static managed_bytes serialize_listlike(const Range& elements, const char* collection_name) {
     if (elements.size() > std::numeric_limits<int32_t>::max()) {
         throw exceptions::invalid_request_exception(fmt::format("{} size too large: {} > {}",
             collection_name, elements.size(), std::numeric_limits<int32_t>::max()));
     }
 
-    for (const managed_bytes& element : elements) {
+    for (const managed_bytes_opt& element_opt : elements) {
+      if (element_opt) {
+        auto& element = *element_opt;
         if (element.size() > std::numeric_limits<int32_t>::max()) {
             throw exceptions::invalid_request_exception(fmt::format("{} element size too large: {} bytes > {}",
                 collection_name, elements.size(), std::numeric_limits<int32_t>::max()));
         }
+      }
     }
 
     return collection_type_impl::pack_fragmented(
         elements.begin(),
         elements.end(),
-        elements.size(),
-        cql_serialization_format::internal()
+        elements.size()
     );
 }
 
 static cql3::raw_value evaluate_list(const collection_constructor& collection,
                               const evaluation_inputs& inputs,
                               bool skip_null = false) {
-    std::vector<managed_bytes> evaluated_elements;
+    std::vector<managed_bytes_opt> evaluated_elements;
     evaluated_elements.reserve(collection.elements.size());
 
     for (const expression& element : collection.elements) {
         cql3::raw_value evaluated_element = evaluate(element, inputs);
 
-        if (evaluated_element.is_unset_value()) {
-            throw exceptions::invalid_request_exception("unset value is not supported inside collections");
-        }
-
-        if (evaluated_element.is_null()) {
-            if (skip_null) {
-                continue;
-            }
-
-            throw exceptions::invalid_request_exception("null is not supported inside collections");
-        }
-
-        evaluated_elements.emplace_back(std::move(evaluated_element).to_managed_bytes());
+        evaluated_elements.emplace_back(std::move(evaluated_element).to_managed_bytes_opt());
     }
 
     managed_bytes collection_bytes = serialize_listlike(evaluated_elements, "List");
@@ -2017,10 +1952,6 @@ static cql3::raw_value evaluate_set(const collection_constructor& collection, co
 
         if (evaluated_element.is_null()) {
             throw exceptions::invalid_request_exception("null is not supported inside collections");
-        }
-
-        if (evaluated_element.is_unset_value()) {
-            throw exceptions::invalid_request_exception("unset value is not supported inside collections");
         }
 
         if (evaluated_element.view().size_bytes() > std::numeric_limits<uint16_t>::max()) {
@@ -2051,10 +1982,6 @@ static cql3::raw_value evaluate_map(const collection_constructor& collection, co
 
             if (key.is_null() || value.is_null()) {
                 throw exceptions::invalid_request_exception("null is not supported inside collections");
-            }
-
-            if (key.is_unset_value() || value.is_unset_value()) {
-                throw exceptions::invalid_request_exception("unset value is not supported inside collections");
             }
 
             if (key.view().size_bytes() > std::numeric_limits<uint16_t>::max()) {
@@ -2130,10 +2057,6 @@ static cql3::raw_value evaluate(const usertype_constructor& user_val, const eval
         }
 
         cql3::raw_value field_val = evaluate(cur_field->second, inputs);
-        if (field_val.is_unset_value()) {
-            throw exceptions::invalid_request_exception(format(
-                "Invalid unset value for field '{}' of user defined type ", utype.field_name_as_string(i)));
-        }
 
         field_values.emplace_back(std::move(field_val).to_managed_bytes_opt());
     }
@@ -2159,8 +2082,8 @@ static cql3::raw_value evaluate(const function_call& fun_call, const evaluation_
 
     for (const expression& arg : fun_call.args) {
         cql3::raw_value arg_val = evaluate(arg, inputs);
-        if (arg_val.is_null_or_unset()) {
-            throw exceptions::invalid_request_exception(format("Invalid null or unset value for argument to {}", *scalar_fun));
+        if (arg_val.is_null()) {
+            throw exceptions::invalid_request_exception(format("Invalid null value for argument to {}", *scalar_fun));
         }
 
         arguments.emplace_back(to_bytes_opt(std::move(arg_val)));
@@ -2175,7 +2098,7 @@ static cql3::raw_value evaluate(const function_call& fun_call, const evaluation_
         }
     }
 
-    bytes_opt result = scalar_fun->execute(cql_serialization_format::internal(), arguments);
+    bytes_opt result = scalar_fun->execute(arguments);
 
     if (has_cache_id) {
         inputs.options->cache_pk_function_call(**fun_call.lwt_cache_id, result);
@@ -2186,7 +2109,7 @@ static cql3::raw_value evaluate(const function_call& fun_call, const evaluation_
     }
 
     try {
-        scalar_fun->return_type()->validate(*result, cql_serialization_format::internal());
+        scalar_fun->return_type()->validate(*result);
     } catch (marshal_exception&) {
         throw runtime_exception(format("Return of function {} ({}) is not a valid value for its declared return type {}",
                                        *scalar_fun, to_hex(result),
@@ -2202,25 +2125,21 @@ static void ensure_can_get_value_elements(const cql3::raw_value& val,
     if (val.is_null()) {
         on_internal_error(expr_logger, fmt::format("{} called with null value", caller_name));
     }
-
-    if (val.is_unset_value()) {
-        on_internal_error(expr_logger, fmt::format("{} called with unset value", caller_name));
-    }
 }
 
-utils::chunked_vector<managed_bytes> get_list_elements(const cql3::raw_value& val) {
+utils::chunked_vector<managed_bytes_opt> get_list_elements(const cql3::raw_value& val) {
     ensure_can_get_value_elements(val, "expr::get_list_elements");
 
     return val.view().with_value([](const FragmentedView auto& value_bytes) {
-        return partially_deserialize_listlike(value_bytes, cql_serialization_format::internal());
+        return partially_deserialize_listlike(value_bytes);
     });
 }
 
-utils::chunked_vector<managed_bytes> get_set_elements(const cql3::raw_value& val) {
+utils::chunked_vector<managed_bytes_opt> get_set_elements(const cql3::raw_value& val) {
     ensure_can_get_value_elements(val, "expr::get_set_elements");
 
     return val.view().with_value([](const FragmentedView auto& value_bytes) {
-        return partially_deserialize_listlike(value_bytes, cql_serialization_format::internal());
+        return partially_deserialize_listlike(value_bytes);
     });
 }
 
@@ -2228,7 +2147,7 @@ std::vector<std::pair<managed_bytes, managed_bytes>> get_map_elements(const cql3
     ensure_can_get_value_elements(val, "expr::get_map_elements");
 
     return val.view().with_value([](const FragmentedView auto& value_bytes) {
-        return partially_deserialize_map(value_bytes, cql_serialization_format::internal());
+        return partially_deserialize_map(value_bytes);
     });
 }
 
@@ -2250,7 +2169,7 @@ std::vector<managed_bytes_opt> get_user_type_elements(const cql3::raw_value& val
     });
 }
 
-static std::vector<managed_bytes_opt> convert_listlike(utils::chunked_vector<managed_bytes>&& elements) {
+static std::vector<managed_bytes_opt> convert_listlike(utils::chunked_vector<managed_bytes_opt>&& elements) {
     return std::vector<managed_bytes_opt>(std::make_move_iterator(elements.begin()),
                                           std::make_move_iterator(elements.end()));
 }
@@ -2277,15 +2196,20 @@ std::vector<managed_bytes_opt> get_elements(const cql3::raw_value& val, const ab
 }
 
 utils::chunked_vector<std::vector<managed_bytes_opt>> get_list_of_tuples_elements(const cql3::raw_value& val, const abstract_type& type) {
-    utils::chunked_vector<managed_bytes> elements = get_list_elements(val);
+    utils::chunked_vector<managed_bytes_opt> elements = get_list_elements(val);
     const list_type_impl& list_typ = dynamic_cast<const list_type_impl&>(type.without_reversed());
     const tuple_type_impl& tuple_typ = dynamic_cast<const tuple_type_impl&>(*list_typ.get_elements_type());
 
     utils::chunked_vector<std::vector<managed_bytes_opt>> tuples_list;
     tuples_list.reserve(elements.size());
 
-    for (managed_bytes& element : elements) {
-        std::vector<managed_bytes_opt> cur_tuple = tuple_typ.split_fragmented(managed_bytes_view(element));
+    for (managed_bytes_opt& element : elements) {
+        if (!element) {
+            // Note: just skipping would also be okay here, for our caller (maybe
+            //       even better, but leaving that for later)
+            throw exceptions::invalid_request_exception("Invalid NULL tuple in list of tuples");
+        }
+        std::vector<managed_bytes_opt> cur_tuple = tuple_typ.split_fragmented(managed_bytes_view(*element));
         tuples_list.emplace_back(std::move(cur_tuple));
     }
 
@@ -2603,5 +2527,29 @@ bool has_only_eq_binops(const expression& e) {
 
     return non_eq_binop == nullptr;
 }
+
+unset_bind_variable_guard::unset_bind_variable_guard(const expr::expression& e) {
+    if (auto bv = expr::as_if<expr::bind_variable>(&e)) {
+        _var = *bv;
+    }
+}
+
+unset_bind_variable_guard::unset_bind_variable_guard(const std::optional<expr::expression>& e) {
+    if (!e) {
+        return;
+    }
+    if (auto bv = expr::as_if<expr::bind_variable>(&*e)) {
+        _var = *bv;
+    }
+}
+
+bool
+unset_bind_variable_guard::is_unset(const query_options& qo) const {
+    if (!_var) {
+        return false;
+    }
+    return qo.is_unset(_var->bind_index);
+}
+
 } // namespace expr
 } // namespace cql3

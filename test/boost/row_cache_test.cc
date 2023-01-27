@@ -3952,6 +3952,92 @@ SEASTAR_TEST_CASE(test_scans_erase_dummies) {
 }
 
 
+// Tests the following scenario:
+//
+// Initial state:
+//
+//   v2: ==== <7> [entry2] ==== <9> === <13> ==== <last dummy>
+//   v1: ======================================== <last dummy> [entry1]
+//
+// After two eviction events which evict entry1 and entry2, we should end up with:
+//
+//   v2: ---------------------- <9> === <13> ==== <last dummy>
+//   v1: ---------------------------------------- <last dummy>
+//
+// last dummy entries are treated in a special way in rows_entry::on_evicted(), and there
+// was a bug which didn't clear the continuity on last dummy when it was selected for eviction.
+// As a result, the view was this:
+//
+//   v2: ---------------------- <9> === <13> ==== <last dummy>
+//   v1: ======================================== <last dummy>
+//
+// This would violate the "older versions are evicted first" rule, which implies
+// that when entry2 is evicted in v2, the range in which entry2 falls into in all older versions
+// must be discontinuous. This won't hold if we don't clear continuity on last dummy in v1.
+// As a result, the range into which entry2 falls into from the perspective of v2 snapshot
+// would appear as continuous and <7> would be missing from the read result, because
+// continuity of a snapshot is a union of continuous ranges in all versions.
+//
+// Reproduces https://github.com/scylladb/scylladb/issues/12451
+SEASTAR_TEST_CASE(test_version_merging_with_range_tombstones_over_rowless_version) {
+    return seastar::async([] {
+        simple_schema s;
+        tests::reader_concurrency_semaphore_wrapper semaphore;
+
+        auto pkey = s.make_pkey("pk");
+        auto pr = dht::partition_range::make_singular(pkey);
+
+        memtable_snapshot_source underlying(s.schema());
+
+        mutation m1(s.schema(), pkey);
+        m1.partition().apply(s.new_tombstone());
+        underlying.apply(m1);
+
+        cache_tracker tracker;
+        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+
+        // Populate cache
+        assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr))
+                .produces(m1);
+
+        mutation m2(s.schema(), pkey);
+        s.delete_range(m2, s.make_ckey_range(7, 13));
+        s.add_row(m2, s.make_ckey(7), "v");
+        s.delete_range(m2, s.make_ckey_range(9, 17));
+        s.add_row(m2, s.make_ckey(9), "v");
+        s.add_row(m2, s.make_ckey(17), "v");
+
+        {
+            auto rd1 = cache.make_reader(s.schema(), semaphore.make_permit(), pr);
+            auto close_rd1 = deferred_close(rd1);
+            rd1.set_max_buffer_size(1); // To hold the snapshot
+            rd1.fill_buffer().get();
+
+            apply(cache, underlying, m2);
+
+            evict_one_row(tracker); // hits last dummy in oldest version.
+
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr))
+                    .produces(m1 + m2);
+
+            evict_one_row(tracker); // hits entry in the latest version, row (v1) or rtc (v2)
+
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr))
+                    .produces(m1 + m2);
+
+            evict_one_row(tracker); // hits entry in the latest version, row (both v1 and v2)
+
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr))
+                    .produces(m1 + m2);
+        }
+
+        tracker.cleaner().drain().get();
+
+        assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr))
+                .produces(m1 + m2);
+    });
+}
+
 SEASTAR_TEST_CASE(row_cache_is_populated_using_compacting_sstable_reader) {
     return do_with_cql_env_thread([](cql_test_env& env) {
         replica::database& db = env.local_db();
@@ -4083,4 +4169,53 @@ SEASTAR_TEST_CASE(test_eviction_of_upper_bound_of_population_range) {
 
         read(0, 3);
     });
+}
+
+SEASTAR_TEST_CASE(test_reading_of_nonfull_keys) {
+        return seastar::async([] {
+            schema_ptr s = schema_builder("ks", "cf")
+                    .with_column("pk", utf8_type, column_kind::partition_key)
+                    .with_column("ck1", utf8_type, column_kind::clustering_key)
+                    .with_column("ck2", utf8_type, column_kind::clustering_key)
+                    .with_column("v", utf8_type)
+                    .build();
+
+            auto pkey = dht::decorate_key(*s, partition_key::from_single_value(*s, serialized("pk1")));
+
+            auto make_ck = [&] (sstring ck1, std::optional<sstring> ck2 = {}) {
+                if (ck2) {
+                    return clustering_key::from_exploded(*s, {serialized(ck1), serialized(*ck2)});
+                }
+                return clustering_key::from_exploded(*s, {serialized(ck1)});
+            };
+
+            auto prefix_a = make_ck("a");
+            auto full_a = prefix_a;
+            clustering_key::make_full(*s, full_a);
+            auto full_a_a = make_ck("a", "a");
+
+            tests::reader_concurrency_semaphore_wrapper semaphore;
+
+            auto pr = dht::partition_range::make_singular(pkey);
+
+            memtable_snapshot_source underlying(s);
+
+            auto t1 = tombstone(api::new_timestamp(), gc_clock::now());
+            mutation m1(s, pkey);
+            m1.partition().clustered_row(*s, prefix_a).apply(t1);
+            m1.partition().clustered_row(*s, full_a).apply(t1);
+            m1.partition().clustered_row(*s, full_a_a).apply(t1);
+            underlying.apply(m1);
+
+            cache_tracker tracker;
+            row_cache cache(s, snapshot_source([&] { return underlying(); }), tracker);
+
+            // populating read
+            assert_that(cache.make_reader(s, semaphore.make_permit(), pr))
+                    .produces(m1);
+
+            // non-populating read
+            assert_that(cache.make_reader(s, semaphore.make_permit(), pr))
+                    .produces(m1);
+        });
 }

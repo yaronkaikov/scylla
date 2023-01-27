@@ -9,27 +9,48 @@
 #pragma once
 
 #include <iterator>
-#include "cql_serialization_format.hh"
+
 #include "utils/fragment_range.hh"
 #include "utils/managed_bytes.hh"
 #include "exceptions/exceptions.hh"
 #include "types.hh"
 
-int read_collection_size(bytes_view& in, cql_serialization_format sf);
-bytes_view read_collection_value(bytes_view& in, cql_serialization_format sf);
+int read_collection_size(bytes_view& in);
+bytes_view read_collection_key(bytes_view& in);
+bytes_view read_collection_value_nonnull(bytes_view& in);
 
 template <FragmentedView View>
-int read_collection_size(View& in, cql_serialization_format sf) {
-    if (sf.using_32_bits_for_collections()) {
-        return read_simple<int32_t>(in);
-    } else {
-        return read_simple<uint16_t>(in);
-    }
+int read_collection_size(View& in) {
+    return read_simple<int32_t>(in);
 }
 
 template <FragmentedView View>
-View read_collection_value(View& in, cql_serialization_format sf) {
-    auto size = sf.using_32_bits_for_collections() ? read_simple<int32_t>(in) : read_simple<uint16_t>(in);
+View read_collection_key(View& in) {
+    auto size = read_simple<int32_t>(in);
+    if (size == -2) {
+        throw exceptions::invalid_request_exception("unset value is not supported inside collections");
+    }
+    if (size < 0) {
+        throw exceptions::invalid_request_exception("null is not supported inside collections");
+    }
+    return read_simple_bytes(in, size);
+}
+
+template <FragmentedView View>
+std::optional<View> read_collection_value(View& in) {
+    auto size = read_simple<int32_t>(in);
+    if (size == -1) {
+        return std::nullopt;
+    }
+    if (size < 0) {
+        throw exceptions::invalid_request_exception("unset value is not supported inside collections");
+    }
+    return read_simple_bytes(in, size);
+}
+
+template <FragmentedView View>
+View read_collection_value_nonnull(View& in) {
+    auto size = read_simple<int32_t>(in);
     if (size == -2) {
         throw exceptions::invalid_request_exception("unset value is not supported inside collections");
     }
@@ -46,25 +67,24 @@ public:
     using iterator_category = std::input_iterator_tag;
     using value_type = managed_bytes_view;
     using difference_type = std::ptrdiff_t;
-    using pointer = managed_bytes_view*;
-    using reference = managed_bytes_view&;
+    using pointer = managed_bytes_view_opt*;
+    using reference = managed_bytes_view_opt&;
 private:
     managed_bytes_view* _in;
     int _remain;
-    managed_bytes_view _cur;
-    cql_serialization_format _sf;
+    managed_bytes_view_opt _cur;
 private:
     struct end_tag {};
-    listlike_partial_deserializing_iterator(managed_bytes_view& in, cql_serialization_format sf)
-            : _in(&in), _sf(sf) {
-        _remain = read_collection_size(*_in, _sf);
+    listlike_partial_deserializing_iterator(managed_bytes_view& in)
+            : _in(&in) {
+        _remain = read_collection_size(*_in);
         parse();
     }
     listlike_partial_deserializing_iterator(end_tag)
-            : _remain(0), _sf(cql_serialization_format::internal()) {  // _sf is bogus, but doesn't matter
+            : _remain(0) {
     }
 public:
-    managed_bytes_view operator*() const { return _cur; }
+    managed_bytes_view_opt operator*() const { return _cur; }
     listlike_partial_deserializing_iterator& operator++() {
         --_remain;
         parse();
@@ -80,16 +100,16 @@ public:
     bool operator!=(const listlike_partial_deserializing_iterator& x) const {
         return _remain != x._remain;
     }
-    static listlike_partial_deserializing_iterator begin(managed_bytes_view& in, cql_serialization_format sf) {
-        return { in, sf };
+    static listlike_partial_deserializing_iterator begin(managed_bytes_view& in) {
+        return { in };
     }
-    static listlike_partial_deserializing_iterator end(managed_bytes_view in, cql_serialization_format sf) {
+    static listlike_partial_deserializing_iterator end(managed_bytes_view in) {
         return { end_tag() };
     }
 private:
     void parse() {
         if (_remain) {
-            _cur = read_collection_value(*_in, _sf);
+            _cur = read_collection_value(*_in);
         } else {
             _cur = {};
         }

@@ -1756,8 +1756,8 @@ static shared_ptr<cql3::functions::user_function> create_func(replica::database&
                 std::move(body), language, std::move(return_type),
                 row.get_nonnull<bool>("called_on_null_input"), std::move(ctx));
     } else if (language == "xwasm") {
-        wasm::context ctx{db.wasm_engine(), name.name, qctx->qp().get_wasm_instance_cache()};
-        wasm::compile(ctx, arg_names, body);
+        wasm::context ctx{db.wasm_engine(), name.name, qctx->qp().get_wasm_instance_cache(), db.get_config().wasm_udf_yield_fuel(), db.get_config().wasm_udf_total_fuel()};
+        wasm::precompile(ctx, arg_names, body);
         return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
                 std::move(body), language, std::move(return_type),
                 row.get_nonnull<bool>("called_on_null_input"), std::move(ctx));
@@ -2053,6 +2053,33 @@ std::vector<shared_ptr<cql3::functions::user_function>> create_functions_from_sc
     std::vector<shared_ptr<cql3::functions::user_function>> ret;
     for (const auto& row : result->rows()) {
         ret.emplace_back(create_func(db, row));
+    }
+    return ret;
+}
+
+std::vector<shared_ptr<cql3::functions::user_aggregate>> create_aggregates_from_schema_partition(
+        replica::database& db, lw_shared_ptr<query::result_set> result, lw_shared_ptr<query::result_set> scylla_result) {
+    std::unordered_multimap<sstring, const query::result_set_row*> scylla_aggs;
+    if (scylla_result) {
+        for (const auto& scylla_row : scylla_result->rows()) {
+            auto scylla_agg_name = scylla_row.get_nonnull<sstring>("aggregate_name");
+            scylla_aggs.emplace(scylla_agg_name, &scylla_row);
+        }
+    }
+
+    std::vector<shared_ptr<cql3::functions::user_aggregate>> ret;
+    for (const auto& row : result->rows()) {
+        auto agg_name = row.get_nonnull<sstring>("aggregate_name");
+        auto agg_args = read_arg_types(db, row, row.get_nonnull<sstring>("keyspace_name"));
+        const query::result_set_row *scylla_row_ptr = nullptr;
+        for (auto [it, end] = scylla_aggs.equal_range(agg_name); it != end; ++it) {
+            auto scylla_agg_args = read_arg_types(db, *it->second, it->second->get_nonnull<sstring>("keyspace_name"));
+            if (agg_args == scylla_agg_args) {
+                scylla_row_ptr = it->second;
+                break;
+            }
+        }
+        ret.emplace_back(create_aggregate(db, row, scylla_row_ptr));
     }
     return ret;
 }
@@ -2878,7 +2905,7 @@ static const std::unordered_set<sstring>& system_ks_null_shard_tables() {
         SCYLLA_TABLE_SCHEMA_HISTORY,
         db::system_keyspace::RAFT,
         db::system_keyspace::RAFT_SNAPSHOTS,
-        db::system_keyspace::RAFT_CONFIG,
+        db::system_keyspace::RAFT_SNAPSHOT_CONFIG,
         db::system_keyspace::GROUP0_HISTORY,
         db::system_keyspace::DISCOVERY,
         db::system_keyspace::BROADCAST_KV_STORE,

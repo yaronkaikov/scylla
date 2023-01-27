@@ -66,6 +66,7 @@
 #include "service/qos/qos_configuration_change_subscriber.hh"
 #include "compaction/compaction_manager.hh"
 #include "utils/disk-error-handler.hh"
+#include "rust/wasmtime_bindings.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -79,6 +80,7 @@ namespace service {
 class storage_proxy;
 class storage_service;
 class migration_notifier;
+class raft_group_registry;
 }
 
 namespace gms {
@@ -120,12 +122,8 @@ class large_data_handler;
 class system_keyspace;
 class table_selector;
 
-future<> system_keyspace_make(db::system_keyspace& sys_ks, distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg, db::table_selector&);
+future<> system_keyspace_make(db::system_keyspace& sys_ks, distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, sharded<service::raft_group_registry>& raft_gr, db::config& cfg, db::table_selector&);
 
-}
-
-namespace wasm {
-class engine;
 }
 
 namespace qos {
@@ -578,12 +576,6 @@ private:
         // FIXME: better way of ensuring we don't attempt to
         // overwrite an existing table.
         return sstables::generation_from_value((*_sstable_generation)++ * smp::count + this_shard_id());
-    }
-
-    // inverse of calculate_generation_for_new_table(), used to determine which
-    // shard a sstable should be opened at.
-    static seastar::shard_id calculate_shard_from_sstable_generation(sstables::generation_type sstable_generation) {
-        return sstables::generation_value(sstable_generation) % smp::count;
     }
 private:
     void rebuild_statistics();
@@ -1380,7 +1372,7 @@ private:
     scheduling_group _default_read_concurrency_group;
     noncopyable_function<future<>()> _unsubscribe_qos_configuration_change;
 
-    std::unique_ptr<wasm::engine> _wasm_engine;
+    rust::Box<wasmtime::Engine> _wasm_engine;
     utils::cross_shard_barrier _stop_barrier;
 
     db::rate_limiter _rate_limiter;
@@ -1397,8 +1389,8 @@ public:
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
     future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, db::timeout_clock::time_point timeout);
 
-    wasm::engine* wasm_engine() {
-        return _wasm_engine.get();
+    wasmtime::Engine& wasm_engine() {
+        return *_wasm_engine;
     }
 
     drain_progress get_drain_progress() const noexcept {
@@ -1416,7 +1408,7 @@ private:
 
     using system_keyspace = bool_class<struct system_keyspace_tag>;
     future<> create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, locator::effective_replication_map_factory& erm_factory, system_keyspace system);
-    friend future<> db::system_keyspace_make(db::system_keyspace& sys_ks, distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, db::config& cfg, db::table_selector&);
+    friend future<> db::system_keyspace_make(db::system_keyspace& sys_ks, distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, sharded<service::raft_group_registry>& raft_gr, db::config& cfg, db::table_selector&);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
     reader_concurrency_semaphore& read_concurrency_sem();

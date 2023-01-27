@@ -34,7 +34,7 @@ END
 
 DATE=""
 
-while [[ $# -gt 0 ]]; do
+while [ $# -gt 0 ]; do
 	opt="$1"
 	case $opt in
 		-h|--help)
@@ -72,9 +72,9 @@ fi
 
 # Default scylla product/version tags
 PRODUCT=scylla-enterprise
-VERSION=2022.3.0-dev
+VERSION=2023.2.0-dev
 
-BASE_VERSION=5.2.0-dev
+BASE_VERSION=5.3.0-dev
 
 if test -f version
 then

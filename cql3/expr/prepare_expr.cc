@@ -928,8 +928,22 @@ try_prepare_expression(const expression& expr, data_dictionary::database db, con
         [] (const constant&) -> std::optional<expression> {
             on_internal_error(expr_logger, "Can't prepare constant_value, it should not appear in parser output");
         },
-        [&] (const binary_operator&) -> std::optional<expression> {
-            on_internal_error(expr_logger, "binary_operators are not yet reachable via prepare_expression()");
+        [&] (const binary_operator& binop) -> std::optional<expression> {
+            if (receiver.get() != nullptr && &receiver->type->without_reversed() != boolean_type.get()) {
+                throw exceptions::invalid_request_exception(
+                    format("binary operator produces a boolean value, which doesn't match the type: {} of {}",
+                           receiver->type->name(), receiver->name->text()));
+            }
+
+            binary_operator result = prepare_binary_operator(binop, db, *schema_opt);
+
+            // A binary operator where both sides of the equation are known can be evaluated to a boolean value.
+            // This only applies to operators in the CQL order, operations in the clustering order should only be
+            // of form (clustering_column1, colustering_column2) < SCYLLA_CLUSTERING_BOUND(1, 2).
+            if (is<constant>(result.lhs) && is<constant>(result.rhs) && result.order == comparison_order::cql) {
+                return constant(evaluate(result, query_options::DEFAULT), boolean_type);
+            }
+            return result;
         },
         [&] (const conjunction& conj) -> std::optional<expression> {
             return prepare_conjunction(conj, db, keyspace, schema_opt, receiver);
@@ -1190,7 +1204,7 @@ static lw_shared_ptr<column_specification> get_lhs_receiver(const expression& pr
 // Given type of LHS and the operation finds the expected type of RHS.
 // The type will be the same as LHS for simple operations like =, but it will be different for more complex ones like IN or CONTAINS.
 static lw_shared_ptr<column_specification> get_rhs_receiver(lw_shared_ptr<column_specification>& lhs_receiver, oper_t oper) {
-    const data_type& lhs_type = lhs_receiver->type->underlying_type();
+    const data_type lhs_type = lhs_receiver->type->underlying_type();
 
     if (oper == oper_t::IN) {
         data_type rhs_receiver_type = list_type_impl::get_instance(std::move(lhs_type), false);
@@ -1228,16 +1242,30 @@ static lw_shared_ptr<column_specification> get_rhs_receiver(lw_shared_ptr<column
     }
 }
 
-binary_operator prepare_binary_operator(binary_operator binop, data_dictionary::database db, schema_ptr schema) {
-    std::optional<expression> prepared_lhs_opt = try_prepare_expression(binop.lhs, db, "", schema.get(), {});
+binary_operator prepare_binary_operator(binary_operator binop, data_dictionary::database db, const schema& table_schema) {
+    std::optional<expression> prepared_lhs_opt = try_prepare_expression(binop.lhs, db, table_schema.ks_name(), &table_schema, {});
     if (!prepared_lhs_opt) {
         throw exceptions::invalid_request_exception(fmt::format("Could not infer type of {}", binop.lhs));
     }
     auto& prepared_lhs = *prepared_lhs_opt;
-    lw_shared_ptr<column_specification> lhs_receiver = get_lhs_receiver(prepared_lhs, *schema);
+    lw_shared_ptr<column_specification> lhs_receiver = get_lhs_receiver(prepared_lhs, table_schema);
 
     lw_shared_ptr<column_specification> rhs_receiver = get_rhs_receiver(lhs_receiver, binop.op);
-    expression prepared_rhs = prepare_expression(binop.rhs, db, schema->ks_name(), schema.get(), rhs_receiver);
+    expression prepared_rhs = prepare_expression(binop.rhs, db, table_schema.ks_name(), &table_schema, rhs_receiver);
+
+    // IS NOT NULL requires an additional check that the RHS is NULL.
+    // Otherwise things like `int_col IS NOT 123` would be allowed - the types match, but the value is wrong.
+    if (binop.op == oper_t::IS_NOT) {
+        bool rhs_is_null = is<constant>(prepared_rhs) && as<constant>(prepared_rhs).is_null();
+
+        if (!rhs_is_null) {
+            expression binop_expr = binop;
+            expression::printer binop_printer{.expr_to_print = binop_expr, .debug_mode = false};
+            throw exceptions::invalid_request_exception(format(
+                "IS NOT NULL is the only expression that is allowed when using IS NOT. Invalid binary operator: {}",
+                binop_printer));
+        }
+    }
 
     return binary_operator(std::move(prepared_lhs), binop.op, std::move(prepared_rhs), binop.order);
 }

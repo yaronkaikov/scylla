@@ -70,7 +70,9 @@ reader_concurrency_semaphore& reader_concurrency_semaphore_group::add_or_update(
             0,
             _max_concurrent_reads,
             sg.name() + "_read_concurrency_sem",
-            _max_queue_length
+            _max_queue_length,
+            _serialize_limit_multiplier,
+            _kill_limit_multiplier
         ));
     auto&& it = result.first;
     // since we serialize all group changes this change wait will be queues and no further operations

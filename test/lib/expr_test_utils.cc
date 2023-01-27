@@ -12,10 +12,20 @@ namespace cql3 {
 namespace expr {
 namespace test_utils {
 template <class T>
+requires (!requires (T t) { t.has_value(); })
 raw_value make_raw(T t) {
     data_type val_type = data_type_for<T>();
     data_value data_val(t);
     return raw_value::make_value(val_type->decompose(data_val));
+}
+
+template <class T>
+raw_value make_raw(std::optional<T> t) {
+    if (t.has_value()) {
+        return make_raw(t.value());
+    } else {
+        return raw_value::make_null();
+    }
 }
 
 raw_value make_empty_raw() {
@@ -44,6 +54,14 @@ raw_value make_bigint_raw(int64_t val) {
 
 raw_value make_text_raw(const sstring_view& text) {
     return raw_value::make_value(utf8_type->decompose(text));
+}
+
+raw_value make_float_raw(float val) {
+    return make_raw(val);
+}
+
+raw_value make_double_raw(double val) {
+    return make_raw(val);
 }
 
 template <class T>
@@ -80,16 +98,54 @@ constant make_text_const(const sstring_view& text) {
     return constant(make_text_raw(text), utf8_type);
 }
 
+constant make_float_const(float val) {
+    return make_const(val);
+}
+
+constant make_double_const(double val) {
+    return make_const(val);
+}
+
+untyped_constant make_int_untyped(const char* raw_text) {
+    return untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = raw_text};
+}
+
+untyped_constant make_float_untyped(const char* raw_text) {
+    return untyped_constant{.partial_type = untyped_constant::type_class::floating_point, .raw_text = raw_text};
+}
+
+untyped_constant make_string_untyped(const char* raw_text) {
+    return untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = raw_text};
+}
+
+untyped_constant make_bool_untyped(const char* raw_text) {
+    return untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = raw_text};
+}
+
+untyped_constant make_duration_untyped(const char* raw_text) {
+    return untyped_constant{.partial_type = untyped_constant::type_class::duration, .raw_text = raw_text};
+}
+
+untyped_constant make_uuid_untyped(const char* raw_text) {
+    return untyped_constant{.partial_type = untyped_constant::type_class::uuid, .raw_text = raw_text};
+}
+
+untyped_constant make_hex_untyped(const char* raw_text) {
+    return untyped_constant{.partial_type = untyped_constant::type_class::hex, .raw_text = raw_text};
+}
+
+untyped_constant make_null_untyped() {
+    return untyped_constant{.partial_type = untyped_constant::type_class::null, .raw_text = "null"};
+}
+
 // This function implements custom serialization of collection values.
-// Some tests require the collection to contain unset_value or an empty value,
+// Some tests require the collection to contain an empty value,
 // which is impossible to express using the existing code.
 cql3::raw_value make_collection_raw(size_t size_to_write, const std::vector<cql3::raw_value>& elements_to_write) {
-    cql_serialization_format sf = cql_serialization_format::latest();
-
     size_t serialized_len = 0;
-    serialized_len += collection_size_len(sf);
+    serialized_len += collection_size_len();
     for (const cql3::raw_value& val : elements_to_write) {
-        serialized_len += collection_value_len(sf);
+        serialized_len += collection_value_len();
         if (val.is_value()) {
             serialized_len += val.view().with_value([](const FragmentedView auto& view) { return view.size_bytes(); });
         }
@@ -98,15 +154,13 @@ cql3::raw_value make_collection_raw(size_t size_to_write, const std::vector<cql3
     bytes b(bytes::initialized_later(), serialized_len);
     bytes::iterator out = b.begin();
 
-    write_collection_size(out, size_to_write, sf);
+    write_collection_size(out, size_to_write);
     for (const cql3::raw_value& val : elements_to_write) {
         if (val.is_null()) {
             write_int32(out, -1);
-        } else if (val.is_unset_value()) {
-            write_int32(out, -2);
         } else {
             val.view().with_value(
-                [&](const FragmentedView auto& val_view) { write_collection_value(out, sf, linearized(val_view)); });
+                [&](const FragmentedView auto& val_view) { write_collection_value(out, linearized(val_view)); });
         }
     }
 
@@ -131,7 +185,7 @@ raw_value make_map_raw(const std::vector<std::pair<raw_value, raw_value>>& value
 }
 
 // This function implements custom serialization of tuples.
-// Some tests require the tuple to contain unset_value or an empty value,
+// Some tests require the tuple to contain an empty value,
 // which is impossible to express using the existing code.
 raw_value make_tuple_raw(const std::vector<raw_value>& values) {
     size_t serialized_len = 0;
@@ -146,8 +200,6 @@ raw_value make_tuple_raw(const std::vector<raw_value>& values) {
     for (const raw_value& val : values) {
         if (val.is_null()) {
             write<int32_t>(out, -1);
-        } else if (val.is_unset_value()) {
-            write<int32_t>(out, -2);
         } else {
             val.view().with_value([&](const FragmentedView auto& bytes_view) {
                 write<int32_t>(out, bytes_view.size_bytes());
@@ -240,7 +292,7 @@ constant make_tuple_const(const std::vector<constant>& vals, const std::vector<d
     return test_utils::make_tuple_const(to_raw_values(vals), element_types);
 }
 
-raw_value make_int_list_raw(const std::vector<int32_t>& values) {
+raw_value make_int_list_raw(const std::vector<std::optional<int32_t>>& values) {
     return make_list_raw(to_raw_values(values));
 }
 
@@ -252,7 +304,7 @@ raw_value make_int_int_map_raw(const std::vector<std::pair<int32_t, int32_t>>& v
     return make_map_raw(to_raw_value_pairs(values));
 }
 
-constant make_int_list_const(const std::vector<int32_t>& values) {
+constant make_int_list_const(const std::vector<std::optional<int32_t>>& values) {
     return constant(make_int_list_raw(values), list_type_impl::get_instance(int32_type, true));
 }
 
@@ -346,10 +398,6 @@ std::pair<evaluation_inputs, std::unique_ptr<evaluation_inputs_data>> make_evalu
             throw_error("Passed NULL as value for {}. This is not allowed for partition key columns.",
                         pk_col.name_as_text());
         }
-        if (col_value.is_unset_value()) {
-            throw_error("Passed UNSET_VALUE as value for {}. This is not allowed for partition key columns.",
-                        pk_col.name_as_text());
-        }
         partition_key.push_back(raw_value(col_value).to_bytes());
     }
 
@@ -359,10 +407,6 @@ std::pair<evaluation_inputs, std::unique_ptr<evaluation_inputs_data>> make_evalu
 
         if (col_value.is_null()) {
             throw_error("Passed NULL as value for {}. This is not allowed for clustering key columns.",
-                        ck_col.name_as_text());
-        }
-        if (col_value.is_unset_value()) {
-            throw_error("Passed UNSET_VALUE as value for {}. This is not allowed for clustering key columns.",
                         ck_col.name_as_text());
         }
         clustering_key.push_back(raw_value(col_value).to_bytes());
@@ -383,24 +427,18 @@ std::pair<evaluation_inputs, std::unique_ptr<evaluation_inputs_data>> make_evalu
 
     for (const column_definition& col : table_schema->regular_columns()) {
         const raw_value& col_value = get_col_val(col);
-        if (col_value.is_unset_value()) {
-            throw_error("Passed UNSET_VALUE as value for {}. This is not allowed.", col.name_as_text());
-        }
         int32_t index = selection->index_of(col);
         static_and_regular_columns[index] = raw_value(col_value).to_managed_bytes_opt();
     }
 
     for (const column_definition& col : table_schema->static_columns()) {
         const raw_value& col_value = get_col_val(col);
-        if (col_value.is_unset_value()) {
-            throw_error("Passed UNSET_VALUE as value for {}. This is not allowed.", col.name_as_text());
-        }
         int32_t index = selection->index_of(col);
         static_and_regular_columns[index] = raw_value(col_value).to_managed_bytes_opt();
     }
 
     query_options options(default_cql_config, db::consistency_level::ONE, std::nullopt, bind_marker_values, true,
-                          query_options::specific_options::DEFAULT, cql_serialization_format::internal());
+                          query_options::specific_options::DEFAULT);
 
     std::unique_ptr<evaluation_inputs_data> data = std::make_unique<evaluation_inputs_data>(
         evaluation_inputs_data{.partition_key = std::move(partition_key),
