@@ -142,7 +142,7 @@ void validate_handler(type_variant type, std::vector<bytes> values, const bpo::v
         bytes_view value;
 
         void operator()(const data_type& type) {
-            type->validate(value, cql_serialization_format::internal());
+            type->validate(value);
         }
         void operator()(const compound_type<allow_prefixes::yes>& type) {
             type.validate(value);
@@ -423,9 +423,8 @@ $ scylla types {{action}} --help
         {"value", bpo::value<std::vector<sstring>>(), "value(s) to process, can also be provided as positional arguments", -1}
     });
 
-    return app.run(argc, argv, [&app, found_ah] () -> future<> {
-        co_await logalloc::use_standard_allocator_segment_pool_backend(1 * 1024 * 1024);
-
+    return app.run(argc, argv, [&app, found_ah] {
+      return logalloc::use_standard_allocator_segment_pool_backend(1 * 1024 * 1024).then([&app, found_ah] {
         const action_handler& handler = *found_ah;
 
         if (!app.configuration().contains("type")) {
@@ -463,8 +462,7 @@ $ scylla types {{action}} --help
                 handler(std::move(type), app.configuration()["value"].as<std::vector<sstring>>(), app.configuration());
                 break;
         }
-
-        co_return;
+      });
     });
 }
 

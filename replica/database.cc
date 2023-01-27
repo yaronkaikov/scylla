@@ -18,6 +18,7 @@
 #include "to_string.hh"
 #include "cql3/functions/functions.hh"
 #include "cql3/functions/user_function.hh"
+#include "cql3/functions/user_aggregate.hh"
 #include <seastar/core/seastar.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
@@ -355,7 +356,9 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
             max_count_streaming_concurrent_reads,
             max_memory_streaming_concurrent_reads(),
             "_streaming_concurrency_sem",
-            std::numeric_limits<size_t>::max())
+            std::numeric_limits<size_t>::max(),
+            utils::updateable_value(std::numeric_limits<uint32_t>::max()),
+            utils::updateable_value(std::numeric_limits<uint32_t>::max()))
     // No limits, just for accounting.
     , _compaction_concurrency_sem(reader_concurrency_semaphore::no_limits{}, "compaction")
     , _system_read_concurrency_sem(
@@ -363,7 +366,9 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
             max_count_concurrent_reads,
             max_memory_system_concurrent_reads(),
             "_system_read_concurrency_sem",
-            std::numeric_limits<size_t>::max())
+            std::numeric_limits<size_t>::max(),
+            utils::updateable_value(std::numeric_limits<uint32_t>::max()),
+            utils::updateable_value(std::numeric_limits<uint32_t>::max()))
     , _row_cache_tracker(cache_tracker::register_metrics::yes)
     , _apply_stage("db_apply", &database::do_apply)
     , _version(empty_version)
@@ -384,8 +389,10 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _feat(feat)
     , _shared_token_metadata(stm)
     , _sst_dir_semaphore(sst_dir_sem)
-    , _reader_concurrency_semaphores_group(max_memory_concurrent_reads(), max_count_concurrent_reads, max_inactive_queue_length())
-    , _wasm_engine(std::make_unique<wasm::engine>())
+    , _reader_concurrency_semaphores_group(max_memory_concurrent_reads(), max_count_concurrent_reads, max_inactive_queue_length(),
+        _cfg.reader_concurrency_semaphore_serialize_limit_multiplier,
+        _cfg.reader_concurrency_semaphore_kill_limit_multiplier)
+    , _wasm_engine(wasmtime::create_engine(cfg.wasm_udf_memory_limit()))
     , _stop_barrier(std::move(barrier))
     , _update_memtable_flush_static_shares_action([this, &cfg] { return _memtable_controller.update_static_shares(cfg.memtable_flush_static_shares()); })
     , _memtable_flush_static_shares_observer(cfg.memtable_flush_static_shares.observe(_update_memtable_flush_static_shares_action.make_observer()))
@@ -607,21 +614,17 @@ database::setup_metrics() {
                                        "A non-zero value indicates that we have to drop read requests because they arrive faster than we can serve them.")),
 
         sm::make_gauge("active_reads", [this] {
-                             return (max_count_concurrent_reads * _reader_concurrency_semaphores_group.size())
-                                    - _reader_concurrency_semaphores_group.sum_read_concurrency_sem_var([] (reader_concurrency_semaphore& rcs) { return rcs.available_resources().count; }); },
+                             return _reader_concurrency_semaphores_group.sum_read_concurrency_sem_var(std::mem_fn(&reader_concurrency_semaphore::active_reads)); },
                        sm::description("Holds the number of currently active read operations. "),
                        {user_label_instance}),
-
     });
 
     // Registering all the metrics with a single call causes the stack size to blow up.
     _metrics.add_group("database", {
         sm::make_gauge("active_reads_memory_consumption",  [this] {
                              return (max_count_concurrent_reads * _reader_concurrency_semaphores_group.size())
-                                    - _reader_concurrency_semaphores_group.sum_read_concurrency_sem_var([] (reader_concurrency_semaphore& rcs) { return rcs.available_resources().memory; }); },
-                       sm::description(seastar::format("Holds the amount of memory consumed by currently active read operations. "
-                                                       "If this value gets close to {} we are likely to start dropping new read requests. "
-                                                       "In that case sstable_read_queue_overloads is going to get a non-zero value.", max_memory_concurrent_reads())),
+                                    - _reader_concurrency_semaphores_group.sum_read_concurrency_sem_var([] (reader_concurrency_semaphore& rcs) { return rcs.consumed_resources().memory; }); },
+                       sm::description("Holds the amount of memory consumed by current read operations. "),
                        {user_label_instance}),
 
         sm::make_gauge("queued_reads", [this] { return _reader_concurrency_semaphores_group.sum_read_concurrency_sem_var(&reader_concurrency_semaphore::waiters); },
@@ -643,15 +646,20 @@ database::setup_metrics() {
                                        " When the queue is full, excessive reads are shed to avoid overload."),
                        {user_label_instance}),
 
-        sm::make_gauge("active_reads", [this] { return max_count_streaming_concurrent_reads - _streaming_concurrency_sem.available_resources().count; },
+        sm::make_gauge("disk_reads", [this] { return sum_read_concurrency_sem_stat(&reader_concurrency_semaphore::stats::disk_reads); },
+                       sm::description("Holds the number of currently active disk read operations. "),
+                       {user_label_instance}),
+
+        sm::make_gauge("sstables_read", [this] { return sum_read_concurrency_sem_stat(&reader_concurrency_semaphore::stats::sstables_read); },
+                       sm::description("Holds the number of currently read sstables. "),
+                       {user_label_instance}),
+
+        sm::make_gauge("active_reads", [this] { return _streaming_concurrency_sem.active_reads(); },
                        sm::description("Holds the number of currently active read operations issued on behalf of streaming "),
                        {streaming_label_instance}),
 
-
-        sm::make_gauge("active_reads_memory_consumption", [this] { return max_memory_streaming_concurrent_reads() - _streaming_concurrency_sem.available_resources().memory; },
-                       sm::description(seastar::format("Holds the amount of memory consumed by currently active read operations issued on behalf of streaming "
-                                                       "If this value gets close to {} we are likely to start dropping new read requests. "
-                                                       "In that case sstable_read_queue_overloads is going to get a non-zero value.", max_memory_streaming_concurrent_reads())),
+        sm::make_gauge("reads_memory_consumption", [this] { return _streaming_concurrency_sem.consumed_resources().memory; },
+                       sm::description("Holds the amount of memory consumed by current read operations issued on behalf of streaming "),
                        {streaming_label_instance}),
 
         sm::make_gauge("queued_reads", [this] { return _streaming_concurrency_sem.waiters(); },
@@ -673,14 +681,20 @@ database::setup_metrics() {
                                        " When the queue is full, excessive reads are shed to avoid overload."),
                        {streaming_label_instance}),
 
-        sm::make_gauge("active_reads", [this] { return max_count_system_concurrent_reads - _system_read_concurrency_sem.available_resources().count; },
+        sm::make_gauge("disk_reads", [this] { return _streaming_concurrency_sem.get_stats().disk_reads; },
+                       sm::description("Holds the number of currently active disk read operations. "),
+                       {streaming_label_instance}),
+
+        sm::make_gauge("sstables_read", [this] { return _streaming_concurrency_sem.get_stats().sstables_read; },
+                       sm::description("Holds the number of currently read sstables. "),
+                       {streaming_label_instance}),
+
+        sm::make_gauge("active_reads", [this] { return _system_read_concurrency_sem.active_reads(); },
                        sm::description("Holds the number of currently active read operations from \"system\" keyspace tables. "),
                        {system_label_instance}),
 
-        sm::make_gauge("active_reads_memory_consumption", [this] { return max_memory_system_concurrent_reads() - _system_read_concurrency_sem.available_resources().memory; },
-                       sm::description(seastar::format("Holds the amount of memory consumed by currently active read operations from \"system\" keyspace tables. "
-                                                       "If this value gets close to {} we are likely to start dropping new read requests. "
-                                                       "In that case sstable_read_queue_overloads is going to get a non-zero value.", max_memory_system_concurrent_reads())),
+        sm::make_gauge("reads_memory_consumption", [this] { return max_memory_system_concurrent_reads() - _system_read_concurrency_sem.consumed_resources().memory; },
+                       sm::description("Holds the amount of memory consumed by all read operations from \"system\" keyspace tables. "),
                        {system_label_instance}),
 
         sm::make_gauge("queued_reads", [this] { return _system_read_concurrency_sem.waiters(); },
@@ -700,6 +714,14 @@ database::setup_metrics() {
         sm::make_counter("reads_shed_due_to_overload", _system_read_concurrency_sem.get_stats().total_reads_shed_due_to_overload,
                        sm::description("The number of reads shed because the admission queue reached its max capacity."
                                        " When the queue is full, excessive reads are shed to avoid overload."),
+                       {system_label_instance}),
+
+        sm::make_gauge("disk_reads", [this] { return _system_read_concurrency_sem.get_stats().disk_reads; },
+                       sm::description("Holds the number of currently active disk read operations. "),
+                       {system_label_instance}),
+
+        sm::make_gauge("sstables_read", [this] { return _system_read_concurrency_sem.get_stats().sstables_read; },
+                       sm::description("Holds the number of currently read sstables. "),
                        {system_label_instance}),
 
         sm::make_gauge("total_result_bytes", [this] { return get_result_memory_limiter().total_used_memory(); },
@@ -799,27 +821,35 @@ do_parse_schema_tables(distributed<service::storage_proxy>& proxy, const sstring
 
 future<> database::parse_system_tables(distributed<service::storage_proxy>& proxy, sharded<db::system_keyspace>& sys_ks) {
     using namespace db::schema_tables;
-    co_await do_parse_schema_tables(proxy, db::schema_tables::KEYSPACES, [&] (schema_result_value_type &v) -> future<> {
+    co_await do_parse_schema_tables(proxy, db::schema_tables::KEYSPACES, coroutine::lambda([&] (schema_result_value_type &v) -> future<> {
         auto scylla_specific_rs = co_await db::schema_tables::extract_scylla_specific_keyspace_info(proxy, v);
         auto ksm = create_keyspace_from_schema_partition(v, scylla_specific_rs);
         co_return co_await create_keyspace(ksm, proxy.local().get_erm_factory(), true /* bootstrap. do not mark populated yet */, system_keyspace::no);
-    });
-    co_await do_parse_schema_tables(proxy, db::schema_tables::TYPES, [&] (schema_result_value_type &v) -> future<> {
+    }));
+    co_await do_parse_schema_tables(proxy, db::schema_tables::TYPES, coroutine::lambda([&] (schema_result_value_type &v) -> future<> {
         auto& ks = this->find_keyspace(v.first);
         auto&& user_types = create_types_from_schema_partition(*ks.metadata(), v.second);
         for (auto&& type : user_types) {
             ks.add_user_type(type);
         }
         co_return;
-    });
-    co_await do_parse_schema_tables(proxy, db::schema_tables::FUNCTIONS, [&] (schema_result_value_type& v) -> future<> {
+    }));
+    co_await do_parse_schema_tables(proxy, db::schema_tables::FUNCTIONS, coroutine::lambda([&] (schema_result_value_type& v) -> future<> {
         auto&& user_functions = create_functions_from_schema_partition(*this, v.second);
         for (auto&& func : user_functions) {
             cql3::functions::functions::add_function(func);
         }
         co_return;
-    });
-    co_await do_parse_schema_tables(proxy, db::schema_tables::TABLES, [&] (schema_result_value_type &v) -> future<> {
+    }));
+    co_await do_parse_schema_tables(proxy, db::schema_tables::AGGREGATES, coroutine::lambda([&] (schema_result_value_type& v) -> future<> {
+        auto v2 = co_await read_schema_partition_for_keyspace(proxy, db::schema_tables::SCYLLA_AGGREGATES, v.first);
+        auto&& user_aggregates = create_aggregates_from_schema_partition(*this, v.second, v2.second);
+        for (auto&& agg : user_aggregates) {
+            cql3::functions::functions::add_function(agg);
+        }
+        co_return;
+    }));
+    co_await do_parse_schema_tables(proxy, db::schema_tables::TABLES, coroutine::lambda([&] (schema_result_value_type &v) -> future<> {
         std::map<sstring, schema_ptr> tables = co_await create_tables_from_tables_partition(proxy, v.second);
         co_await coroutine::parallel_for_each(tables.begin(), tables.end(), [&] (auto& t) -> future<> {
             co_await this->add_column_family_and_make_directory(t.second);
@@ -832,8 +862,8 @@ future<> database::parse_system_tables(distributed<service::storage_proxy>& prox
             }
             co_return co_await db::schema_tables::store_column_mapping(proxy, s, false);
         });
-    });
-    co_await do_parse_schema_tables(proxy, db::schema_tables::VIEWS, [&] (schema_result_value_type &v) -> future<> {
+    }));
+    co_await do_parse_schema_tables(proxy, db::schema_tables::VIEWS, coroutine::lambda([&] (schema_result_value_type &v) -> future<> {
         std::vector<view_ptr> views = co_await create_views_from_schema_partition(proxy, v.second);
         co_await coroutine::parallel_for_each(views.begin(), views.end(), [&] (auto&& v) -> future<> {
             // TODO: Remove once computed columns are guaranteed to be featured in the whole cluster.
@@ -848,7 +878,7 @@ future<> database::parse_system_tables(distributed<service::storage_proxy>& prox
                 co_await db::schema_tables::merge_schema(sys_ks, proxy, _feat, std::move(mutations));
             }
         });
-    });
+    }));
 }
 
 future<>
@@ -1714,7 +1744,7 @@ future<mutation> database::do_apply_counter_update(column_family& cf, const froz
                           regular_columns.end());
 
     auto slice = query::partition_slice(std::move(cr_ranges), std::move(static_columns),
-        std::move(regular_columns), { }, { }, cql_serialization_format::internal(), query::max_rows);
+        std::move(regular_columns), { }, { }, query::max_rows);
 
     return do_with(std::move(slice), std::move(m), std::vector<locked_cell>(),
                    [this, &cf, timeout, trace_state = std::move(trace_state), op = cf.write_in_progress()] (const query::partition_slice& slice, mutation& m, std::vector<locked_cell>& locks) mutable {

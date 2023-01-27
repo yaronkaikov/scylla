@@ -906,20 +906,26 @@ class managed_bytes_printer(gdb.printing.PrettyPrinter):
     def __init__(self, val):
         self.val = val
 
-    def bytes(self):
+    def pure_bytes(self):
         inf = gdb.selected_inferior()
-        def to_hex(data, size):
-            return bytes(inf.read_memory(data, size)).hex()
+        def to_bytes(data, size):
+            return bytes(inf.read_memory(data, size))
 
         if self.val['_u']['small']['size'] >= 0:
-            return to_hex(self.val['_u']['small']['data'], int(self.val['_u']['small']['size']))
+            return to_bytes(self.val['_u']['small']['data'], int(self.val['_u']['small']['size']))
         else:
             ref = self.val['_u']['ptr']
             chunks = list()
             while ref['ptr']:
-                chunks.append(to_hex(ref['ptr']['data'], int(ref['ptr']['frag_size'])))
+                chunks.append(to_bytes(ref['ptr']['data'], int(ref['ptr']['frag_size'])))
                 ref = ref['ptr']['next']
-            return ''.join(chunks)
+            return b''.join(chunks)
+
+    def bytes_as_hex(self):
+        return self.pure_bytes().hex()
+
+    def bytes(self):
+        return self.bytes_as_hex()
 
     def to_string(self):
         return str(self.bytes())
@@ -2059,59 +2065,39 @@ class scylla_memory(gdb.Command):
         gdb.write('\n')
 
     @staticmethod
+    def format_semaphore_stats(semaphore):
+        exploded_name = str(semaphore['_name'])[1:-1].split("_")
+        if exploded_name[0] == '':
+            short_name = exploded_name[1]
+        else:
+            short_name = exploded_name[0]
+        semaphore_name = "{} sstable reads:".format(short_name)
+        initial_count = int(semaphore["_initial_resources"]["count"])
+        initial_memory = int(semaphore["_initial_resources"]["memory"])
+        used_count = initial_count - int(semaphore["_resources"]["count"])
+        used_memory = initial_memory - int(semaphore["_resources"]["memory"])
+        try:
+            waiters = int(semaphore["_wait_list"]["_admission_queue"]["_size"])
+        except gdb.error: # 5.1 compatibility
+            waiters = int(semaphore["_wait_list"]["_size"])
+        return f'{semaphore_name:<24} {used_count:>3}/{initial_count:>3}, {used_memory:>13}/{initial_memory:>13}, queued: {waiters}'
+
+    @staticmethod
     def print_replica_stats():
         db = find_db()
         if not db:
             return
 
-        try:
-            # Per-scheduling-group semaphores are aggregated into single info - detailed info is available under `scylla read-stats`
-            read_concurrency_sem_info = dict()
-            read_concurrency_sem_info['_initial_resources'] = dict()
-            read_concurrency_sem_info['_resources'] = dict()
-            read_concurrency_sem_info['_wait_list'] = dict()
-            read_concurrency_sem_info['_initial_resources']['memory'] = 0
-            read_concurrency_sem_info['_resources']['memory'] = 0
-            read_concurrency_sem_info['_initial_resources']['count'] = 0
-            read_concurrency_sem_info['_resources']['count'] = 0
-            read_concurrency_sem_info['_wait_list']['_size'] = 0
-
-            for sem in [weighted_sem["sem"] for (_, weighted_sem) in unordered_map(db["_reader_concurrency_semaphores_group"]["_semaphores"])]:
-                read_concurrency_sem_info['_initial_resources']['memory'] += sem['_initial_resources']['memory']
-                read_concurrency_sem_info['_resources']['memory'] += sem['_resources']['memory']
-                read_concurrency_sem_info['_initial_resources']['count'] += sem['_initial_resources']['count']
-                read_concurrency_sem_info['_resources']['count'] += sem['_resources']['count']
-                read_concurrency_sem_info['_wait_list']['_size'] += sem['_wait_list']['_size']
-        except gdb.error:
-            # Read concurrency semaphore from before per-scheduling-group semaphores
-            read_concurrency_sem_info = db['_read_concurrency_sem']
-
-        semaphores = [('user_mem_str', read_concurrency_sem_info), ('streaming_mem_str', db['_streaming_concurrency_sem']), ('system_mem_str', db['_system_read_concurrency_sem'])]
-        try:
-            mem_stats = dict()
-            for key, sem in semaphores:
-                mem_stats[key] = '{:>13}/{:>13} B'.format(int(sem['_initial_resources']['memory'] - sem['_resources']['memory']), int(sem['_initial_resources']['memory']))
-        except gdb.error: # <= 4.2 compatibility
-            for key, sem in semaphores:
-                mem_stats[key] = 'remaining mem: {:>13} B'.format(int(sem['_resources']['memory']))
+        per_service_level_sem = []
+        for sg, sem in unordered_map(db["_reader_concurrency_semaphores_group"]["_semaphores"]):
+            per_service_level_sem.append(scylla_memory.format_semaphore_stats(sem["sem"]))
 
         database_typename = lookup_type(['replica::database', 'database'])[1].name
         gdb.write('Replica:\n')
-        gdb.write('  Read Concurrency Semaphores:\n'
-                '    user sstable reads:      {user_sst_rd_count:>3}/{user_sst_rd_max_count:>3}, {user_mem_str}, queued: {user_sst_rd_queued}\n'
-                '    streaming sstable reads: {streaming_sst_rd_count:>3}/{streaming_sst_rd_max_count:>3}, {streaming_mem_str}, queued: {streaming_sst_rd_queued}\n'
-                '    system sstable reads:    {system_sst_rd_count:>3}/{system_sst_rd_max_count:>3}, {system_mem_str}, queued: {system_sst_rd_queued}\n'
-                .format(
-                        user_sst_rd_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_concurrent_reads')) - int(read_concurrency_sem_info['_resources']['count']),
-                        user_sst_rd_max_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_concurrent_reads')),
-                        user_sst_rd_queued=int(read_concurrency_sem_info['_wait_list']['_size']),
-                        streaming_sst_rd_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_streaming_concurrent_reads')) - int(db['_streaming_concurrency_sem']['_resources']['count']),
-                        streaming_sst_rd_max_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_streaming_concurrent_reads')),
-                        streaming_sst_rd_queued=int(db['_streaming_concurrency_sem']['_wait_list']['_size']),
-                        system_sst_rd_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_system_concurrent_reads')) - int(db['_system_read_concurrency_sem']['_resources']['count']),
-                        system_sst_rd_max_count=int(gdb.parse_and_eval(f'{database_typename}::max_count_system_concurrent_reads')),
-                        system_sst_rd_queued=int(db['_system_read_concurrency_sem']['_wait_list']['_size']),
-                        **mem_stats))
+        gdb.write('  Read Concurrency Semaphores:\n    {}\n    {}\n    {}\n'.format(
+                '\n    '.join(per_service_level_sem),
+                scylla_memory.format_semaphore_stats(db['_streaming_concurrency_sem']),
+                scylla_memory.format_semaphore_stats(db['_system_read_concurrency_sem'])))
 
         gdb.write('  Execution Stages:\n')
         for es_path in [('_apply_stage',)]:
@@ -4308,7 +4294,7 @@ class scylla_generate_object_graph(gdb.Command):
     at. The generated graph is an image, which allows the visual inspection of the
     object graph.
 
-    The graph is generated with the help of `graphwiz`. The command
+    The graph is generated with the help of `graphviz`. The command
     generates `.dot` files which can be converted to images with the help of
     the `dot` utility. The command can do this if the output file is one of
     the supported image formats (e.g. `png`), otherwise only the `.dot` file
@@ -4421,7 +4407,7 @@ class scylla_generate_object_graph(gdb.Command):
                 help="Output file. Supported extensions are: dot, png, jpg, jpeg, svg and pdf."
                 " Regardless of the extension, a `.dot` file will always be generated."
                 " If the output is one of the graphic formats the command will convert the `.dot` file using the `dot` utility."
-                " In this case the dot utility from the graphwiz suite has to be installed on the machine."
+                " In this case the dot utility from the graphviz suite has to be installed on the machine."
                 " To manually convert the `.dot` file do: `dot -Tpng graph.dot -o graph.png`.")
         parser.add_argument("-d", "--max-depth", action="store", type=int, default=5,
                 help="Maximum depth to traverse the object graph. Set to -1 for unlimited depth. Default is 5.")
@@ -4899,6 +4885,114 @@ class scylla_compaction_tasks(gdb.Command):
         gdb.write('Total: {} instances of compaction_manager::task\n'.format(len(task_list)))
 
 
+class Schema(object):
+    def __init__(self, schema, partition_key_types, clustering_key_types):
+        self.schema = schema
+        self.partition_key_types = partition_key_types
+        self.clustering_key_types = clustering_key_types
+        self.cql_type_deserializers = dict()
+
+    def get_cql_type_deserializer(self, type_name):
+        if type_name in self.cql_type_deserializers:
+            return self.cql_type_deserializers[type_name]
+
+        if type_name == '"org.apache.cassandra.db.marshal.UTF8Type"':
+            d = lambda b: b.decode('utf-8')
+        else:
+            raise Exception(f'Deserializer for {type_name} not implemented')
+
+        self.cql_type_deserializers[type_name] = d
+        return d
+
+    """key must be a reference to an instance of clustering_key.
+    Returns a list of values of key components. 
+    The object sorts the same as the clustering key.
+    """
+    def parse_clustering_key(self, key):
+        b = managed_bytes_printer(key['_bytes']).pure_bytes()
+        return self.parse_clustering_key_bytes(b)
+
+    """key must be a reference to an instance of partition_key.
+    
+    Returns a list of values of key components. 
+    The object sorts the same as the partition key.
+    """
+    def parse_partition_key(self, key):
+        b = managed_bytes_printer(key['_bytes']).pure_bytes()
+        return self.parse_partition_key_bytes(b)
+
+    """b is a bytes object representing a clustering_key in memory"""
+    def parse_clustering_key_bytes(self, b):
+        return self.parse_key_bytes(self.clustering_key_types, b)
+
+    """b is a bytes object representing a partition_key in memory"""
+    def parse_partition_key_bytes(self, b):
+        return self.parse_key_bytes(self.partition_key_types, b)
+
+    def deserialize_cql_value(self, abstract_type, b):
+        return self.get_cql_type_deserializer(str(abstract_type['_name']))(b)
+
+    """b is a byte representation of a compound object"""
+    def parse_key_bytes(self, types, b):
+        offset = 0
+        type_nr = 0
+        components = list()
+        while offset < len(b):
+            component_size = int.from_bytes(b[offset:(offset+2)], byteorder='big')
+            offset += 2
+            components.append(self.deserialize_cql_value(types[type_nr], b[offset:(offset+component_size)]))
+            offset += component_size
+            type_nr += 1
+        return components
+
+
+current_schema = None
+
+
+def get_current_schema():
+    if not current_schema:
+        raise Exception('Current schema not set. Use \"scylla set-schema\" to set it.')
+    return current_schema
+
+
+class scylla_set_schema(gdb.Command):
+    """Sets the current schema to be used by schema-aware commands.
+
+    Setting the schema allows some commands and printers to interpret schema-dependent objects and present them
+    in a more friendly form.
+
+    Some commands require schema to work and will fail otherwise.
+    """
+
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla set-schema', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    def get_abstract_types(self, key_type):
+        return [seastar_shared_ptr(key_type).get().dereference() for key_type in std_vector(key_type['_types'])]
+
+    def invoke(self, schema, from_tty):
+        global current_schema
+        if not schema:
+            current_schema = None
+            return
+        schema = gdb.parse_and_eval(schema)
+        typ = schema.type.strip_typedefs()
+        if typ.code == gdb.TYPE_CODE_PTR or typ.code == gdb.TYPE_CODE_REF or typ.code == gdb.TYPE_CODE_RVALUE_REF:
+            schema = schema.referenced_value()
+            typ = schema.type
+        if typ.name.startswith('seastar::lw_shared_ptr<'):
+            schema = seastar_lw_shared_ptr(schema).get().dereference()
+            typ = schema.type
+
+        raw_schema = schema['_raw']
+
+        gdb.write('(schema*) 0x{:x} ks={} cf={} id={} version={}\n'.format(int(schema.address), raw_schema['_ks_name'], raw_schema['_cf_name'], raw_schema['_id'], raw_schema['_version']))
+
+        partition_key_type = self.get_abstract_types(seastar_lw_shared_ptr(schema['_partition_key_type']).get().dereference())
+        clustering_key_type = self.get_abstract_types(seastar_lw_shared_ptr(schema['_clustering_key_type']).get().dereference())
+        current_schema = Schema(schema, partition_key_type, clustering_key_type)
+
+
 class scylla_schema(gdb.Command):
     """Pretty print a schema
 
@@ -5177,11 +5271,17 @@ class scylla_read_stats(gdb.Command):
         else:
             inactive_read_count = len(intrusive_list(semaphore['_inactive_reads']))
 
+
+        try:
+            waiters = int(semaphore["_wait_list"]["_admission_queue"]["_size"])
+        except gdb.error: # 5.1 compatibility
+            waiters = int(semaphore["_wait_list"]["_size"])
+
         gdb.write("Semaphore {} with: {}/{} count and {}/{} memory resources, queued: {}, inactive={}\n".format(
                 semaphore_name,
                 initial_count - int(semaphore['_resources']['count']), initial_count,
                 initial_memory - int(semaphore['_resources']['memory']), initial_memory,
-                int(semaphore['_wait_list']['_size']), inactive_read_count))
+                waiters, inactive_read_count))
 
         gdb.write("{:>10} {:5} {:>12} {}\n".format('permits', 'count', 'memory', 'table/description/state'))
 
@@ -5255,6 +5355,67 @@ class scylla_get_config_value(gdb.Command):
             unqualify(cfg_src),
             unqualify(cfg_status),
             unqualify(cfg_liveness)))
+
+
+class scylla_range_tombstones(gdb.Command):
+    """Prints and validates range tombstones in a given container.
+
+    Currently supported containers:
+        - mutation_partition
+
+    Example:
+
+        (gdb) scylla range-tombstones $mp
+        {
+          start: ['a', 'b'],
+          kind: bound_kind::excl_start,
+          end: ['a', 'b'],
+          kind: bound_kind::incl_end,
+          t: {timestamp = 1672546889091665, deletion_time = {__d = {__r = 1672546889}}}
+        }
+        {
+          start: ['a', 'b'],
+          kind: bound_kind::excl_start,
+          end: ['a', 'c']
+          kind: bound_kind::incl_end,
+          t: {timestamp = 1673731764010123, deletion_time = {__d = {__r = 1673731764}}}
+        }
+
+    """
+
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla range-tombstones', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    """value is an instance of clustering_key"""
+    def parse_clustering(self, value):
+        return get_current_schema().parse_clustering_key(value)
+
+    def invoke(self, partition, from_tty):
+        p = gdb.parse_and_eval(partition)
+
+        prev_end = None
+        for r in intrusive_set(p['_row_tombstones']['_tombstones']):
+            t = r['_tombstone']
+            start = self.parse_clustering(t['start'])
+            end = self.parse_clustering(t['end'])
+            gdb.write('{\n  start: %s,\n  kind: %s,\n  end: %s,\n  kind: %s,\n  t: %s\n}\n' % (
+                start, t['start_kind'], end, t['end_kind'], t['tomb']))
+
+            # Detect crossed boundaries or empty ranges
+            if start > end or (start == end and (str(t['start_kind']) != 'bound_kind::incl_start'
+                                            or str(t['end_kind']) != 'bound_kind::incl_end')):
+                gdb.write('*** Invalid boundaries! ***\n')
+                return
+
+            # Detect out of order ranges
+            if prev_end:
+                if start < prev_end or \
+                        (start == prev_end and (str(prev['end_kind']) == 'bound_kind::incl_end'
+                                                and str(t['start_kind']) == 'bound_kind::incl_start')):
+                    gdb.write('*** Order violated! ***\n')
+                    return
+            prev_end = end
+            prev = t
 
 
 class scylla_gdb_func_dereference_smart_ptr(gdb.Function):
@@ -5545,9 +5706,11 @@ scylla_features()
 scylla_repairs()
 scylla_small_objects()
 scylla_compaction_tasks()
+scylla_set_schema()
 scylla_schema()
 scylla_read_stats()
 scylla_get_config_value()
+scylla_range_tombstones()
 
 
 # Convenience functions

@@ -12,7 +12,7 @@ import logging
 import os.path
 from typing import Any, Optional
 from contextlib import asynccontextmanager
-from aiohttp import request, BaseConnector, UnixConnector
+from aiohttp import request, BaseConnector, UnixConnector, ClientTimeout
 import pytest
 from test.pylib.internal_types import IPAddress, HostID
 
@@ -21,14 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 class HTTPError(Exception):
-    def __init__(self, uri, code, message):            
+    def __init__(self, uri, code, params, json, message):
         super().__init__(message)
         self.uri = uri
         self.code = code
+        self.params = params
+        self.json = json
         self.message = message
 
     def __str__(self):
-        return f"HTTP error {self.code}: {self.message}, uri {self.uri}"
+        return f"HTTP error {self.code}, uri: {self.uri}, " \
+               f"params: {self.params}, json: {self.json}, body:\n{self.message}"
 
 
 # TODO: support ssl and verify_ssl
@@ -43,7 +46,7 @@ class RESTClient(metaclass=ABCMeta):
     async def _fetch(self, method: str, resource: str, response_type: Optional[str] = None,
                      host: Optional[str] = None, port: Optional[int] = None,
                      params: Optional[Mapping[str, str]] = None,
-                     json: Optional[Mapping] = None) -> Any:
+                     json: Optional[Mapping] = None, timeout: Optional[float] = None) -> Any:
         # Can raise exception. See https://docs.aiohttp.org/en/latest/web_exceptions.html
         assert method in ["GET", "POST", "PUT", "DELETE"], f"Invalid HTTP request method {method}"
         assert response_type is None or response_type in ["text", "json"], \
@@ -57,12 +60,13 @@ class RESTClient(metaclass=ABCMeta):
         uri = self.uri_scheme + "://" + host_str + port_str + resource
         logging.debug(f"RESTClient fetching {method} {uri}")
 
+        client_timeout = ClientTimeout(total = timeout if timeout is not None else 300)
         async with request(method, uri,
                            connector = self.connector if hasattr(self, "connector") else None,
-                           params = params, json = json) as resp:
+                           params = params, json = json, timeout = client_timeout) as resp:
             if resp.status != 200:
                 text = await resp.text()
-                raise HTTPError(uri, resp.status, f"{text}, params {params}, json {json}")
+                raise HTTPError(uri, resp.status, params, json, text)
             if response_type is not None:
                 # Return response.text() or response.json()
                 return await getattr(resp, response_type)()
@@ -73,10 +77,10 @@ class RESTClient(metaclass=ABCMeta):
         return await self._fetch("GET", resource_uri, host = host, port = port, params = params)
 
     async def get_text(self, resource_uri: str, host: Optional[str] = None,
-                       port: Optional[int] = None, params: Optional[Mapping[str, str]] = None
-                       ) -> str:
+                       port: Optional[int] = None, params: Optional[Mapping[str, str]] = None,
+                       timeout: Optional[float] = None) -> str:
         ret = await self._fetch("GET", resource_uri, response_type = "text", host = host,
-                                port = port, params = params)
+                                port = port, params = params, timeout = timeout)
         assert isinstance(ret, str), f"get_text: expected str but got {type(ret)} {ret}"
         return ret
 

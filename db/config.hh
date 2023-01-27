@@ -296,6 +296,7 @@ public:
     named_value<bool> consistent_rangemovement;
     named_value<bool> join_ring;
     named_value<bool> load_ring_state;
+    named_value<sstring> replace_node_first_boot;
     named_value<sstring> replace_address;
     named_value<sstring> replace_address_first_boot;
     named_value<sstring> ignore_dead_nodes_for_replace;
@@ -338,6 +339,8 @@ public:
     named_value<uint32_t> max_clustering_key_restrictions_per_query;
     named_value<uint64_t> max_memory_for_unlimited_query_soft_limit;
     named_value<uint64_t> max_memory_for_unlimited_query_hard_limit;
+    named_value<uint32_t> reader_concurrency_semaphore_serialize_limit_multiplier;
+    named_value<uint32_t> reader_concurrency_semaphore_kill_limit_multiplier;
     named_value<uint32_t> twcs_max_window_count;
     named_value<unsigned> initial_sstable_loading_concurrency;
     named_value<bool> enable_3_1_0_compatibility_mode;
@@ -381,6 +384,7 @@ public:
     named_value<tri_mode_restriction> restrict_replication_simplestrategy;
     named_value<tri_mode_restriction> restrict_dtcs;
     named_value<tri_mode_restriction> restrict_twcs_without_default_ttl;
+    named_value<bool> restrict_future_timestamp;
 
     named_value<bool> ignore_truncation_record;
     named_value<bool> force_schema_commit_log;
@@ -392,6 +396,13 @@ public:
     named_value<unsigned> x_log2_compaction_groups;
 
     named_value<bool> consistent_cluster_management;
+
+    named_value<double> wasm_cache_memory_fraction;
+    named_value<uint32_t> wasm_cache_timeout_in_ms;
+    named_value<size_t> wasm_cache_instance_size_limit;
+    named_value<uint64_t> wasm_udf_yield_fuel;
+    named_value<uint64_t> wasm_udf_total_fuel;
+    named_value<size_t> wasm_udf_memory_limit;
 
     named_value<sstring> audit;
     named_value<sstring> audit_categories;

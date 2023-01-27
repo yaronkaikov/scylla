@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include <algorithm>
 #include <functional>
 
 #include <seastar/util/closeable.hh>
@@ -88,6 +89,7 @@
 #include "alternator/controller.hh"
 #include "alternator/ttl.hh"
 #include "tools/entry_point.hh"
+#include "test/perf/entry_point.hh"
 #include "db/per_partition_rate_limit_extension.hh"
 #include "lang/wasm_instance_cache.hh"
 
@@ -290,6 +292,21 @@ static void tcp_syncookies_sanity() {
     }
 }
 
+static void tcp_timestamps_sanity() {
+    try {
+        auto f = file_desc::open("/proc/sys/net/ipv4/tcp_timestamps", O_RDONLY | O_CLOEXEC);
+        char buf[128] = {};
+        f.read(buf, 128);
+        if (sstring(buf) == "0\n") {
+            startlog.warn("sysctl entry net.ipv4.tcp_timestamps is set to 0.\n"
+                          "To performance suffer less in a presence of packet loss, set following parameter on sysctl is strongly recommended:\n"
+                          "net.ipv4.tcp_timestamps=1");
+        }
+    } catch (const std::system_error& e) {
+        startlog.warn("Unable to check if net.ipv4.tcp_timestamps is set {}", e);
+    }
+}
+
 static void
 verify_seastar_io_scheduler(const boost::program_options::variables_map& opts, bool developer_mode) {
     auto note_bad_conf = [developer_mode] (sstring cause) {
@@ -421,7 +438,6 @@ sharded<cql3::query_processor>* the_query_processor;
 sharded<qos::service_level_controller>* the_sl_controller;
 sharded<service::migration_manager>* the_migration_manager;
 sharded<service::storage_service>* the_storage_service;
-sharded<replica::database>* the_database;
 sharded<streaming::stream_manager> *the_stream_manager;
 sharded<gms::feature_service> *the_feature_service;
 sharded<gms::gossiper> *the_gossiper;
@@ -459,6 +475,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     app_cfg.default_task_quota = 500us;
     app_cfg.auto_handle_sigint_sigterm = false;
     app_cfg.max_networking_aio_io_control_blocks = 50000;
+    // We need to have the entire app config to run the app, but we need to
+    // run the app to read the config file with UDF specific options so that
+    // we know whether we need to reserve additional memory for UDFs.
+    app_cfg.reserve_additional_memory = 50 * 1024 * 1024;
     app_template app(std::move(app_cfg));
 
     auto ext = std::make_shared<db::extensions>();
@@ -558,6 +578,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
         }
 
         tcp_syncookies_sanity();
+        tcp_timestamps_sanity();
 
         return seastar::async([&app, cfg, ext, &cm, &db, &qp, &bm, &proxy, &forward_service, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service, &gossiper, &snitch,
@@ -1002,7 +1023,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             std::any stop_udf_cache_handlers;
             if (udf_enabled) {
                 supervisor::notify("starting wasm udf cache");
-                wasm_instance_cache.start(128*1024*1024, std::chrono::seconds(5)).get();
+                size_t max_cache_size = dbcfg.available_memory * cfg->wasm_cache_memory_fraction();
+                wasm_instance_cache.start(max_cache_size, cfg->wasm_cache_instance_size_limit(), std::chrono::milliseconds(cfg->wasm_cache_timeout_in_ms())).get();
                 stop_udf_cache_handlers = defer_verbose_shutdown("udf cache", [] {
                     wasm_instance_cache.stop().get();
                 });
@@ -1059,7 +1081,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // described here: https://github.com/scylladb/scylla/issues/1014
             supervisor::notify("loading system sstables");
             auto system_keyspace_sel = db::table_selector::all_in_keyspace(db::system_keyspace::NAME);
-            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, *cfg, *system_keyspace_sel).get();
+            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, *system_keyspace_sel).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
                 engine().update_blocked_reactor_notify_ms(blocked_reactor_notify_ms);
@@ -1193,7 +1215,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // Needs to be before system_keyspace::setup(), which writes to schema tables.
             supervisor::notify("loading system_schema sstables");
             auto schema_keyspace_sel = db::table_selector::all_in_keyspace(db::schema_tables::NAME);
-            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, *cfg, *schema_keyspace_sel).get();
+            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, *schema_keyspace_sel).get();
 
             // schema migration, if needed, is also done on shard 0
             db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
@@ -1740,40 +1762,49 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
   }
 }
 
+using main_func_type = std::function<int(int, char**)>;
+static main_func_type lookup_main_func(std::string_view name) {
+    std::pair<std::string_view, main_func_type> funcs[] = {
+        {"server", scylla_main},
+        {"types", tools::scylla_types_main},
+        {"sstable", tools::scylla_sstable_main},
+        {"perf-fast-forward", perf::scylla_fast_forward_main},
+        {"perf-row-cache-update", perf::scylla_row_cache_update_main},
+        {"perf-simple-query", perf::scylla_simple_query_main},
+        {"perf-sstable", perf::scylla_sstable_main},
+    };
+    auto found = std::ranges::find_if(funcs, [name] (auto& name_and_func) {
+        return name_and_func.first == name;
+    });
+    if (found == std::end(funcs)) {
+        return {};
+    }
+    return found->second;
+}
+
 int main(int ac, char** av) {
     // early check to avoid triggering
     if (!cpu_sanity()) {
         _exit(71);
     }
 
-    std::function<int(int, char**)> main_func;
-
     std::string exec_name;
     if (ac >= 2) {
         exec_name = av[1];
     }
 
-    bool recognized = true;
-    if (exec_name == "server") {
+    std::function<int(int, char**)> main_func;
+    if (exec_name.empty() || exec_name[0] == '-') {
         main_func = scylla_main;
-    } else if (exec_name == "types") {
-        main_func = tools::scylla_types_main;
-    } else if (exec_name == "sstable") {
-        main_func = tools::scylla_sstable_main;
-    } else if (exec_name.empty() || exec_name[0] == '-') {
-        main_func = scylla_main;
-        recognized = false;
     } else {
+        main_func = lookup_main_func(exec_name);
+        // shift args to consume the recognized tool name
+        std::shift_left(av + 1, av + ac, 1);
+        --ac;
+    }
+    if (!main_func) {
         fmt::print("error: unrecognized first argument: expected it to be \"server\", a regular command-line argument or a valid tool name (see `scylla --list-tools`), but got {}\n", exec_name);
         return 1;
-    }
-
-    if (recognized) {
-        // shift args to consume the recognized tool name
-        --ac;
-        for (int i = 1; i < ac; ++i) {
-            std::swap(av[i], av[i + 1]);
-        }
     }
 
     // Even on the environment which causes error during initalize Scylla,

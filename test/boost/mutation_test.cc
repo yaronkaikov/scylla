@@ -2562,14 +2562,6 @@ SEASTAR_THREAD_TEST_CASE(test_mutation_consume) {
             assert_that(std::move(rebuilt_mut)).is_equal_to(mut);
         }
     }
-    testlog.info("Legacy half reverse");
-    {
-        for (const auto& mut : muts) {
-            mutation_rebuilder_v2 rebuilder(forward_schema);
-            auto rebuilt_mut = *mutation(mut).consume(rebuilder, consume_in_reverse::legacy_half_reverse).result;
-            assert_that(std::move(rebuilt_mut)).is_equal_to(mut);
-        }
-    }
     testlog.info("Reverse");
     {
         for (const auto& mut : muts) {
@@ -2727,6 +2719,22 @@ SEASTAR_THREAD_TEST_CASE(test_position_in_partition_order_with_prefix_keys) {
     auto full_a = prefix_a;
     clustering_key::make_full(*s, full_a);
     auto full_a_a = make_ck("a", "a");
+
+    auto holder = pipv::after_key(*s, prefix_a);
+    BOOST_REQUIRE(holder.holder);
+    {
+        auto holder2 = std::move(holder);
+        BOOST_REQUIRE(cmp(pip::after_key(*s, prefix_a), holder2.view) == 0);
+        BOOST_REQUIRE(holder2.holder);
+    }
+
+    holder = pipv::after_key(*s, full_a_a);
+    BOOST_REQUIRE(!holder.holder);
+    {
+        auto holder2 = std::move(holder);
+        BOOST_REQUIRE(cmp(pip::after_key(*s, full_a_a), holder2.view) == 0);
+        BOOST_REQUIRE(!holder2.holder);
+    }
 
     BOOST_REQUIRE(cmp(pip::before_key(prefix_a), prefix_a) < 0);
     BOOST_REQUIRE(cmp(pip::after_key(*s, prefix_a), prefix_a) > 0);

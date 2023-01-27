@@ -32,6 +32,7 @@ namespace service {
 
 class storage_proxy;
 class storage_service;
+class raft_group_registry;
 
 namespace paxos {
     class paxos_state;
@@ -93,7 +94,7 @@ class system_keyspace : public seastar::peering_sharded_service<system_keyspace>
     sharded<replica::database>& _db;
     std::unique_ptr<local_cache> _cache;
 
-    static schema_ptr raft_config();
+    static schema_ptr raft_snapshot_config();
     static schema_ptr local();
     static schema_ptr peers();
     static schema_ptr peer_events();
@@ -135,7 +136,7 @@ public:
     static constexpr auto SCYLLA_LOCAL = "scylla_local";
     static constexpr auto RAFT = "raft";
     static constexpr auto RAFT_SNAPSHOTS = "raft_snapshots";
-    static constexpr auto RAFT_CONFIG = "raft_config";
+    static constexpr auto RAFT_SNAPSHOT_CONFIG = "raft_snapshot_config";
     static constexpr auto REPAIR_HISTORY = "repair_history";
     static constexpr auto GROUP0_HISTORY = "group0_history";
     static constexpr auto DISCOVERY = "discovery";
@@ -198,7 +199,7 @@ public:
         static schema_ptr batchlog();
     };
 
-    static constexpr const char* extra_durable_tables[] = { PAXOS, SCYLLA_LOCAL, RAFT, RAFT_SNAPSHOTS, RAFT_CONFIG, DISCOVERY, BROADCAST_KV_STORE };
+    static constexpr const char* extra_durable_tables[] = { PAXOS, SCYLLA_LOCAL, RAFT, RAFT_SNAPSHOTS, RAFT_SNAPSHOT_CONFIG, DISCOVERY, BROADCAST_KV_STORE };
 
     static bool is_extra_durable(const sstring& name);
 
@@ -256,6 +257,7 @@ public:
     future<> make(distributed<replica::database>& db,
                          distributed<service::storage_service>& ss,
                          sharded<gms::gossiper>& g,
+                         sharded<service::raft_group_registry>& raft_gr,
                          db::config& cfg,
                          table_selector& = table_selector::all());
 

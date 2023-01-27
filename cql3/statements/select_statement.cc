@@ -171,7 +171,9 @@ select_statement::select_statement(schema_ptr schema,
     , _restrictions_need_filtering(_restrictions->need_filtering())
     , _group_by_cell_indices(group_by_cell_indices)
     , _is_reversed(is_reversed)
+    , _limit_unset_guard(limit)
     , _limit(std::move(limit))
+    , _per_partition_limit_unset_guard(per_partition_limit)
     , _per_partition_limit(std::move(per_partition_limit))
     , _ordering_comparator(std::move(ordering_comparator))
     , _stats(stats)
@@ -247,7 +249,7 @@ select_statement::make_partition_slice(const query_options& options) const
 
     if (_parameters->is_distinct()) {
         return query::partition_slice({ query::clustering_range::make_open_ended_both_sides() },
-            std::move(static_columns), {}, _opts, nullptr, options.get_cql_serialization_format());
+            std::move(static_columns), {}, _opts, nullptr);
     }
 
     auto bounds =_restrictions->get_clustering_bounds(options);
@@ -263,13 +265,14 @@ select_statement::make_partition_slice(const query_options& options) const
         ++_stats.reverse_queries;
     }
     return query::partition_slice(std::move(bounds),
-        std::move(static_columns), std::move(regular_columns), _opts, nullptr, options.get_cql_serialization_format(), get_per_partition_limit(options));
+        std::move(static_columns), std::move(regular_columns), _opts, nullptr, get_per_partition_limit(options));
 }
 
 uint64_t select_statement::do_get_limit(const query_options& options,
                                         const std::optional<expr::expression>& limit,
+                                        const expr::unset_bind_variable_guard& limit_unset_guard,
                                         uint64_t default_limit) const {
-    if (!limit.has_value() || _selection->is_aggregate()) {
+    if (!limit.has_value() || limit_unset_guard.is_unset(options) || _selection->is_aggregate()) {
         return default_limit;
     }
 
@@ -277,11 +280,8 @@ uint64_t select_statement::do_get_limit(const query_options& options,
     if (val.is_null()) {
         throw exceptions::invalid_request_exception("Invalid null value of limit");
     }
-    if (val.is_unset_value()) {
-        return default_limit;
-    }
     try {
-        auto l = val.view().validate_and_deserialize<int32_t>(*int32_type, cql_serialization_format::internal());
+        auto l = val.view().validate_and_deserialize<int32_t>(*int32_type);
         if (l <= 0) {
             throw exceptions::invalid_request_exception("LIMIT must be strictly positive");
         }
@@ -410,7 +410,7 @@ select_statement::do_execute(query_processor& qp,
     if (aggregate || nonpaged_filtering) {
         return do_with(
                 cql3::selection::result_set_builder(*_selection, now,
-                        options.get_cql_serialization_format(), *_group_by_cell_indices), std::move(p),
+                        *_group_by_cell_indices), std::move(p),
                 [this, page_size, now, timeout](auto& builder, std::unique_ptr<service::pager::query_pager>& p) {
                     return utils::result_do_until([&p] {return p->is_exhausted();},
                             [&p, &builder, page_size, now, timeout] {
@@ -817,8 +817,7 @@ select_statement::process_results_complex(foreign_ptr<lw_shared_ptr<query::resul
                                   lw_shared_ptr<query::read_command> cmd,
                                   const query_options& options,
                                   gc_clock::time_point now) const {
-    cql3::selection::result_set_builder builder(*_selection, now,
-            options.get_cql_serialization_format());
+    cql3::selection::result_set_builder builder(*_selection, now);
     co_return co_await builder.with_thread_if_needed([&] {
         if (_restrictions_need_filtering) {
             results->ensure_counts();
@@ -1105,7 +1104,7 @@ indexed_table_select_statement::do_execute(query_processor& qp,
     // the paging state between requesting data from replicas.
     const bool aggregate = _selection->is_aggregate() || has_group_by();
     if (aggregate) {
-        return do_with(cql3::selection::result_set_builder(*_selection, now, options.get_cql_serialization_format(), *_group_by_cell_indices), std::make_unique<cql3::query_options>(cql3::query_options(options)),
+        return do_with(cql3::selection::result_set_builder(*_selection, now, *_group_by_cell_indices), std::make_unique<cql3::query_options>(cql3::query_options(options)),
                 [this, &options, &qp, &state, now, whole_partitions, partition_slices] (cql3::selection::result_set_builder& builder, std::unique_ptr<cql3::query_options>& internal_options) {
             // page size is set to the internal count page size, regardless of the user-provided value
             internal_options.reset(new cql3::query_options(std::move(internal_options), options.get_paging_state(), internal_paging_size));
@@ -1270,7 +1269,7 @@ indexed_table_select_statement::read_posting_list(query_processor& qp,
         return qp.proxy().query_result(_view_schema, cmd, std::move(partition_ranges), options.get_consistency(), {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state()})
         .then(utils::result_wrap([this, now, &options, selection = std::move(selection), partition_slice = std::move(partition_slice)] (service::storage_proxy::coordinator_query_result qr)
                 -> coordinator_result<::shared_ptr<cql_transport::messages::result_message::rows>> {
-            cql3::selection::result_set_builder builder(*selection, now, options.get_cql_serialization_format());
+            cql3::selection::result_set_builder builder(*selection, now);
             query::result_view::consume(*qr.query_result,
                                         std::move(partition_slice),
                                         cql3::selection::result_set_builder::visitor(builder, *_view_schema, *selection));
@@ -1550,7 +1549,7 @@ parallelized_select_statement::do_execute(
 
     command->slice.options.set<query::partition_slice::option::allow_short_read>();
     auto timeout_duration = get_timeout(state.get_client_state(), options);
-    auto timeout = db::timeout_clock::now() + timeout_duration;
+    auto timeout = lowres_system_clock::now() + timeout_duration;
     auto reductions = _selection->get_reductions();
 
     query::forward_request req = {

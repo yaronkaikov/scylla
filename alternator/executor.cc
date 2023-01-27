@@ -115,8 +115,7 @@ std::string json_string::to_json() const {
 void executor::supplement_table_info(rjson::value& descr, const schema& schema, service::storage_proxy& sp) {
     rjson::add(descr, "CreationDateTime", rjson::value(std::chrono::duration_cast<std::chrono::seconds>(gc_clock::now().time_since_epoch()).count()));
     rjson::add(descr, "TableStatus", "ACTIVE");
-    auto schema_id_str = schema.id().to_sstring();
-    rjson::add(descr, "TableId", rjson::from_string(schema_id_str));
+    rjson::add(descr, "TableId", rjson::from_string(schema.id().to_sstring()));
 
     executor::supplement_table_stream_info(descr, schema, sp);
 }
@@ -128,6 +127,20 @@ void executor::supplement_table_info(rjson::value& descr, const schema& schema, 
 // See https://github.com/scylladb/scylla/issues/4480
 static constexpr int max_table_name_length = 222;
 
+static bool valid_table_name_chars(std::string_view name) {
+    for (auto c : name) {
+        if ((c < 'a' || c > 'z') &&
+            (c < 'A' || c > 'Z') &&
+            (c < '0' || c > '9') &&
+            c != '_' &&
+            c != '-' &&
+            c != '.') {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The DynamoDB developer guide, https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.NamingRulesDataTypes.html#HowItWorks.NamingRules
 // specifies that table names "names must be between 3 and 255 characters long
 // and can contain only the following characters: a-z, A-Z, 0-9, _ (underscore), - (dash), . (dot)
@@ -137,8 +150,7 @@ static void validate_table_name(const std::string& name) {
         throw api_error::validation(
                 format("TableName must be at least 3 characters long and at most {} characters long", max_table_name_length));
     }
-    static const std::regex valid_table_name_chars ("[a-zA-Z0-9_.-]*");
-    if (!std::regex_match(name.c_str(), valid_table_name_chars)) {
+    if (!valid_table_name_chars(name)) {
         throw api_error::validation(
                 "TableName must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
     }
@@ -154,11 +166,10 @@ static void validate_table_name(const std::string& name) {
 // The view_name() function assumes the table_name has already been validated
 // but validates the legality of index_name and the combination of both.
 static std::string view_name(const std::string& table_name, std::string_view index_name, const std::string& delim = ":") {
-    static const std::regex valid_index_name_chars ("[a-zA-Z0-9_.-]*");
     if (index_name.length() < 3) {
         throw api_error::validation("IndexName must be at least 3 characters long");
     }
-    if (!std::regex_match(index_name.data(), valid_index_name_chars)) {
+    if (!valid_table_name_chars(index_name)) {
         throw api_error::validation(
                 format("IndexName '{}' must satisfy regular expression pattern: [a-zA-Z0-9_.-]+", index_name));
     }
@@ -2305,7 +2316,7 @@ void executor::describe_single_item(const cql3::selection::selection& selection,
                 rjson::add_with_string_name(field, type_to_string((*column_it)->type), json_key_column_value(*cell, **column_it));
             }
         } else if (cell) {
-            auto deserialized = attrs_type()->deserialize(*cell, cql_serialization_format::latest());
+            auto deserialized = attrs_type()->deserialize(*cell);
             auto keys_and_values = value_cast<map_type_impl::native_type>(deserialized);
             for (auto entry : keys_and_values) {
                 std::string attr_name = value_cast<sstring>(entry.first);
@@ -2340,7 +2351,7 @@ std::optional<rjson::value> executor::describe_single_item(schema_ptr schema,
         const std::optional<attrs_to_get>& attrs_to_get) {
     rjson::value item = rjson::empty_object();
 
-    cql3::selection::result_set_builder builder(selection, gc_clock::now(), cql_serialization_format::latest());
+    cql3::selection::result_set_builder builder(selection, gc_clock::now());
     query::result_view::consume(query_result, slice, cql3::selection::result_set_builder::visitor(builder, *schema, selection));
 
     auto result_set = builder.build();
@@ -2363,7 +2374,7 @@ std::vector<rjson::value> executor::describe_multi_item(schema_ptr schema,
         const cql3::selection::selection& selection,
         const query::result& query_result,
         const std::optional<attrs_to_get>& attrs_to_get) {
-    cql3::selection::result_set_builder builder(selection, gc_clock::now(), cql_serialization_format::latest());
+    cql3::selection::result_set_builder builder(selection, gc_clock::now());
     query::result_view::consume(query_result, slice, cql3::selection::result_set_builder::visitor(builder, *schema, selection));
     auto result_set = builder.build();
     std::vector<rjson::value> ret;
@@ -3107,20 +3118,10 @@ future<executor::request_return_type> executor::get_item(client_state& client_st
     });
 }
 
-// is_big() checks approximately if the given JSON value is "bigger" than
-// the given big_size number of bytes. The goal is to *quickly* detect
-// oversized JSON that, for example, is too large to be serialized to a
-// contiguous string - we don't need an accurate size for that. Moreover,
-// as soon as we detect that the JSON is indeed "big", we can return true
-// and don't need to continue calculating its exact size.
-// For simplicity, we use a recursive implementation. This is fine because
-// Alternator limits the depth of JSONs it reads from inputs, and doesn't
-// add more than a couple of levels in its own output construction.
-
 static void check_big_object(const rjson::value& val, int& size_left);
 static void check_big_array(const rjson::value& val, int& size_left);
 
-static bool is_big(const rjson::value& val, int big_size = 100'000) {
+bool is_big(const rjson::value& val, int big_size) {
     if (val.IsString()) {
         return ssize_t(val.GetStringLength()) > big_size;
     } else if (val.IsObject()) {
@@ -3511,7 +3512,7 @@ public:
                     rjson::add_with_string_name(field, type_to_string((*_column_it)->type), json_key_column_value(bv, **_column_it));
                 }
             } else {
-                auto deserialized = attrs_type()->deserialize(bv, cql_serialization_format::latest());
+                auto deserialized = attrs_type()->deserialize(bv);
                 auto keys_and_values = value_cast<map_type_impl::native_type>(deserialized);
                 for (auto entry : keys_and_values) {
                     std::string attr_name = value_cast<sstring>(entry.first);
@@ -3568,7 +3569,7 @@ public:
     }
 };
 
-static std::tuple<rjson::value, size_t> describe_items(schema_ptr schema, const query::partition_slice& slice, const cql3::selection::selection& selection, std::unique_ptr<cql3::result_set> result_set, std::optional<attrs_to_get>&& attrs_to_get, filter&& filter) {
+static std::tuple<rjson::value, size_t> describe_items(const cql3::selection::selection& selection, std::unique_ptr<cql3::result_set> result_set, std::optional<attrs_to_get>&& attrs_to_get, filter&& filter) {
     describe_items_visitor visitor(selection.get_columns(), attrs_to_get, filter);
     result_set->visit(visitor);
     auto scanned_count = visitor.get_scanned_count();
@@ -3682,7 +3683,7 @@ static future<executor::request_return_type> do_query(service::storage_proxy& pr
         }
         auto paging_state = rs->get_metadata().paging_state();
         bool has_filter = filter;
-        auto [items, size] = describe_items(schema, partition_slice, *selection, std::move(rs), std::move(attrs_to_get), std::move(filter));
+        auto [items, size] = describe_items(*selection, std::move(rs), std::move(attrs_to_get), std::move(filter));
         if (paging_state) {
             rjson::add(items, "LastEvaluatedKey", encode_paging_state(*schema, *paging_state));
         }
@@ -3691,8 +3692,7 @@ static future<executor::request_return_type> do_query(service::storage_proxy& pr
             // update our "filtered_row_matched_total" for all the rows matched, despited the filter
             cql_stats.filtered_rows_matched_total += size;
         }
-        // TODO: better threshold
-        if (size > 10) {
+        if (is_big(items)) {
             return make_ready_future<executor::request_return_type>(make_streamed(std::move(items)));
         }
         return make_ready_future<executor::request_return_type>(make_jsonable(std::move(items)));

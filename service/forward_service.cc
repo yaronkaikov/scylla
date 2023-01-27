@@ -14,7 +14,6 @@
 #include <seastar/core/smp.hh>
 #include <stdexcept>
 
-#include "cql_serialization_format.hh"
 #include "db/consistency_level.hh"
 #include "dht/i_partitioner.hh"
 #include "dht/sharder.hh"
@@ -114,7 +113,7 @@ void forward_aggregates::merge(query::forward_result &result, query::forward_res
 
     for (size_t i = 0; i < _aggrs.size(); i++) {
         _aggrs[i]->set_accumulator(result.query_results[i]);
-        _aggrs[i]->reduce(cql_serialization_format::internal(), std::move(other.query_results[i]));
+        _aggrs[i]->reduce(std::move(other.query_results[i]));
         result.query_results[i] = _aggrs[i]->get_accumulator();
     }
 }
@@ -132,7 +131,7 @@ void forward_aggregates::finalize(query::forward_result &result) {
 
     for (size_t i = 0; i < _aggrs.size(); i++) {
         _aggrs[i]->set_accumulator(result.query_results[i]);
-        result.query_results[i] = _aggrs[i]->compute(cql_serialization_format::internal());
+        result.query_results[i] = _aggrs[i]->compute();
     }
 }
 
@@ -365,6 +364,13 @@ future<query::forward_result> forward_service::dispatch_to_shards(
     });
 }
 
+static lowres_clock::time_point compute_timeout(const query::forward_request& req) {
+    lowres_system_clock::duration time_left = req.timeout - lowres_system_clock::now();
+    lowres_clock::time_point timeout_point = lowres_clock::now() + time_left;
+
+    return timeout_point;
+}
+
 // This function executes forward_request on a shard.
 // It retains partition ranges owned by this shard from requested partition
 // ranges vector, so that only owned ones are queried.
@@ -383,7 +389,7 @@ future<query::forward_result> forward_service::execute_on_this_shard(
 
     schema_ptr schema = local_schema_registry().get(req.cmd.schema_version);
 
-    auto timeout = req.timeout;
+    auto timeout = compute_timeout(req);
     auto now = gc_clock::now();
 
     auto selection = mock_selection(req, schema, _db.local());
@@ -398,14 +404,12 @@ future<query::forward_result> forward_service::execute_on_this_shard(
         std::optional<std::vector<sstring_view>>(), // Represents empty names.
         std::vector<cql3::raw_value>(), // Represents empty values.
         true, // Skip metadata.
-        cql3::query_options::specific_options::DEFAULT,
-        cql_serialization_format::latest()
+        cql3::query_options::specific_options::DEFAULT
     );
 
     auto rs_builder = cql3::selection::result_set_builder(
         *selection,
         now,
-        cql_serialization_format::latest(),
         std::vector<size_t>() // Represents empty GROUP BY indices.
     );
 
@@ -552,7 +556,6 @@ future<query::forward_result> forward_service::dispatch(query::forward_request r
                         [&req, addr = std::move(addr), &result_, tr_state_ = std::move(tr_state_)] (
                             query::forward_result partial_result
                         ) mutable {
-                            forward_aggregates aggrs(req);
                             auto partial_printer = seastar::value_of([&req, &partial_result] { 
                                 return query::forward_result::printer {
                                     .functions = get_functions(req),
@@ -562,8 +565,10 @@ future<query::forward_result> forward_service::dispatch(query::forward_request r
                             tracing::trace(tr_state_, "Received forward_result={} from {}", partial_printer, addr);
                             flogger.debug("received forward_result={} from {}", partial_printer, addr);
                             
-                            return aggrs.with_thread_if_needed([&result_, &aggrs, partial_result = std::move(partial_result)] () mutable {
-                                aggrs.merge(result_, std::move(partial_result));
+                            return do_with(forward_aggregates(req), [&result_, partial_result = std::move(partial_result)] (forward_aggregates& aggrs) mutable {
+                                return aggrs.with_thread_if_needed([&result_, &aggrs, partial_result = std::move(partial_result)] () mutable {
+                                    aggrs.merge(result_, std::move(partial_result));
+                                });
                             });
                     });       
                 }

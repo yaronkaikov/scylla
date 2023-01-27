@@ -21,10 +21,10 @@ using namespace cql3;
 using namespace cql3::expr;
 using namespace cql3::expr::test_utils;
 
-bind_variable new_bind_variable(int bind_index) {
+bind_variable new_bind_variable(int bind_index, data_type type = int32_type) {
     return bind_variable {
         .bind_index = bind_index,
-        .receiver = nullptr
+        .receiver = make_lw_shared<column_specification>("ks", "tab", make_shared<column_identifier>("?", true), std::move(type)),
     };
 }
 
@@ -383,11 +383,6 @@ BOOST_AUTO_TEST_CASE(evaluate_constant_null) {
     BOOST_REQUIRE_EQUAL(evaluate(constant_null_with_type, evaluation_inputs{}), raw_value::make_null());
 }
 
-BOOST_AUTO_TEST_CASE(evaluate_constant_unset) {
-    expression constant_unset = constant::make_unset_value();
-    BOOST_REQUIRE_EQUAL(evaluate(constant_unset, evaluation_inputs{}), raw_value::make_unset_value());
-}
-
 BOOST_AUTO_TEST_CASE(evaluate_constant_empty) {
     expression constant_empty_bool = constant(raw_value::make_value(bytes()), boolean_type);
     BOOST_REQUIRE(evaluate(constant_empty_bool, evaluation_inputs{}).is_empty_value());
@@ -532,6 +527,11 @@ BOOST_AUTO_TEST_CASE(evaluate_bind_variable_performs_validation) {
     BOOST_REQUIRE_THROW(evaluate(bind_var, inputs), exceptions::invalid_request_exception);
 }
 
+BOOST_AUTO_TEST_CASE(evaluate_bind_variable_vs_unset) {
+    auto qo = query_options(cql3::raw_value_vector_with_unset({raw_value::make_null()}, {true}));
+    BOOST_REQUIRE_THROW(evaluate(new_bind_variable(0), evaluation_inputs{.options = &qo}), exceptions::invalid_request_exception);
+}
+
 BOOST_AUTO_TEST_CASE(evaluate_list_collection_constructor_empty) {
     // TODO: Empty multi-cell collections are trated as NULL in the database,
     // should the conversion happen in evaluate?
@@ -553,13 +553,7 @@ BOOST_AUTO_TEST_CASE(evaluate_list_collection_constructor_does_not_sort) {
 BOOST_AUTO_TEST_CASE(evaluate_list_collection_constructor_with_null) {
     expression list_with_null =
         make_list_constructor({make_int_const(1), constant::make_null(int32_type), make_int_const(3)}, int32_type);
-    BOOST_REQUIRE_THROW(evaluate(list_with_null, evaluation_inputs{}), exceptions::invalid_request_exception);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_list_collection_constructor_with_unset) {
-    expression list_with_unset = make_list_constructor(
-        {make_int_const(1), constant::make_unset_value(int32_type), make_int_const(3)}, int32_type);
-    BOOST_REQUIRE_THROW(evaluate(list_with_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
+    BOOST_REQUIRE_EQUAL(evaluate(list_with_null, evaluation_inputs{}), make_int_list_raw({1, std::nullopt, 3}));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_list_collection_constructor_with_empty_value) {
@@ -591,12 +585,6 @@ BOOST_AUTO_TEST_CASE(evaluate_set_collection_constructor_with_null) {
     expression set_with_null =
         make_set_constructor({make_int_const(1), constant::make_null(int32_type), make_int_const(3)}, int32_type);
     BOOST_REQUIRE_THROW(evaluate(set_with_null, evaluation_inputs{}), exceptions::invalid_request_exception);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_set_collection_constructor_with_unset) {
-    expression set_with_unset = make_set_constructor(
-        {make_int_const(1), constant::make_unset_value(int32_type), make_int_const(3)}, int32_type);
-    BOOST_REQUIRE_THROW(evaluate(set_with_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_set_collection_constructor_with_empty) {
@@ -662,28 +650,6 @@ BOOST_AUTO_TEST_CASE(evaluate_map_collection_constructor_with_null_value) {
     BOOST_REQUIRE_THROW(evaluate(map_with_null_value, evaluation_inputs{}), exceptions::invalid_request_exception);
 }
 
-BOOST_AUTO_TEST_CASE(evaluate_map_collection_constructor_with_unset_key) {
-    expression map_with_unset_key = make_map_constructor(
-        {
-            {make_int_const(1), make_int_const(2)},
-            {constant::make_unset_value(int32_type), make_int_const(4)},
-            {make_int_const(5), make_int_const(6)},
-        },
-        int32_type, int32_type);
-    BOOST_REQUIRE_THROW(evaluate(map_with_unset_key, evaluation_inputs{}), exceptions::invalid_request_exception);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_map_collection_constructor_with_unset_value) {
-    expression map_with_unset_value = make_map_constructor(
-        {
-            {make_int_const(1), make_int_const(2)},
-            {make_int_const(3), constant::make_unset_value(int32_type)},
-            {make_int_const(5), make_int_const(6)},
-        },
-        int32_type, int32_type);
-    BOOST_REQUIRE_THROW(evaluate(map_with_unset_value, evaluation_inputs{}), exceptions::invalid_request_exception);
-}
-
 BOOST_AUTO_TEST_CASE(evaluate_map_collection_constructor_with_empty_key) {
     expression map_with_empty_key = make_map_constructor(
         {
@@ -736,12 +702,6 @@ BOOST_AUTO_TEST_CASE(evaluate_tuple_constructor_with_null) {
                         make_tuple_raw({make_int_raw(12), raw_value::make_null(), make_int_raw(34)}));
 }
 
-BOOST_AUTO_TEST_CASE(evaluate_tuple_constructor_with_unset) {
-    expression tuple_with_unset =
-        make_tuple_constructor({make_int_const(12), constant::make_unset_value(int32_type)}, {int32_type, utf8_type});
-    BOOST_REQUIRE_THROW(evaluate(tuple_with_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
-}
-
 BOOST_AUTO_TEST_CASE(evaluate_tuple_constructor_with_empty) {
     expression tuple_with_empty = make_tuple_constructor(
         {make_int_const(12), make_empty_const(int32_type), make_int_const(34)}, {int32_type, utf8_type, int32_type});
@@ -774,13 +734,6 @@ BOOST_AUTO_TEST_CASE(evaluate_usertype_constructor_with_null) {
                                                                {"field3", make_bool_const(true)}});
     BOOST_REQUIRE_EQUAL(evaluate(usertype_with_null, evaluation_inputs{}),
                         make_tuple_raw({make_int_raw(123), raw_value::make_null(), make_bool_raw(true)}));
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_usertype_constructor_with_unset) {
-    expression usertype_with_unset = make_usertype_constructor({{"field1", make_int_const(123)},
-                                                                {"field2", constant::make_unset_value(utf8_type)},
-                                                                {"field3", make_bool_const(true)}});
-    BOOST_REQUIRE_THROW(evaluate(usertype_with_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_usertype_constructor_with_empty) {
@@ -818,8 +771,6 @@ BOOST_AUTO_TEST_CASE(evalaute_subscripted_empty_list) {
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(list, make_int_const(std::numeric_limits<int32_t>::min())),
                         raw_value::make_null());
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(list, constant::make_null(int32_type)), raw_value::make_null());
-    BOOST_REQUIRE_THROW(evaluate_subscripted(list, constant::make_unset_value(int32_type)),
-                        exceptions::invalid_request_exception);
     
     // TODO: Should empty value list indexes cause an error? Why not return NULL?
     BOOST_REQUIRE_THROW(evaluate_subscripted(list, make_empty_const(int32_type)), empty_value_exception);
@@ -873,12 +824,6 @@ BOOST_AUTO_TEST_CASE(evaluate_subscripted_list_null_index) {
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(list, constant::make_null(int32_type)), raw_value::make_null());
 }
 
-BOOST_AUTO_TEST_CASE(evaluate_subscripted_list_unset_index) {
-    constant list = make_subscript_test_list();
-    BOOST_REQUIRE_THROW(evaluate_subscripted(list, constant::make_unset_value(int32_type)),
-                        exceptions::invalid_request_exception);
-}
-
 BOOST_AUTO_TEST_CASE(evaluate_subscripted_list_empty_index) {
     constant list = make_subscript_test_list();
     // TODO: Should empty value list indexes cause an error? Why not return NULL?
@@ -890,9 +835,6 @@ BOOST_AUTO_TEST_CASE(evaluate_subscripted_list_null_list) {
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(list, make_int_const(0)), raw_value::make_null());
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(list, make_empty_const(int32_type)), raw_value::make_null());
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(list, constant::make_null(int32_type)), raw_value::make_null());
-
-    // TODO: Shouldn't this throw an error?
-    BOOST_REQUIRE_EQUAL(evaluate_subscripted(list, constant::make_unset_value(int32_type)), raw_value::make_null());
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_subscripted_empty_map) {
@@ -907,8 +849,6 @@ BOOST_AUTO_TEST_CASE(evaluate_subscripted_empty_map) {
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(map, make_int_const(std::numeric_limits<int32_t>::max())),
                         raw_value::make_null());
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(map, constant::make_null(int32_type)), raw_value::make_null());
-    BOOST_REQUIRE_THROW(evaluate_subscripted(map, constant::make_unset_value(int32_type)),
-                        exceptions::invalid_request_exception);
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(map, make_empty_const(int32_type)), raw_value::make_null());
 }
 
@@ -954,12 +894,6 @@ BOOST_AUTO_TEST_CASE(evaluate_subscripted_map_null_index) {
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(map, constant::make_null(int32_type)), raw_value::make_null());
 }
 
-BOOST_AUTO_TEST_CASE(evaluate_subscripted_map_unset_index) {
-    constant map = make_subscript_test_map();
-    BOOST_REQUIRE_THROW(evaluate_subscripted(map, constant::make_unset_value(int32_type)),
-                        exceptions::invalid_request_exception);
-}
-
 BOOST_AUTO_TEST_CASE(evaluate_subscripted_map_empty) {
     // Empty list values seem to not be allowed.
     constant map = make_empty_const(map_type_impl::get_instance(int32_type, int32_type, true));
@@ -971,9 +905,6 @@ BOOST_AUTO_TEST_CASE(evaluate_subscripted_map_null_map) {
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(map, make_int_const(0)), raw_value::make_null());
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(map, make_empty_const(int32_type)), raw_value::make_null());
     BOOST_REQUIRE_EQUAL(evaluate_subscripted(map, constant::make_null(int32_type)), raw_value::make_null());
-
-    // TODO: Shouldn't this throw an error?
-    BOOST_REQUIRE_EQUAL(evaluate_subscripted(map, constant::make_unset_value(int32_type)), raw_value::make_null());
 }
 
 enum expected_invalid_or_valid { expected_valid, expected_invalid };
@@ -989,7 +920,7 @@ static void check_bind_variable_evaluate(constant check_value, expected_invalid_
     expression bind_var = bind_variable{.bind_index = 0, .receiver = make_receiver(check_value.type, "bind_var")};
 
     auto [inputs, inputs_data] = make_evaluation_inputs(
-        test_schema, {{"pk", make_int_raw(0)}, {"r", raw_value::make_null()}}, {check_value.value});
+        test_schema, {{"pk", make_int_raw(0)}, {"r", cql3::raw_value::make_null()}}, {check_value.value});
 
     switch (expected_validity) {
         case expected_valid:
@@ -1001,16 +932,10 @@ static void check_bind_variable_evaluate(constant check_value, expected_invalid_
     }
 }
 
-BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_no_null_in_list) {
+BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_null_in_list) {
     constant list_with_null =
         make_list_const({make_int_const(1), constant::make_null(int32_type), make_int_const(2)}, int32_type);
-    check_bind_variable_evaluate(list_with_null, expected_invalid);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_no_unset_in_list) {
-    constant list_with_unset =
-        make_list_const({make_int_const(1), constant::make_unset_value(int32_type), make_int_const(2)}, int32_type);
-    check_bind_variable_evaluate(list_with_unset, expected_invalid);
+    check_bind_variable_evaluate(list_with_null, expected_valid);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_empty_in_list) {
@@ -1023,12 +948,6 @@ BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_no_null_in_set) {
     constant set_with_null =
         make_set_const({make_int_const(1), constant::make_null(int32_type), make_int_const(2)}, int32_type);
     check_bind_variable_evaluate(set_with_null, expected_invalid);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_no_unset_in_set) {
-    constant set_with_unset =
-        make_set_const({make_int_const(1), constant::make_unset_value(int32_type), make_int_const(2)}, int32_type);
-    check_bind_variable_evaluate(set_with_unset, expected_invalid);
 }
 
 // TODO: This fails, but I feel like this is a bug.
@@ -1046,14 +965,6 @@ BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_no_null_key_in_map) {
     check_bind_variable_evaluate(map_with_null_key, expected_invalid);
 }
 
-BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_no_unset_key_in_map) {
-    constant map_with_unset_key = make_map_const({{make_int_const(1), make_int_const(2)},
-                                                  {constant::make_unset_value(int32_type), make_int_const(4)},
-                                                  {make_int_const(5), make_int_const(6)}},
-                                                 int32_type, int32_type);
-    check_bind_variable_evaluate(map_with_unset_key, expected_invalid);
-}
-
 BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_empty_key_in_map) {
     constant map_with_empty_key = make_map_const({{make_empty_const(int32_type), make_int_const(4)},
                                                   {make_int_const(1), make_int_const(2)},
@@ -1068,14 +979,6 @@ BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_no_null_value_in_map) {
                                                    {make_int_const(5), make_int_const(6)}},
                                                   int32_type, int32_type);
     check_bind_variable_evaluate(map_with_null_value, expected_invalid);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_no_unset_value_in_map) {
-    constant map_with_unset_value = make_map_const({{make_int_const(1), make_int_const(2)},
-                                                    {make_int_const(3), constant::make_unset_value(int32_type)},
-                                                    {make_int_const(5), make_int_const(6)}},
-                                                   int32_type, int32_type);
-    check_bind_variable_evaluate(map_with_unset_value, expected_invalid);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_empty_value_in_map) {
@@ -1110,12 +1013,7 @@ static constant create_nested_list_with_value(constant value_in_list) {
 
 BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_null_in_lists_recursively) {
     constant list_with_null = create_nested_list_with_value(constant::make_null(int32_type));
-    check_bind_variable_evaluate(list_with_null, expected_invalid);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_unset_in_lists_recursively) {
-    constant list_with_unset = create_nested_list_with_value(constant::make_unset_value(int32_type));
-    check_bind_variable_evaluate(list_with_unset, expected_invalid);
+    check_bind_variable_evaluate(list_with_null, expected_valid);
 }
 
 // TODO: This fails, but I feel like this is a bug.
@@ -1148,11 +1046,6 @@ static constant create_nested_set_with_value(constant value_in_set) {
 BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_null_in_sets_recursively) {
     constant set_with_null = create_nested_set_with_value(constant::make_null(int32_type));
     check_bind_variable_evaluate(set_with_null, expected_invalid);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_unset_in_sets_recursively) {
-    constant set_with_unset = create_nested_set_with_value(constant::make_unset_value(int32_type));
-    check_bind_variable_evaluate(set_with_unset, expected_invalid);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_empty_in_sets_recursively) {
@@ -1205,16 +1098,6 @@ BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_null_key_in_maps_recursive
 
     constant map_with_null_key2 = create_nested_map_with_key(make_int_const(1), constant::make_null(int32_type));
     check_bind_variable_evaluate(map_with_null_key2, expected_invalid);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_unset_key_in_maps_recursively) {
-    constant map_with_unset_key1 =
-        create_nested_map_with_key(constant::make_unset_value(int32_type), make_int_const(13));
-    check_bind_variable_evaluate(map_with_unset_key1, expected_invalid);
-
-    constant map_with_unset_key2 =
-        create_nested_map_with_key(make_int_const(1), constant::make_unset_value(int32_type));
-    check_bind_variable_evaluate(map_with_unset_key2, expected_invalid);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_empty_key_in_maps_recursively) {
@@ -1270,16 +1153,6 @@ BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_null_value_in_maps_recursi
 
     constant map_with_null_value2 = create_nested_map_with_value(make_int_const(1), constant::make_null(int32_type));
     check_bind_variable_evaluate(map_with_null_value2, expected_invalid);
-}
-
-BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_unset_value_in_maps_recursively) {
-    constant map_with_unset_value1 =
-        create_nested_map_with_value(constant::make_unset_value(int32_type), make_int_const(13));
-    check_bind_variable_evaluate(map_with_unset_value1, expected_invalid);
-
-    constant map_with_unset_value2 =
-        create_nested_map_with_value(make_int_const(1), constant::make_unset_value(int32_type));
-    check_bind_variable_evaluate(map_with_unset_value2, expected_invalid);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_bind_variable_validates_empty_value_in_maps_recursively) {
@@ -1362,7 +1235,7 @@ BOOST_AUTO_TEST_CASE(prepare_subscript_list) {
 
     expression sub =
         subscript{.val = unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("r", true)},
-                  .sub = untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"}};
+                  .sub = make_int_untyped("123")};
 
     expression prepared = prepare_expression(sub, db, "test_ks", table_schema.get(), nullptr);
 
@@ -1383,7 +1256,7 @@ BOOST_AUTO_TEST_CASE(prepare_subscript_map) {
 
     expression sub =
         subscript{.val = unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("r", true)},
-                  .sub = untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "true"}};
+                  .sub = make_bool_untyped("true")};
 
     expression prepared = prepare_expression(sub, db, "test_ks", table_schema.get(), nullptr);
 
@@ -1403,7 +1276,7 @@ BOOST_AUTO_TEST_CASE(prepare_subscript_set) {
 
     expression sub =
         subscript{.val = unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("r", true)},
-                  .sub = untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"}};
+                  .sub = make_int_untyped("123")};
 
     BOOST_REQUIRE_THROW(prepare_expression(sub, db, "test_ks", table_schema.get(), nullptr),
                         exceptions::invalid_request_exception);
@@ -1419,7 +1292,7 @@ BOOST_AUTO_TEST_CASE(prepare_subscript_list_checks_type) {
 
     expression sub =
         subscript{.val = unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("r", true)},
-                  .sub = untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "true"}};
+                  .sub = make_bool_untyped("true")};
 
     BOOST_REQUIRE_THROW(prepare_expression(sub, db, "test_ks", table_schema.get(), nullptr),
                         exceptions::invalid_request_exception);
@@ -1435,7 +1308,7 @@ BOOST_AUTO_TEST_CASE(prepare_subscript_map_checks_type) {
 
     expression sub =
         subscript{.val = unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("r", true)},
-                  .sub = untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"}};
+                  .sub = make_int_untyped("123")};
 
     BOOST_REQUIRE_THROW(prepare_expression(sub, db, "test_ks", table_schema.get(), nullptr),
                         exceptions::invalid_request_exception);
@@ -1484,7 +1357,7 @@ BOOST_AUTO_TEST_CASE(prepare_cast_int_int) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression cast_expr =
-        cast{.arg = untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
+        cast{.arg = make_int_untyped("123"),
              .type = cql3_type::raw::from(int32_type)};
 
     ::lw_shared_ptr<column_specification> receiver = make_receiver(int32_type);
@@ -1500,7 +1373,7 @@ BOOST_AUTO_TEST_CASE(prepare_cast_int_short) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression cast_expr =
-        cast{.arg = untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
+        cast{.arg = make_int_untyped("123"),
              .type = cql3_type::raw::from(short_type)};
 
     ::lw_shared_ptr<column_specification> receiver = make_receiver(short_type);
@@ -1516,7 +1389,7 @@ BOOST_AUTO_TEST_CASE(prepare_cast_text_int) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression cast_expr =
-        cast{.arg = untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "123"},
+        cast{.arg = make_string_untyped("123"),
              .type = cql3_type::raw::from(short_type)};
 
     ::lw_shared_ptr<column_specification> receiver = make_receiver(short_type);
@@ -1578,7 +1451,7 @@ BOOST_AUTO_TEST_CASE(prepare_untyped_constant_no_receiver) {
     schema_ptr table_schema = make_simple_test_schema();
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
-    expression untyped = untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "1337"};
+    expression untyped = make_int_untyped("1337");
 
     // Can't infer type
     BOOST_REQUIRE_THROW(prepare_expression(untyped, db, "test_ks", table_schema.get(), nullptr),
@@ -1589,7 +1462,7 @@ BOOST_AUTO_TEST_CASE(prepare_untyped_constant_bool) {
     schema_ptr table_schema = make_simple_test_schema();
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
-    expression untyped = untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "true"};
+    expression untyped = make_bool_untyped("true");
 
     expression prepared = prepare_expression(untyped, db, "test_ks", table_schema.get(), make_receiver(boolean_type));
     expression expected = make_bool_const(true);
@@ -1601,7 +1474,7 @@ BOOST_AUTO_TEST_CASE(prepare_untyped_constant_int8) {
     schema_ptr table_schema = make_simple_test_schema();
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
-    expression untyped = untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "13"};
+    expression untyped = make_int_untyped("13");
 
     expression prepared = prepare_expression(untyped, db, "test_ks", table_schema.get(), make_receiver(byte_type));
     expression expected = make_tinyint_const(13);
@@ -1613,7 +1486,7 @@ BOOST_AUTO_TEST_CASE(prepare_untyped_constant_int16) {
     schema_ptr table_schema = make_simple_test_schema();
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
-    expression untyped = untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "1337"};
+    expression untyped = make_int_untyped("1337");
 
     expression prepared = prepare_expression(untyped, db, "test_ks", table_schema.get(), make_receiver(short_type));
     expression expected = make_smallint_const(1337);
@@ -1626,7 +1499,7 @@ BOOST_AUTO_TEST_CASE(prepare_untyped_constant_int32) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression untyped =
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "13377331"};
+        make_int_untyped("13377331");
 
     expression prepared = prepare_expression(untyped, db, "test_ks", table_schema.get(), make_receiver(int32_type));
     expression expected = make_int_const(13377331);
@@ -1639,7 +1512,7 @@ BOOST_AUTO_TEST_CASE(prepare_untyped_constant_int64) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression untyped =
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "1337733113377331"};
+        make_int_untyped("1337733113377331");
 
     expression prepared = prepare_expression(untyped, db, "test_ks", table_schema.get(), make_receiver(long_type));
     expression expected = make_bigint_const(1337733113377331);
@@ -1652,7 +1525,7 @@ BOOST_AUTO_TEST_CASE(prepare_untyped_constant_text) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression untyped =
-        untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "scylla_is_the_best"};
+        make_string_untyped("scylla_is_the_best");
 
     expression prepared = prepare_expression(untyped, db, "test_ks", table_schema.get(), make_receiver(utf8_type));
     expression expected = make_text_const("scylla_is_the_best");
@@ -1665,7 +1538,7 @@ BOOST_AUTO_TEST_CASE(prepare_untyped_constant_bad_int) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression untyped =
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "not_integer_text"};
+        make_int_untyped("not_integer_text");
 
     BOOST_REQUIRE_THROW(prepare_expression(untyped, db, "test_ks", table_schema.get(), make_receiver(int32_type)),
                         exceptions::invalid_request_exception);
@@ -1678,9 +1551,9 @@ BOOST_AUTO_TEST_CASE(prepare_tuple_constructor_no_receiver_fails) {
     expression tup = tuple_constructor{
         .elements =
             {
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "456"},
-                untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "some text"},
+                make_int_untyped("123"),
+                make_int_untyped("456"),
+                make_string_untyped("some text"),
             },
         .type = nullptr};
 
@@ -1695,9 +1568,9 @@ BOOST_AUTO_TEST_CASE(prepare_tuple_constructor) {
     expression tup = tuple_constructor{
         .elements =
             {
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "456"},
-                untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "some text"},
+                make_int_untyped("123"),
+                make_int_untyped("456"),
+                make_string_untyped("some text"),
             },
         .type = nullptr};
 
@@ -1749,9 +1622,9 @@ BOOST_AUTO_TEST_CASE(prepare_list_collection_constructor) {
         .style = collection_constructor::style_type::list,
         .elements =
             {
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "456"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "789"},
+                make_int_untyped("123"),
+                make_int_untyped("456"),
+                make_int_untyped("789"),
             },
         .type = nullptr};
 
@@ -1803,9 +1676,9 @@ BOOST_AUTO_TEST_CASE(prepare_list_collection_constructor_no_receiver) {
         .style = collection_constructor::style_type::list,
         .elements =
             {
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "456"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "789"},
+                make_int_untyped("123"),
+                make_int_untyped("456"),
+                make_int_untyped("789"),
             },
         .type = nullptr};
 
@@ -1823,9 +1696,9 @@ BOOST_AUTO_TEST_CASE(prepare_list_collection_constructor_with_bind_var) {
         .style = collection_constructor::style_type::list,
         .elements =
             {
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
+                make_int_untyped("123"),
                 bind_variable{.bind_index = 1, .receiver = nullptr},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "789"},
+                make_int_untyped("789"),
             },
         .type = nullptr};
 
@@ -1861,15 +1734,15 @@ BOOST_AUTO_TEST_CASE(prepare_list_collection_constructor_with_null) {
 
     expression constructor = collection_constructor{
         .style = collection_constructor::style_type::list,
-        .elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
-                     untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "456"},
+        .elements = {make_int_untyped("123"),
+                     make_int_untyped("456"),
                      make_untyped_null()},
         .type = nullptr};
 
-    data_type list_type = list_type_impl::get_instance(long_type, true);
+    data_type list_type = list_type_impl::get_instance(int32_type, true);
 
-    BOOST_REQUIRE_THROW(prepare_expression(constructor, db, "test_ks", table_schema.get(), make_receiver(list_type)),
-                        exceptions::invalid_request_exception);
+    BOOST_REQUIRE_EQUAL(prepare_expression(constructor, db, "test_ks", table_schema.get(), make_receiver(list_type)),
+                        make_int_list_const({123, 456, std::nullopt}));
 }
 
 BOOST_AUTO_TEST_CASE(prepare_set_collection_constructor) {
@@ -1880,9 +1753,9 @@ BOOST_AUTO_TEST_CASE(prepare_set_collection_constructor) {
         .style = collection_constructor::style_type::set,
         .elements =
             {
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "789"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "456"},
+                make_int_untyped("789"),
+                make_int_untyped("123"),
+                make_int_untyped("456"),
             },
         .type = nullptr};
 
@@ -1934,9 +1807,9 @@ BOOST_AUTO_TEST_CASE(prepare_set_collection_constructor_no_receiver) {
         .style = collection_constructor::style_type::set,
         .elements =
             {
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "789"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "456"},
+                make_int_untyped("789"),
+                make_int_untyped("123"),
+                make_int_untyped("456"),
             },
         .type = nullptr};
 
@@ -1952,9 +1825,9 @@ BOOST_AUTO_TEST_CASE(prepare_set_collection_constructor_with_bind_var) {
         .style = collection_constructor::style_type::set,
         .elements =
             {
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "789"},
+                make_int_untyped("789"),
                 bind_variable{.bind_index = 1, .receiver = nullptr},
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"},
+                make_int_untyped("123"),
             },
         .type = nullptr};
 
@@ -1991,9 +1864,9 @@ BOOST_AUTO_TEST_CASE(prepare_set_collection_constructor_with_null) {
         .style = collection_constructor::style_type::set,
         .elements =
             {
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "789"},
+                make_int_untyped("789"),
                 make_untyped_null(),
-                untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "456"},
+                make_int_untyped("456"),
             },
         .type = nullptr};
 
@@ -2014,20 +1887,16 @@ BOOST_AUTO_TEST_CASE(prepare_map_collection_constructor) {
                 {
                     tuple_constructor{
                         .elements =
-                            {untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "3"},
-                             untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "30"}},
+                            {make_int_untyped("3"),
+                             make_int_untyped("30")},
                         .type = nullptr},
                     tuple_constructor{
-                        .elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "2"},
-                                     untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "-20"}},
+                        .elements = {make_int_untyped("2"),
+                                     make_int_untyped("-20")},
                         .type = nullptr},
                     tuple_constructor{
-                        .elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "1"},
-                                     untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "10"}},
+                        .elements = {make_int_untyped("1"),
+                                     make_int_untyped("10")},
                         .type = nullptr},
                 },
             .type = nullptr};
@@ -2086,20 +1955,16 @@ BOOST_AUTO_TEST_CASE(prepare_map_collection_constructor_no_receiver) {
                 {
                     tuple_constructor{
                         .elements =
-                            {untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "3"},
-                             untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "30"}},
+                            {make_int_untyped("3"),
+                             make_int_untyped("30")},
                         .type = nullptr},
                     tuple_constructor{
-                        .elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "2"},
-                                     untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "-20"}},
+                        .elements = {make_int_untyped("2"),
+                                     make_int_untyped("-20")},
                         .type = nullptr},
                     tuple_constructor{
-                        .elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "1"},
-                                     untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "10"}},
+                        .elements = {make_int_untyped("1"),
+                                     make_int_untyped("10")},
                         .type = nullptr},
                 },
             .type = nullptr};
@@ -2119,19 +1984,16 @@ BOOST_AUTO_TEST_CASE(prepare_map_collection_constructor_with_bind_var_key) {
                 {
                     tuple_constructor{
                         .elements =
-                            {untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "3"},
-                             untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "30"}},
+                            {make_int_untyped("3"),
+                             make_int_untyped("30")},
                         .type = nullptr},
                     tuple_constructor{
                         .elements = {bind_variable{.bind_index = 1, .receiver = nullptr},
-                                     untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "-20"}},
+                                     make_int_untyped("-20")},
                         .type = nullptr},
                     tuple_constructor{
-                        .elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "1"},
-                                     untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "10"}},
+                        .elements = {make_int_untyped("1"),
+                                     make_int_untyped("10")},
                         .type = nullptr},
                 },
             .type = nullptr};
@@ -2181,19 +2043,14 @@ BOOST_AUTO_TEST_CASE(prepare_map_collection_constructor_with_bind_var_value) {
         .style = collection_constructor::style_type::map,
         .elements =
             {
-                tuple_constructor{.elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "3"},
-                                               untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "30"}},
+                tuple_constructor{.elements = {make_int_untyped("3"),
+                                               make_int_untyped("30")},
                                   .type = nullptr},
-                tuple_constructor{.elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "2"},
+                tuple_constructor{.elements = {make_int_untyped("2"),
                                                bind_variable{.bind_index = 1, .receiver = nullptr}},
                                   .type = nullptr},
-                tuple_constructor{.elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "1"},
-                                               untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "10"}},
+                tuple_constructor{.elements = {make_int_untyped("1"),
+                                               make_int_untyped("10")},
                                   .type = nullptr},
             },
         .type = nullptr};
@@ -2246,19 +2103,16 @@ BOOST_AUTO_TEST_CASE(prepare_map_collection_constructor_null_key) {
                 {
                     tuple_constructor{
                         .elements =
-                            {untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "3"},
-                             untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "30"}},
+                            {make_int_untyped("3"),
+                             make_int_untyped("30")},
                         .type = nullptr},
                     tuple_constructor{
                         .elements = {make_untyped_null(),
-                                     untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                              .raw_text = "-20"}},
+                                     make_int_untyped("-20")},
                         .type = nullptr},
                     tuple_constructor{
-                        .elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "1"},
-                                     untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                      .raw_text = "10"}},
+                        .elements = {make_int_untyped("1"),
+                                     make_int_untyped("10")},
                         .type = nullptr},
                 },
             .type = nullptr};
@@ -2277,19 +2131,14 @@ BOOST_AUTO_TEST_CASE(prepare_map_collection_constructor_null_value) {
         .style = collection_constructor::style_type::map,
         .elements =
             {
-                tuple_constructor{.elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "3"},
-                                               untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "30"}},
+                tuple_constructor{.elements = {make_int_untyped("3"),
+                                               make_int_untyped("30")},
                                   .type = nullptr},
-                tuple_constructor{.elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "2"},
+                tuple_constructor{.elements = {make_int_untyped("2"),
                                                make_untyped_null()},
                                   .type = nullptr},
-                tuple_constructor{.elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "1"},
-                                               untyped_constant{.partial_type = untyped_constant::type_class::integer,
-                                                                .raw_text = "10"}},
+                tuple_constructor{.elements = {make_int_untyped("1"),
+                                               make_int_untyped("10")},
                                   .type = nullptr},
             },
         .type = nullptr};
@@ -2308,7 +2157,7 @@ BOOST_AUTO_TEST_CASE(prepare_collection_constructor_checks_style_type) {
 
     expression set_constructor = collection_constructor{
         .style = collection_constructor::style_type::set,
-        .elements = {untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "123"}},
+        .elements = {make_int_untyped("123")},
         .type = nullptr};
 
     data_type set_type = set_type_impl::get_instance(int32_type, true);
@@ -2330,13 +2179,13 @@ BOOST_AUTO_TEST_CASE(prepare_usertype_constructor) {
     usertype_constructor::elements_map_type constructor_elements;
     constructor_elements.emplace(
         column_identifier("field1", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "152"});
+        make_int_untyped("152"));
     constructor_elements.emplace(
         column_identifier("field2", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "987"});
+        make_int_untyped("987"));
     constructor_elements.emplace(
         column_identifier("field3", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "ututu"});
+        make_string_untyped("ututu"));
 
     expression constructor = usertype_constructor{.elements = constructor_elements, .type = nullptr};
 
@@ -2358,11 +2207,11 @@ BOOST_AUTO_TEST_CASE(prepare_usertype_constructor_with_null) {
     usertype_constructor::elements_map_type constructor_elements;
     constructor_elements.emplace(
         column_identifier("field1", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "152"});
+        make_int_untyped("152"));
     constructor_elements.emplace(column_identifier("field2", true), make_untyped_null());
     constructor_elements.emplace(
         column_identifier("field3", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "ututu"});
+        make_string_untyped("ututu"));
 
     expression constructor = usertype_constructor{.elements = constructor_elements, .type = nullptr};
 
@@ -2385,10 +2234,10 @@ BOOST_AUTO_TEST_CASE(prepare_usertype_constructor_missing_field) {
     usertype_constructor::elements_map_type constructor_elements;
     constructor_elements.emplace(
         column_identifier("field1", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "152"});
+        make_int_untyped("152"));
     constructor_elements.emplace(
         column_identifier("field3", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "ututu"});
+        make_string_untyped("ututu"));
 
     expression constructor = usertype_constructor{.elements = constructor_elements, .type = nullptr};
 
@@ -2410,13 +2259,13 @@ BOOST_AUTO_TEST_CASE(prepare_usertype_constructor_no_receiver) {
     usertype_constructor::elements_map_type constructor_elements;
     constructor_elements.emplace(
         column_identifier("field1", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "152"});
+        make_int_untyped("152"));
     constructor_elements.emplace(
         column_identifier("field2", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "987"});
+        make_int_untyped("987"));
     constructor_elements.emplace(
         column_identifier("field3", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "ututu"});
+        make_string_untyped("ututu"));
 
     expression constructor = usertype_constructor{.elements = constructor_elements, .type = nullptr};
 
@@ -2431,12 +2280,12 @@ BOOST_AUTO_TEST_CASE(prepare_usertype_constructor_with_bind_variable) {
     usertype_constructor::elements_map_type constructor_elements;
     constructor_elements.emplace(
         column_identifier("field1", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "152"});
+        make_int_untyped("152"));
     constructor_elements.emplace(column_identifier("field2", true),
                                  bind_variable{.bind_index = 2, .receiver = nullptr});
     constructor_elements.emplace(
         column_identifier("field3", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "ututu"});
+        make_string_untyped("ututu"));
 
     expression constructor = usertype_constructor{.elements = constructor_elements, .type = nullptr};
 
@@ -2481,7 +2330,7 @@ BOOST_AUTO_TEST_CASE(prepare_usertype_constructor_with_bind_variable_and_missing
                                  bind_variable{.bind_index = 2, .receiver = nullptr});
     constructor_elements.emplace(
         column_identifier("field3", true),
-        untyped_constant{.partial_type = untyped_constant::type_class::string, .raw_text = "ututu"});
+        make_string_untyped("ututu"));
 
     expression constructor = usertype_constructor{.elements = constructor_elements, .type = nullptr};
 
@@ -2515,14 +2364,11 @@ BOOST_AUTO_TEST_CASE(prepare_usertype_constructor_with_bind_variable_and_missing
     BOOST_REQUIRE_EQUAL(prepared, expected);
 }
 
-// Test how evaluating a given binary operator behaves when null and unset are present.
+// Test how evaluating a given binary operator behaves when null is present.
 // A binary with null on either side should evaluate to null.
-// When UNSET_VALUE is present evaluating should throw an exception.
-static void test_evaluate_binop_null_unset(oper_t op, expression valid_lhs, expression valid_rhs) {
+static void test_evaluate_binop_null(oper_t op, expression valid_lhs, expression valid_rhs) {
     constant lhs_null_val = constant::make_null(type_of(valid_lhs));
     constant rhs_null_val = constant::make_null(type_of(valid_rhs));
-    constant lhs_unset_val = constant::make_unset_value(type_of(valid_lhs));
-    constant rhs_unset_val = constant::make_unset_value(type_of(valid_rhs));
 
     expression valid_binop = binary_operator(valid_lhs, op, valid_rhs);
     BOOST_REQUIRE(evaluate(valid_binop, evaluation_inputs{}).is_value());
@@ -2535,21 +2381,6 @@ static void test_evaluate_binop_null_unset(oper_t op, expression valid_lhs, expr
 
     expression binop_both_null = binary_operator(lhs_null_val, op, rhs_null_val);
     BOOST_REQUIRE_EQUAL(evaluate(binop_both_null, evaluation_inputs{}), raw_value::make_null());
-
-    expression binop_lhs_unset = binary_operator(lhs_unset_val, op, valid_rhs);
-    BOOST_REQUIRE_THROW(evaluate(binop_lhs_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
-
-    expression binop_rhs_unset = binary_operator(valid_lhs, op, rhs_unset_val);
-    BOOST_REQUIRE_THROW(evaluate(binop_rhs_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
-
-    expression binop_both_unset = binary_operator(lhs_unset_val, op, rhs_unset_val);
-    BOOST_REQUIRE_THROW(evaluate(binop_both_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
-
-    expression binop_lhs_null_rhs_unset = binary_operator(lhs_null_val, op, rhs_unset_val);
-    BOOST_REQUIRE_THROW(evaluate(binop_lhs_null_rhs_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
-
-    expression binop_lhs_unset_rhs_null = binary_operator(lhs_unset_val, op, rhs_null_val);
-    BOOST_REQUIRE_THROW(evaluate(binop_lhs_unset_rhs_null, evaluation_inputs{}), exceptions::invalid_request_exception);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_eq) {
@@ -2565,7 +2396,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_eq) {
     expression empty_neq = binary_operator(make_int_const(0), oper_t::EQ, make_empty_const(int32_type));
     BOOST_REQUIRE_EQUAL(evaluate(empty_neq, evaluation_inputs{}), make_bool_raw(false));
 
-    test_evaluate_binop_null_unset(oper_t::EQ, make_int_const(123), make_int_const(456));
+    test_evaluate_binop_null(oper_t::EQ, make_int_const(123), make_int_const(456));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_neq) {
@@ -2582,7 +2413,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_neq) {
     expression empty_neq_0 = binary_operator(make_empty_const(int32_type), oper_t::NEQ, make_int_const(0));
     BOOST_REQUIRE_EQUAL(evaluate(empty_neq_0, evaluation_inputs{}), make_bool_raw(true));
 
-    test_evaluate_binop_null_unset(oper_t::NEQ, make_int_const(123), make_int_const(456));
+    test_evaluate_binop_null(oper_t::NEQ, make_int_const(123), make_int_const(456));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_lt) {
@@ -2602,7 +2433,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_lt) {
         binary_operator(make_empty_const(int32_type), oper_t::LT, make_int_const(std::numeric_limits<int32_t>::min()));
     BOOST_REQUIRE_EQUAL(evaluate(empty_lt_int_min, evaluation_inputs{}), make_bool_raw(true));
 
-    test_evaluate_binop_null_unset(oper_t::LT, make_int_const(123), make_int_const(456));
+    test_evaluate_binop_null(oper_t::LT, make_int_const(123), make_int_const(456));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_lte) {
@@ -2623,7 +2454,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_lte) {
         binary_operator(make_empty_const(int32_type), oper_t::LT, make_int_const(std::numeric_limits<int32_t>::min()));
     BOOST_REQUIRE_EQUAL(evaluate(empty_lte_int_min, evaluation_inputs{}), make_bool_raw(true));
 
-    test_evaluate_binop_null_unset(oper_t::LTE, make_int_const(123), make_int_const(456));
+    test_evaluate_binop_null(oper_t::LTE, make_int_const(123), make_int_const(456));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_gt) {
@@ -2643,7 +2474,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_gt) {
         binary_operator(make_int_const(std::numeric_limits<int32_t>::min()), oper_t::GT, make_empty_const(int32_type));
     BOOST_REQUIRE_EQUAL(evaluate(int_min_gt_empty, evaluation_inputs{}), make_bool_raw(true));
 
-    test_evaluate_binop_null_unset(oper_t::GT, make_int_const(234), make_int_const(-3434));
+    test_evaluate_binop_null(oper_t::GT, make_int_const(234), make_int_const(-3434));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_gte) {
@@ -2664,7 +2495,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_gte) {
         binary_operator(make_int_const(std::numeric_limits<int32_t>::min()), oper_t::GTE, make_empty_const(int32_type));
     BOOST_REQUIRE_EQUAL(evaluate(int_min_gte_empty, evaluation_inputs{}), make_bool_raw(true));
 
-    test_evaluate_binop_null_unset(oper_t::GTE, make_int_const(234), make_int_const(-3434));
+    test_evaluate_binop_null(oper_t::GTE, make_int_const(234), make_int_const(-3434));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_in) {
@@ -2691,7 +2522,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_in) {
     expression nonexisting_int_in_list_with_empty = binary_operator(make_int_const(321), oper_t::IN, list_with_empty);
     BOOST_REQUIRE_EQUAL(evaluate(nonexisting_int_in_list_with_empty, evaluation_inputs{}), make_bool_raw(false));
 
-    test_evaluate_binop_null_unset(oper_t::IN, make_int_const(5), in_list);
+    test_evaluate_binop_null(oper_t::IN, make_int_const(5), in_list);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_list_contains) {
@@ -2720,7 +2551,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_list_contains) {
         binary_operator(list_with_empty, oper_t::CONTAINS, make_int_const(321));
     BOOST_REQUIRE_EQUAL(evaluate(list_with_empty_contains_nonexisting_int, evaluation_inputs{}), make_bool_raw(false));
 
-    test_evaluate_binop_null_unset(oper_t::CONTAINS, list_val, make_int_const(5));
+    test_evaluate_binop_null(oper_t::CONTAINS, list_val, make_int_const(5));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_set_contains) {
@@ -2749,7 +2580,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_set_contains) {
         binary_operator(set_with_empty, oper_t::CONTAINS, make_int_const(321));
     BOOST_REQUIRE_EQUAL(evaluate(set_with_empty_contains_nonexisting_int, evaluation_inputs{}), make_bool_raw(false));
 
-    test_evaluate_binop_null_unset(oper_t::CONTAINS, set_val, make_int_const(5));
+    test_evaluate_binop_null(oper_t::CONTAINS, set_val, make_int_const(5));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_map_contains) {
@@ -2779,7 +2610,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_map_contains) {
         binary_operator(map_with_empty, oper_t::CONTAINS, make_int_const(3));
     BOOST_REQUIRE_EQUAL(evaluate(map_with_empty_contains_nonexisting_int, evaluation_inputs{}), make_bool_raw(false));
 
-    test_evaluate_binop_null_unset(oper_t::CONTAINS, map_val, make_int_const(5));
+    test_evaluate_binop_null(oper_t::CONTAINS, map_val, make_int_const(5));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_map_contains_key) {
@@ -2810,7 +2641,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_map_contains_key) {
     BOOST_REQUIRE_EQUAL(evaluate(map_with_empty_contains_key_nonexisting_int, evaluation_inputs{}),
                         make_bool_raw(false));
 
-    test_evaluate_binop_null_unset(oper_t::CONTAINS_KEY, map_val, make_int_const(5));
+    test_evaluate_binop_null(oper_t::CONTAINS_KEY, map_val, make_int_const(5));
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_is_not) {
@@ -2827,18 +2658,6 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_is_not) {
     expression empty_is_not_null =
         binary_operator(make_empty_const(int32_type), oper_t::IS_NOT, constant::make_null(int32_type));
     BOOST_REQUIRE_EQUAL(evaluate(empty_is_not_null, evaluation_inputs{}), make_bool_raw(true));
-
-    expression unset_is_not_null =
-        binary_operator(constant::make_unset_value(int32_type), oper_t::IS_NOT, constant::make_null(int32_type));
-    BOOST_REQUIRE_THROW(evaluate(unset_is_not_null, evaluation_inputs{}), exceptions::invalid_request_exception);
-
-    expression int_is_not_unset =
-        binary_operator(make_int_const(123), oper_t::IS_NOT, constant::make_unset_value(int32_type));
-    BOOST_REQUIRE_THROW(evaluate(int_is_not_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
-
-    expression unset_is_not_unset =
-        binary_operator(constant::make_unset_value(int32_type), oper_t::IS_NOT, constant::make_unset_value(int32_type));
-    BOOST_REQUIRE_THROW(evaluate(unset_is_not_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
 }
 
 BOOST_AUTO_TEST_CASE(evaluate_binary_operator_like) {
@@ -2862,7 +2681,7 @@ BOOST_AUTO_TEST_CASE(evaluate_binary_operator_like) {
         binary_operator(make_empty_const(utf8_type), oper_t::LIKE, make_empty_const(utf8_type));
     BOOST_REQUIRE_EQUAL(evaluate(empty_like_empty, evaluation_inputs{}), make_bool_raw(true));
 
-    test_evaluate_binop_null_unset(oper_t::LIKE, make_text_const("some_text"), make_text_const("some_%"));
+    test_evaluate_binop_null(oper_t::LIKE, make_text_const("some_text"), make_text_const("some_%"));
 }
 
 // An empty conjunction should evaluate to true
@@ -2990,22 +2809,6 @@ BOOST_AUTO_TEST_CASE(evaluate_conjunction_with_null) {
     BOOST_REQUIRE_EQUAL(evaluate(conj_with_null, evaluation_inputs{}), raw_value::make_null());
 }
 
-// Evaluating a conjunction that contains a single unset value should throw an error
-BOOST_AUTO_TEST_CASE(evaluate_conjunction_one_unset) {
-    expression conj_one_unset = conjunction{.children = {constant::make_unset_value(boolean_type)}};
-
-    BOOST_REQUIRE_THROW(evaluate(conj_one_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
-}
-
-// Evaluating 'true AND true AND true AND UNSET_VALUE AND ...' should throw an erorr
-BOOST_AUTO_TEST_CASE(evaluate_conjunction_with_unset) {
-    expression conj_with_unset = conjunction{
-        .children = {make_bool_const(true), make_bool_const(true), make_bool_const(true),
-                     constant::make_unset_value(boolean_type), make_bool_const(false), make_bool_const(true)}};
-
-    BOOST_REQUIRE_THROW(evaluate(conj_with_unset, evaluation_inputs{}), exceptions::invalid_request_exception);
-}
-
 // Evaluating a conjunction that contains a single empty value should throw an error
 BOOST_AUTO_TEST_CASE(evaluate_conjunction_one_empty) {
     expression conj_one_empty = conjunction{.children = {make_empty_const(boolean_type)}};
@@ -3022,32 +2825,42 @@ BOOST_AUTO_TEST_CASE(evaluate_conjunction_with_empty) {
     BOOST_REQUIRE_THROW(evaluate(conj_with_empty, evaluation_inputs{}), exceptions::invalid_request_exception);
 }
 
+static cql3::query_options query_options_with_unset_bind_variable() {
+    return cql3::query_options(cql3::raw_value_vector_with_unset({cql3::raw_value::make_null()}, {true}));
+}
+
 // Short circuiting on false ignores all further values, even though they could make the expression invalid
 BOOST_AUTO_TEST_CASE(evaluate_conjunction_short_circuit_on_false_does_not_detect_invalid_values) {
-    // An expression which would throw an error when evaluated
-    expression invalid_to_evaluate = conjunction{.children = {constant::make_unset_value(boolean_type)}};
+    auto qo = query_options_with_unset_bind_variable();
+    auto inputs = evaluation_inputs{.options = &qo};
 
-    BOOST_REQUIRE_THROW(evaluate(invalid_to_evaluate, evaluation_inputs{}), exceptions::invalid_request_exception);
+    // An expression which would throw an error when evaluated
+    expression invalid_to_evaluate = conjunction{.children = {new_bind_variable(0)}};
+
+    BOOST_REQUIRE_THROW(evaluate(invalid_to_evaluate, inputs), exceptions::invalid_request_exception);
 
     expression conj_with_false_then_invalid =
         conjunction{.children = {make_bool_const(true), make_bool_const(false), make_empty_const(boolean_type),
-                                 constant::make_unset_value(boolean_type), invalid_to_evaluate, make_bool_const(true)}};
+                                 new_bind_variable(0), invalid_to_evaluate, make_bool_const(true)}};
 
-    BOOST_REQUIRE_EQUAL(evaluate(conj_with_false_then_invalid, evaluation_inputs{}), make_bool_raw(false));
+    BOOST_REQUIRE_EQUAL(evaluate(conj_with_false_then_invalid, inputs), make_bool_raw(false));
 }
 
 // Null doesn't short-circuit
 BOOST_AUTO_TEST_CASE(evaluate_conjunction_doesnt_short_circuit_on_null) {
-    // An expression which would throw an error when evaluated
-    expression invalid_to_evaluate = conjunction{.children = {constant::make_unset_value(boolean_type)}};
+    auto qo = query_options_with_unset_bind_variable();
+    auto inputs = evaluation_inputs{.options = &qo};
 
-    BOOST_REQUIRE_THROW(evaluate(invalid_to_evaluate, evaluation_inputs{}), exceptions::invalid_request_exception);
+    // An expression which would throw an error when evaluated
+    expression invalid_to_evaluate = conjunction{.children = {new_bind_variable(0)}};
+
+    BOOST_REQUIRE_THROW(evaluate(invalid_to_evaluate, inputs), exceptions::invalid_request_exception);
 
     expression conj_with_null_then_invalid = conjunction{
         .children = {make_bool_const(true), constant::make_null(boolean_type), make_empty_const(boolean_type),
-                     constant::make_unset_value(boolean_type), invalid_to_evaluate, make_bool_const(true)}};
+                     new_bind_variable(0), invalid_to_evaluate, make_bool_const(true)}};
 
-    BOOST_REQUIRE_THROW(evaluate(conj_with_null_then_invalid, evaluation_inputs{}),
+    BOOST_REQUIRE_THROW(evaluate(conj_with_null_then_invalid, inputs),
                         exceptions::invalid_request_exception);
 }
 
@@ -3100,9 +2913,12 @@ BOOST_AUTO_TEST_CASE(evaluate_conjunction_of_conjunctions_to_null) {
 
 // Evaluating '() AND (true AND true) AND (true AND UNSET_VALUE) AND (false)' throws an error
 BOOST_AUTO_TEST_CASE(evaluate_conjunction_of_conjunctions_with_invalid) {
+    auto qo = query_options_with_unset_bind_variable();
+    auto inputs = evaluation_inputs{.options = &qo};
+
     expression conj1 = conjunction{.children = {}};
 
-    expression conj2 = conjunction{.children = {make_bool_const(true), constant::make_unset_value(boolean_type)}};
+    expression conj2 = conjunction{.children = {make_bool_const(true), new_bind_variable(0)}};
 
     expression conj3 = conjunction{.children = {make_bool_const(true), make_bool_const(true)}};
 
@@ -3110,7 +2926,7 @@ BOOST_AUTO_TEST_CASE(evaluate_conjunction_of_conjunctions_with_invalid) {
 
     expression conj_of_conjs = conjunction{.children = {conj1, conj2, conj3, conj4}};
 
-    BOOST_REQUIRE_THROW(evaluate(conj_of_conjs, evaluation_inputs{}), exceptions::invalid_request_exception);
+    BOOST_REQUIRE_THROW(evaluate(conj_of_conjs, inputs), exceptions::invalid_request_exception);
 }
 
 // It should be possible to prepare an empty conjunction
@@ -3150,7 +2966,7 @@ BOOST_AUTO_TEST_CASE(prepare_conjunction_one_untyped_const_false) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression conj_one = conjunction{
-        .children = {untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "false"}}};
+        .children = {make_bool_untyped("false")}};
 
     expression expected = make_bool_const(false);
 
@@ -3165,7 +2981,7 @@ BOOST_AUTO_TEST_CASE(prepare_conjunction_one_untyped_const_true) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression conj_one = conjunction{
-        .children = {untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "true"}}};
+        .children = {make_bool_untyped("true")}};
 
     expression expected = make_bool_const(true);
 
@@ -3180,7 +2996,7 @@ BOOST_AUTO_TEST_CASE(prepare_conjunction_one_untyped_const_null) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression conj_one = conjunction{
-        .children = {untyped_constant{.partial_type = untyped_constant::type_class::null, .raw_text = "null"}}};
+        .children = {make_null_untyped()}};
 
     expression expected = constant::make_null(boolean_type);
 
@@ -3196,7 +3012,7 @@ BOOST_AUTO_TEST_CASE(prepare_conjunction_one_int_untyped_const_0) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression conj_one = conjunction{
-        .children = {untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "0"}}};
+        .children = {make_int_untyped("0")}};
 
     BOOST_REQUIRE_THROW(prepare_expression(conj_one, db, "test_ks", table_schema.get(), nullptr),
                         exceptions::invalid_request_exception);
@@ -3210,10 +3026,10 @@ BOOST_AUTO_TEST_CASE(prepare_conjunction_bools_and_one_int_untyped_const_0) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression conj = conjunction{
-        .children = {untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "true"},
-                     untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "true"},
-                     untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "1"},
-                     untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "true"}}};
+        .children = {make_bool_untyped("true"),
+                     make_bool_untyped("true"),
+                     make_int_untyped("1"),
+                     make_bool_untyped("true")}};
 
     BOOST_REQUIRE_THROW(prepare_expression(conj, db, "test_ks", table_schema.get(), nullptr),
                         exceptions::invalid_request_exception);
@@ -3227,8 +3043,8 @@ BOOST_AUTO_TEST_CASE(prepare_conjunction_and_of_ints_is_invalid) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression conj_one = conjunction{
-        .children = {untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "0"},
-                     untyped_constant{.partial_type = untyped_constant::type_class::integer, .raw_text = "1"}}};
+        .children = {make_int_untyped("0"),
+                     make_int_untyped("1")}};
 
     BOOST_REQUIRE_THROW(prepare_expression(conj_one, db, "test_ks", table_schema.get(), nullptr),
                         exceptions::invalid_request_exception);
@@ -3248,12 +3064,12 @@ BOOST_AUTO_TEST_CASE(prepare_conjunction_many_elements) {
     auto [db, db_data] = make_data_dictionary_database(table_schema);
 
     expression sub_conj = conjunction{
-        .children = {untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "false"},
+        .children = {make_bool_untyped("false"),
                      unresolved_identifier{::make_shared<column_identifier_raw>("b2", false)}}};
 
     expression conj_many = conjunction{
-        .children = {untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "true"},
-                     untyped_constant{.partial_type = untyped_constant::type_class::boolean, .raw_text = "false"},
+        .children = {make_bool_untyped("true"),
+                     make_bool_untyped("false"),
                      unresolved_identifier{
                          unresolved_identifier{::make_shared<column_identifier_raw>("b1", false)},
                      },
@@ -3272,4 +3088,839 @@ BOOST_AUTO_TEST_CASE(prepare_conjunction_many_elements) {
     // Integer receiver is rejected
     BOOST_REQUIRE_THROW(prepare_expression(conj_many, db, "test_ks", table_schema.get(), make_receiver(int32_type)),
                         exceptions::invalid_request_exception);
+}
+
+// Test that preparing the given binary operator works and produces the expected result.
+void test_prepare_good_binary_operator(expression good_binop_unprepared,
+                                       expression expected_prepared,
+                                       data_dictionary::database db,
+                                       const schema_ptr& table_schema) {
+    // Preparing without a receiver works as expected
+    BOOST_REQUIRE_EQUAL(prepare_expression(good_binop_unprepared, db, "test_ks", table_schema.get(), nullptr),
+                        expected_prepared);
+
+    // Preparing with boolean receiver works as expected
+    BOOST_REQUIRE_EQUAL(
+        prepare_expression(good_binop_unprepared, db, "test_ks", table_schema.get(), make_receiver(boolean_type)),
+        expected_prepared);
+
+    // reversed boolean type is also accepted
+    BOOST_REQUIRE_EQUAL(prepare_expression(good_binop_unprepared, db, "test_ks", table_schema.get(),
+                                           make_receiver(reversed_type_impl::get_instance(boolean_type))),
+                        expected_prepared);
+
+    // Receivers with non-bool type are rejected.
+    // Potentially we could allow receivers that are tuple<bool, ...>.
+    // Both Scylla and Cassandra allow to insert a single value in place of a tuple without adding the parenthesis.
+    // So something like:
+    // INSERT INTO tab (pk_int, float_bool_tuple) VALUES (123, 321.456)'
+    // Would insert a tuple value (321.456, null)
+    // There is no need to write VALUES (123, (321.456,))
+    // In my opinion this kind of hidden type conversion is harmful and bug inducing.
+    // We should allow it only in places where it's needed to stay compatible with Cassandra.
+    std::vector<data_type> invalid_receiver_types = {
+        byte_type,
+        short_type,
+        int32_type,
+        long_type,
+        ascii_type,
+        bytes_type,
+        utf8_type,
+        date_type,
+        timeuuid_type,
+        timestamp_type,
+        simple_date_type,
+        time_type,
+        uuid_type,
+        inet_addr_type,
+        float_type,
+        double_type,
+        varint_type,
+        decimal_type,
+        counter_type,
+        duration_type,
+        empty_type,
+        list_type_impl::get_instance(boolean_type, false),
+        list_type_impl::get_instance(boolean_type, true),
+        set_type_impl::get_instance(boolean_type, false),
+        set_type_impl::get_instance(boolean_type, true),
+        map_type_impl::get_instance(boolean_type, boolean_type, false),
+        map_type_impl::get_instance(boolean_type, boolean_type, true),
+        tuple_type_impl::get_instance({boolean_type}),
+        tuple_type_impl::get_instance({boolean_type, float_type}),
+        tuple_type_impl::get_instance({utf8_type, float_type}),
+        user_type_impl::get_instance("test_ks", "test_ut", {"field1", "field2"}, {boolean_type, float_type}, false),
+        user_type_impl::get_instance("test_ks", "test_ut", {"field1", "field2"}, {boolean_type, float_type}, true)};
+
+    for (const data_type& invalid_receiver_type : invalid_receiver_types) {
+        BOOST_REQUIRE_THROW(prepare_expression(good_binop_unprepared, db, "test_ks", table_schema.get(),
+                                               make_receiver(invalid_receiver_type)),
+                            exceptions::invalid_request_exception);
+        BOOST_REQUIRE_THROW(prepare_expression(good_binop_unprepared, db, "test_ks", table_schema.get(),
+                                               make_receiver(reversed_type_impl::get_instance(invalid_receiver_type))),
+                            exceptions::invalid_request_exception);
+    }
+}
+
+// Expected valid type for RHS values.
+// We must know which values are valid to generate the invalid ones.
+enum struct expected_rhs_type {
+    // float
+    float_type,
+    // text/ascii
+    string_type,
+    // tuple<float, int, text, double>
+    multi_column_tuple,
+    // list<float>
+    float_in_list,
+    // list<tuple<float, int, text, double>
+    multi_column_tuple_in_list,
+    // IS_NOT alows only NULL as the RHS, everything else is invalid
+    is_not_null_rhs
+};
+
+// Generates invalid RHS values for use in prepare_binary_operator tests.
+// The argument specifies what type of RHS values are right, so we can avoid them when generating the wrong ones.
+std::vector<expression> get_invalid_rhs_values(expected_rhs_type expected_rhs) {
+    // Start by adding values that are wrong in all prepare_binary_operator tests
+    std::vector<expression> invalid_rhs_vals = {
+        make_bool_untyped("true"), make_duration_untyped("365d"), make_hex_untyped("0xdeadbeef"),
+        // A tuple where the third element has a type that doesn't match the one expected by multi_column_tuple
+        tuple_constructor{.elements =
+                              {
+                                  make_float_untyped("123.45"),
+                                  make_int_untyped("234"),
+                                  make_bool_untyped("true"),
+                                  make_float_untyped("45.67"),
+                              }},
+        // A tuple with too many elements for multi_column_tuple.
+        // A tuple with too little elements doesn't cause an error - CQL accepts it, the missing fields are assummed to
+        // be null.
+        tuple_constructor{.elements =
+                              {
+                                  make_float_untyped("123.45"),
+                                  make_int_untyped("234"),
+                                  make_string_untyped("hello"),
+                                  make_float_untyped("45.67"),
+                                  make_float_untyped("123.45"),
+                              }},
+        collection_constructor{.style = collection_constructor::style_type::set, .elements = {}},
+        collection_constructor{.style = collection_constructor::style_type::set,
+                               .elements = {make_float_untyped("12.3"), make_float_untyped("5.6")}},
+        collection_constructor{.style = collection_constructor::style_type::map, .elements = {}},
+        collection_constructor{
+            .style = collection_constructor::style_type::map,
+            .elements = {tuple_constructor{.elements = {make_float_untyped("1"), make_float_untyped("2")}},
+                         tuple_constructor{.elements = {make_float_untyped("3"), make_float_untyped("4")}}}},
+        usertype_constructor{.elements = {}},
+        usertype_constructor{.elements = {{column_identifier("field1", false), make_float_untyped("1")},
+                                          {column_identifier("field2", false), make_float_untyped("2")}}}};
+
+    // `float_int_tuple = 1.23` is a valid expression, so we have to avoid adding int/float values for multi_column
+    // tests. This is allowed in both Cassandra and Scylla, and is equivalent to writing `float_int_tuple = (1.23,
+    // null)`
+    if (expected_rhs != expected_rhs_type::float_type && expected_rhs != expected_rhs_type::multi_column_tuple) {
+        invalid_rhs_vals.push_back(make_int_untyped("123"));
+        invalid_rhs_vals.push_back(make_float_untyped("56.78"));
+    }
+
+    if (expected_rhs != expected_rhs_type::string_type) {
+        invalid_rhs_vals.push_back(make_string_untyped("good_day"));
+    }
+
+    if (expected_rhs != expected_rhs_type::multi_column_tuple) {
+        invalid_rhs_vals.push_back(tuple_constructor{.elements = {}});
+        invalid_rhs_vals.push_back(tuple_constructor{.elements = {
+                                                         make_float_untyped("123.45"),
+                                                         make_int_untyped("234"),
+                                                         make_string_untyped("hi"),
+                                                         make_float_untyped("45.67"),
+                                                     }});
+        invalid_rhs_vals.push_back(tuple_constructor{.elements = {
+                                                         make_float_untyped("123.45"),
+                                                         make_int_untyped("234"),
+                                                         make_string_untyped("hi"),
+                                                     }});
+    }
+    if (expected_rhs != expected_rhs_type::float_in_list &&
+        expected_rhs != expected_rhs_type::multi_column_tuple_in_list) {
+        invalid_rhs_vals.push_back(collection_constructor{
+            .style = collection_constructor::style_type::list,
+            .elements = {make_float_untyped("123.45"), make_float_untyped("732.2"), make_float_untyped("42.1")}});
+        invalid_rhs_vals.push_back(collection_constructor{
+            .style = collection_constructor::style_type::list,
+            .elements = {make_float_untyped("232"), make_float_untyped("121"), make_float_untyped("937")}});
+    }
+    if (expected_rhs != expected_rhs_type::multi_column_tuple_in_list) {
+        invalid_rhs_vals.push_back(collection_constructor{.style = collection_constructor::style_type::list,
+                                                          .elements = {
+                                                              tuple_constructor{.elements =
+                                                                                    {
+                                                                                        make_float_untyped("123.45"),
+                                                                                        make_int_untyped("234"),
+                                                                                        make_string_untyped("hi"),
+                                                                                        make_float_untyped("45.67"),
+                                                                                    }},
+                                                              tuple_constructor{.elements =
+                                                                                    {
+                                                                                        make_float_untyped("231.1"),
+                                                                                        make_int_untyped("232"),
+                                                                                        make_string_untyped("dfdf"),
+                                                                                        make_float_untyped("76.54"),
+                                                                                    }},
+                                                          }});
+    }
+
+    if (expected_rhs != expected_rhs_type::float_in_list &&
+        expected_rhs != expected_rhs_type::multi_column_tuple_in_list) {
+        invalid_rhs_vals.push_back(
+            collection_constructor{.style = collection_constructor::style_type::list, .elements = {}});
+    }
+    return invalid_rhs_vals;
+}
+
+// Test preparing the given binary_operator with various invalid RHS values.
+// The values are generated using get_invalid_rhs_values().
+void test_prepare_binary_operator_invalid_rhs_values(const expression& good_binop,
+                                                     expected_rhs_type expected_rhs,
+                                                     data_dictionary::database db,
+                                                     const schema_ptr& table_schema) {
+    std::vector<expression> invalid_rhs_vals = get_invalid_rhs_values(expected_rhs);
+
+    for (const expression& invalid_rhs : invalid_rhs_vals) {
+        binary_operator invalid_binop = as<binary_operator>(good_binop);
+        invalid_binop.rhs = invalid_rhs;
+
+        BOOST_REQUIRE_THROW(prepare_expression(invalid_binop, db, "test_ks", table_schema.get(), nullptr),
+                            exceptions::invalid_request_exception);
+        BOOST_REQUIRE_THROW(
+            prepare_expression(invalid_binop, db, "test_ks", table_schema.get(), make_receiver(boolean_type)),
+            exceptions::invalid_request_exception);
+    }
+}
+
+// The tests iterate over all possible comparison_orders so a convenience function is convenient.
+std::array<comparison_order, 2> get_possible_comparison_orders() {
+    return {comparison_order::cql, comparison_order::clustering};
+}
+
+// Test preparing a binary_operator with operations: =, !=, <, <=, >, >=
+// The test enumerates various possible LHS values and tries all the operators for each of them.
+// The LHS values always are of type float to make testing easy.
+// This means that multi-column LHS are not tested in here and need to be tested in a separate test.
+// The same goes for reversed_type.
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_eq_neq_lt_lte_gt_gte) {
+    schema_ptr table_schema =
+        schema_builder("test_ks", "test_cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("float_col", float_type, column_kind::regular_column)
+            .with_column("reversed_float_col", reversed_type_impl::get_instance(float_type))
+            .with_column("float_list_col", list_type_impl::get_instance(float_type, true), column_kind::regular_column)
+            .with_column("frozen_float_list_col", list_type_impl::get_instance(float_type, false),
+                         column_kind::regular_column)
+            .with_column("double_float_map_col", map_type_impl::get_instance(double_type, float_type, true),
+                         column_kind::regular_column)
+            .with_column("frozen_double_float_map_col", map_type_impl::get_instance(double_type, float_type, false),
+                         column_kind::regular_column)
+            .build();
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    // `float_col`
+    expression unprepared_float_col =
+        unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("float_col", false)};
+    expression prepared_float_col = column_value(table_schema->get_column_definition("float_col"));
+
+    // `float_list_col[123]`
+    expression unprepared_subscripted_float_list =
+        subscript{.val = unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("float_list_col", false)},
+                  .sub = make_int_untyped("123")};
+
+    expression prepared_subscripted_float_list =
+        subscript{.val = column_value(table_schema->get_column_definition("float_list_col")),
+                  .sub = make_int_const(123),
+                  .type = float_type};
+
+    // `frozen_float_list_col[123]`
+    expression unprepared_subscripted_frozen_float_list = subscript{
+        .val = unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("frozen_float_list_col", false)},
+        .sub = make_int_untyped("123")};
+
+    expression prepared_subscripted_frozen_float_list =
+        subscript{.val = column_value(table_schema->get_column_definition("frozen_float_list_col")),
+                  .sub = make_int_const(123),
+                  .type = float_type};
+
+    // `double_float_map_col[123.4]`
+    expression unprepared_subscripted_double_float_map = subscript{
+        .val = unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("double_float_map_col", false)},
+        .sub = make_float_untyped("123.4")};
+
+    expression prepared_subscripted_double_float_map =
+        subscript{.val = column_value(table_schema->get_column_definition("double_float_map_col")),
+                  .sub = make_double_const(123.4),
+                  .type = float_type};
+
+    // `frozen_double_float_map_col[123.4]`
+    expression unprepared_subscripted_frozen_double_float_map = subscript{
+        .val =
+            unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("frozen_double_float_map_col", false)},
+        .sub = make_float_untyped("123.4")};
+
+    expression prepared_subscripted_frozen_double_float_map =
+        subscript{.val = column_value(table_schema->get_column_definition("frozen_double_float_map_col")),
+                  .sub = make_double_const(123.4),
+                  .type = float_type};
+
+    // `double_float_map_col[123]` <- int index should work where double is expected
+    expression unprepared_subscripted_double_float_map_with_int_index = subscript{
+        .val = unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("double_float_map_col", false)},
+        .sub = make_int_untyped("123")};
+
+    expression prepared_subscripted_double_float_map_with_int_index =
+        subscript{.val = column_value(table_schema->get_column_definition("double_float_map_col")),
+                  .sub = make_double_const(123),
+                  .type = float_type};
+
+    std::vector<std::pair<expression, expression>> possible_lhs_vals = {
+        {unprepared_float_col, prepared_float_col},
+        {unprepared_subscripted_float_list, prepared_subscripted_float_list},
+        {unprepared_subscripted_frozen_float_list, prepared_subscripted_frozen_float_list},
+        {unprepared_subscripted_double_float_map, prepared_subscripted_double_float_map},
+        {unprepared_subscripted_frozen_double_float_map, prepared_subscripted_frozen_double_float_map},
+        {unprepared_subscripted_double_float_map_with_int_index, prepared_subscripted_double_float_map_with_int_index}};
+
+    std::vector<oper_t> possible_operations = {oper_t::EQ,  oper_t::NEQ, oper_t::LT,
+                                               oper_t::LTE, oper_t::GT,  oper_t::GTE};
+
+    for (auto [unprepared_lhs, prepared_lhs] : possible_lhs_vals) {
+        for (const oper_t& op : possible_operations) {
+            for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+                expression to_prepare = binary_operator(unprepared_lhs, op, make_float_untyped("123.4"), comp_order);
+
+                expression expected = binary_operator(prepared_lhs, op, make_float_const(123.4), comp_order);
+
+                test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+                test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_type, db,
+                                                                table_schema);
+            }
+        }
+    }
+}
+
+// Test operations =, !=, <, <=, >, >= with a LHS column that has reversed type.
+// The prepared RHS should also have inherit the reversed type.
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_eq_neq_lt_lte_gt_gte_reversed_type) {
+    schema_ptr table_schema = schema_builder("test_ks", "test_cf")
+                                  .with_column("pk", int32_type, column_kind::partition_key)
+                                  .with_column("reversed_float_col", reversed_type_impl::get_instance(float_type),
+                                               column_kind::regular_column)
+                                  .build();
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    std::vector<oper_t> possible_operations = {oper_t::EQ,  oper_t::NEQ, oper_t::LT,
+                                               oper_t::LTE, oper_t::GT,  oper_t::GTE};
+
+    for (const oper_t& op : possible_operations) {
+        for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+            expression to_prepare = binary_operator(
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("reversed_float_col", false)}, op,
+                make_float_untyped("123.4"), comp_order);
+
+            constant rhs_const = make_float_const(123.4);
+            rhs_const.type = reversed_type_impl::get_instance(float_type);
+            expression expected = binary_operator(
+                column_value(table_schema->get_column_definition("reversed_float_col")), op, rhs_const, comp_order);
+
+            test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+            test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_type, db,
+                                                            table_schema);
+        }
+    }
+}
+
+// Test operations =, !=, <, <=, >, >= with a multi-column LHS.
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_eq_neq_lt_lte_gt_gte_multi_column) {
+    schema_ptr table_schema =
+        schema_builder("test_ks", "test_cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("c1", float_type, column_kind::clustering_key)
+            .with_column("c2", int32_type, column_kind::clustering_key)
+            .with_column("c3", utf8_type, column_kind::clustering_key)
+            .with_column("c4", reversed_type_impl::get_instance(double_type), column_kind::clustering_key)
+            .build();
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    expression unprepared_lhs = tuple_constructor{
+        .elements = {unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("c1", false)},
+                     unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("c2", false)},
+                     unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("c3", false)},
+                     unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("c4", false)}},
+        .type = nullptr};
+
+    expression prepared_lhs =
+        tuple_constructor{.elements = {column_value(table_schema->get_column_definition("c1")),
+                                       column_value(table_schema->get_column_definition("c2")),
+                                       column_value(table_schema->get_column_definition("c3")),
+                                       column_value(table_schema->get_column_definition("c4"))},
+                          .type = tuple_type_impl::get_instance(
+                              {float_type, int32_type, utf8_type, reversed_type_impl::get_instance(double_type)})};
+
+    expression unprepared_rhs =
+        tuple_constructor{.elements = {make_float_untyped("123.4"), make_int_untyped("1234"),
+                                       make_string_untyped("hello"), make_float_untyped("112233.44")},
+                          .type = nullptr};
+
+    expression prepared_rhs = make_tuple_const(
+        {make_float_raw(123.4), make_int_raw(1234), make_text_raw("hello"), make_double_raw(112233.44)},
+        {float_type, int32_type, utf8_type, double_type});
+
+    std::vector<oper_t> possible_operations = {oper_t::EQ,  oper_t::NEQ, oper_t::LT,
+                                               oper_t::LTE, oper_t::GT,  oper_t::GTE};
+
+    for (const oper_t& op : possible_operations) {
+        for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+            expression to_prepare = binary_operator(unprepared_lhs, op, unprepared_rhs, comp_order);
+
+            expression expected = binary_operator(prepared_lhs, op, prepared_rhs, comp_order);
+
+            test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+            test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::multi_column_tuple, db,
+                                                            table_schema);
+        }
+    }
+}
+
+
+// `float_col IN ()`
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_float_col_in_empty_list) {
+    schema_ptr table_schema = schema_builder("test_ks", "test_cf")
+                                  .with_column("pk", int32_type, column_kind::partition_key)
+                                  .with_column("float_col", float_type, column_kind::regular_column)
+                                  .build();
+
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+        expression to_prepare = binary_operator(
+            unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("float_col", false)}, oper_t::IN,
+            collection_constructor{.style = collection_constructor::style_type::list, .elements = {}}, comp_order);
+
+        expression expected =
+            binary_operator(column_value(table_schema->get_column_definition("float_col")), oper_t::IN,
+                            constant(make_list_raw({}), list_type_impl::get_instance(float_type, false)), comp_order);
+
+        test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+        test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_in_list, db, table_schema);
+    }
+}
+
+// `float_col IN (1, 2.3)`
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_float_col_in_1_2_dot_3) {
+    schema_ptr table_schema = schema_builder("test_ks", "test_cf")
+                                  .with_column("pk", int32_type, column_kind::partition_key)
+                                  .with_column("float_col", float_type, column_kind::regular_column)
+                                  .build();
+
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+        expression to_prepare = binary_operator(
+            unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("float_col", false)}, oper_t::IN,
+            collection_constructor{.style = collection_constructor::style_type::list,
+                                   .elements = {make_int_untyped("1"), make_float_untyped("2.3")}},
+            comp_order);
+
+        expression expected =
+            binary_operator(column_value(table_schema->get_column_definition("float_col")), oper_t::IN,
+                            constant(make_list_raw({make_float_raw(1), make_float_raw(2.3)}),
+                                     list_type_impl::get_instance(float_type, false)),
+                            comp_order);
+
+        test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+        test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_in_list, db, table_schema);
+    }
+}
+
+// `float_col IN (1, 2, 3, 4)`
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_float_col_in_1_2_3_4) {
+    schema_ptr table_schema = schema_builder("test_ks", "test_cf")
+                                  .with_column("pk", int32_type, column_kind::partition_key)
+                                  .with_column("float_col", float_type, column_kind::regular_column)
+                                  .build();
+
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+        expression to_prepare = binary_operator(
+            unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("float_col", false)}, oper_t::IN,
+            collection_constructor{.style = collection_constructor::style_type::list,
+                                   .elements =
+                                       {
+                                           make_int_untyped("1"),
+                                           make_int_untyped("2"),
+                                           make_int_untyped("3"),
+                                           make_int_untyped("4"),
+                                       }},
+            comp_order);
+
+        expression expected = binary_operator(
+            column_value(table_schema->get_column_definition("float_col")), oper_t::IN,
+            constant(make_list_raw({make_float_raw(1), make_float_raw(2), make_float_raw(3), make_float_raw(4)}),
+                     list_type_impl::get_instance(float_type, false)),
+            comp_order);
+
+        test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+        test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_in_list, db, table_schema);
+    }
+}
+
+// reverse_float_col IN ()
+BOOST_AUTO_TEST_CASE(prepare_binary_operato_reverse_float_col_in_empty_list) {
+    schema_ptr table_schema =
+        schema_builder("test_ks", "test_cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("reverse_float_col", reversed_type_impl::get_instance(float_type), column_kind::regular_column)
+            .build();
+
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+        expression to_prepare = binary_operator(
+            unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("reverse_float_col", false)},
+            oper_t::IN, collection_constructor{.style = collection_constructor::style_type::list, .elements = {}},
+            comp_order);
+
+        expression expected =
+            binary_operator(column_value(table_schema->get_column_definition("reverse_float_col")), oper_t::IN,
+                            constant(make_list_raw({}), list_type_impl::get_instance(float_type, false)), comp_order);
+
+        test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+        test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_in_list, db, table_schema);
+    }
+}
+
+// `reverse_float_col IN (1.2, 2.3)`
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_float_col_in_1_dot_2_2_dot_3) {
+    schema_ptr table_schema =
+        schema_builder("test_ks", "test_cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("reverse_float_col", reversed_type_impl::get_instance(float_type), column_kind::regular_column)
+            .build();
+
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+        expression to_prepare = binary_operator(
+            unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("reverse_float_col", false)},
+            oper_t::IN,
+            collection_constructor{.style = collection_constructor::style_type::list,
+                                   .elements = {make_float_untyped("1.2"), make_float_untyped("2.3")}},
+            comp_order);
+
+        expression expected =
+            binary_operator(column_value(table_schema->get_column_definition("reverse_float_col")), oper_t::IN,
+                            constant(make_list_raw({make_float_raw(1.2), make_float_raw(2.3)}),
+                                     list_type_impl::get_instance(float_type, false)),
+                            comp_order);
+
+        test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+        test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_in_list, db, table_schema);
+    }
+}
+
+// `(float_col, int_col, text_col, reverse_double_col) IN ()`
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_multi_col_in_empty_list) {
+    schema_ptr table_schema = schema_builder("test_ks", "test_cf")
+                                  .with_column("pk", int32_type, column_kind::partition_key)
+                                  .with_column("float_col", float_type, column_kind::clustering_key)
+                                  .with_column("int_col", int32_type, column_kind::clustering_key)
+                                  .with_column("text_col", utf8_type, column_kind::clustering_key)
+                                  .with_column("reverse_double_col", reversed_type_impl::get_instance(double_type))
+                                  .build();
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    expression unprepared_lhs = tuple_constructor{
+        .elements =
+            {
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("float_col", false)},
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("int_col", false)},
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("text_col", false)},
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("reverse_double_col", false)},
+            },
+        .type = nullptr};
+
+    data_type tuple_type = tuple_type_impl::get_instance(
+        {float_type, int32_type, utf8_type, reversed_type_impl::get_instance(double_type)});
+
+    expression prepared_lhs =
+        tuple_constructor{.elements = {column_value(table_schema->get_column_definition("float_col")),
+                                       column_value(table_schema->get_column_definition("int_col")),
+                                       column_value(table_schema->get_column_definition("text_col")),
+                                       column_value(table_schema->get_column_definition("reverse_double_col"))},
+                          .type = tuple_type};
+
+    expression unprepared_rhs =
+        collection_constructor{.style = collection_constructor::style_type::list, .elements = {}};
+
+    // reversed is removed!
+    expression prepared_rhs = constant(
+        make_list_raw({}), list_type_impl::get_instance(
+                               tuple_type_impl::get_instance({float_type, int32_type, utf8_type, double_type}), false));
+
+    for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+        expression to_prepare = binary_operator(unprepared_lhs, oper_t::IN, unprepared_rhs, comp_order);
+
+        expression expected = binary_operator(prepared_lhs, oper_t::IN, prepared_rhs, comp_order);
+
+        test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+        test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::multi_column_tuple_in_list, db,
+                                                        table_schema);
+    }
+}
+
+// `(float_col, int_col, text_col, reverse_double_col) IN ((1.2, 3, 'four', 8.9), (5, 6, 'seven', 10.11))`
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_multi_col_in_values) {
+    schema_ptr table_schema = schema_builder("test_ks", "test_cf")
+                                  .with_column("pk", int32_type, column_kind::partition_key)
+                                  .with_column("float_col", float_type, column_kind::clustering_key)
+                                  .with_column("int_col", int32_type, column_kind::clustering_key)
+                                  .with_column("text_col", utf8_type, column_kind::clustering_key)
+                                  .with_column("reverse_double_col", reversed_type_impl::get_instance(double_type))
+                                  .build();
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    expression unprepared_lhs = tuple_constructor{
+        .elements =
+            {
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("float_col", false)},
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("int_col", false)},
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("text_col", false)},
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("reverse_double_col", false)},
+            },
+        .type = nullptr};
+
+    data_type tuple_type = tuple_type_impl::get_instance(
+        {float_type, int32_type, utf8_type, reversed_type_impl::get_instance(double_type)});
+
+    expression prepared_lhs =
+        tuple_constructor{.elements = {column_value(table_schema->get_column_definition("float_col")),
+                                       column_value(table_schema->get_column_definition("int_col")),
+                                       column_value(table_schema->get_column_definition("text_col")),
+                                       column_value(table_schema->get_column_definition("reverse_double_col"))},
+                          .type = tuple_type};
+
+    expression unprepared_rhs =
+        collection_constructor{.style = collection_constructor::style_type::list,
+                               .elements = {tuple_constructor{.elements =
+                                                                  {
+                                                                      make_float_untyped("1.2"),
+                                                                      make_int_untyped("3"),
+                                                                      make_string_untyped("four"),
+                                                                      make_float_untyped("8.9"),
+                                                                  }},
+                                            tuple_constructor{.elements = {
+                                                                  make_int_untyped("5"),
+                                                                  make_int_untyped("6"),
+                                                                  make_string_untyped("seven"),
+                                                                  make_float_untyped("10.11"),
+                                                              }}}};
+
+    raw_value prepared_rhs_raw = make_list_raw(
+        {make_tuple_raw({make_float_raw(1.2), make_int_raw(3), make_text_raw("four"), make_double_raw(8.9)}),
+         make_tuple_raw({make_float_raw(5), make_int_raw(6), make_text_raw("seven"), make_double_raw(10.11)})});
+
+    // reversed is removed!
+    data_type prepared_rhs_type = list_type_impl::get_instance(
+        tuple_type_impl::get_instance({float_type, int32_type, utf8_type, double_type}), false);
+
+    expression prepared_rhs = constant(prepared_rhs_raw, prepared_rhs_type);
+
+    for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+        expression to_prepare = binary_operator(unprepared_lhs, oper_t::IN, unprepared_rhs, comp_order);
+
+        expression expected = binary_operator(prepared_lhs, oper_t::IN, prepared_rhs, comp_order);
+
+        test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+        test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::multi_column_tuple_in_list, db,
+                                                        table_schema);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_contains) {
+    schema_ptr table_schema =
+        schema_builder("test_ks", "test_cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("float_list", list_type_impl::get_instance(float_type, true), column_kind::regular_column)
+            .with_column("frozen_float_list", list_type_impl::get_instance(float_type, false),
+                         column_kind::regular_column)
+            .with_column("float_set", set_type_impl::get_instance(float_type, true), column_kind::regular_column)
+            .with_column("frozen_float_set", set_type_impl::get_instance(float_type, false),
+                         column_kind::regular_column)
+            .with_column("double_float_map", map_type_impl::get_instance(double_type, float_type, true),
+                         column_kind::regular_column)
+            .with_column("frozen_double_float_map", map_type_impl::get_instance(double_type, float_type, false),
+                         column_kind::regular_column)
+            .build();
+
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    std::vector<const char*> possible_lhs_col_names = {"float_list",       "frozen_float_list",
+                                                       "float_set",        "frozen_float_set",
+                                                       "double_float_map", "frozen_double_float_map"};
+
+    std::vector<std::pair<untyped_constant, constant>> possible_rhs_vals = {
+        {make_int_untyped("123"), make_float_const(123)},
+        {
+            make_float_untyped("123.45"),
+            make_float_const(123.45),
+        }};
+
+    for (const char* lhs_col_name : possible_lhs_col_names) {
+        for (auto& [unprepared_rhs, prepared_rhs] : possible_rhs_vals) {
+            for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+                expression to_prepare = binary_operator(
+                    unresolved_identifier{.ident = ::make_shared<column_identifier_raw>(lhs_col_name, false)},
+                    oper_t::CONTAINS, unprepared_rhs, comp_order);
+
+                expression expected = binary_operator(column_value(table_schema->get_column_definition(lhs_col_name)),
+                                                      oper_t::CONTAINS, prepared_rhs, comp_order);
+
+                test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+                test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_type, db,
+                                                                table_schema);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_contains_key) {
+    schema_ptr table_schema =
+        schema_builder("test_ks", "test_cf")
+            .with_column("pk", int32_type, column_kind::partition_key)
+            .with_column("double_float_map", map_type_impl::get_instance(double_type, float_type, true),
+                         column_kind::regular_column)
+            .with_column("frozen_double_float_map", map_type_impl::get_instance(double_type, float_type, false),
+                         column_kind::regular_column)
+            .build();
+
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    std::vector<const char*> possible_lhs_col_names = {"double_float_map", "frozen_double_float_map"};
+
+    std::vector<std::pair<untyped_constant, constant>> possible_rhs_vals = {
+        {make_int_untyped("123"), make_double_const(123)},
+        {
+            make_float_untyped("123.45"),
+            make_double_const(123.45),
+        }};
+
+    for (const char* lhs_col_name : possible_lhs_col_names) {
+        for (auto& [unprepared_rhs, prepared_rhs] : possible_rhs_vals) {
+            for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+                expression to_prepare = binary_operator(
+                    unresolved_identifier{.ident = ::make_shared<column_identifier_raw>(lhs_col_name, false)},
+                    oper_t::CONTAINS_KEY, unprepared_rhs, comp_order);
+
+                expression expected = binary_operator(column_value(table_schema->get_column_definition(lhs_col_name)),
+                                                      oper_t::CONTAINS_KEY, prepared_rhs, comp_order);
+
+                test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+                test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_type, db,
+                                                                table_schema);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_like) {
+    schema_ptr table_schema = schema_builder("test_ks", "test_cf")
+                                  .with_column("pk", int32_type, column_kind::partition_key)
+                                  .with_column("text_col", utf8_type, column_kind::regular_column)
+                                  .with_column("ascii_col", ascii_type, column_kind::regular_column)
+                                  .build();
+
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    std::vector<const char*> possible_lhs_col_names = {"text_col", "ascii_col"};
+
+    for (const char* lhs_col_name : possible_lhs_col_names) {
+        for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+            expression to_prepare = binary_operator(
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>(lhs_col_name, false)}, oper_t::LIKE,
+                make_string_untyped("some%hing"), comp_order);
+
+            const column_definition* lhs_col_def = table_schema->get_column_definition(lhs_col_name);
+
+            expression expected = binary_operator(column_value(lhs_col_def), oper_t::LIKE,
+                                                  constant(make_text_raw("some%hing"), lhs_col_def->type), comp_order);
+
+            test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+            test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::string_type, db,
+                                                            table_schema);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_is_not_null) {
+    schema_ptr table_schema = schema_builder("test_ks", "test_cf")
+                                  .with_column("pk", int32_type, column_kind::partition_key)
+                                  .with_column("float_col", float_type, column_kind::regular_column)
+                                  .build();
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+        expression to_prepare =
+            binary_operator(unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("float_col", false)},
+                            oper_t::IS_NOT, make_null_untyped(), comp_order);
+
+        expression expected = binary_operator(column_value(table_schema->get_column_definition("float_col")),
+                                              oper_t::IS_NOT, constant::make_null(float_type), comp_order);
+
+        test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+        test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::is_not_null_rhs, db,
+                                                        table_schema);
+    }
+}
+
+// `float_col = NULL`, `float_col < NULL`, ...
+// The RHS should be prepared as a NULL constant with float type.
+BOOST_AUTO_TEST_CASE(prepare_binary_operator_with_null_rhs) {
+    schema_ptr table_schema = schema_builder("test_ks", "test_cf")
+                                  .with_column("pk", int32_type, column_kind::partition_key)
+                                  .with_column("float_col", float_type, column_kind::regular_column)
+                                  .build();
+    auto [db, db_data] = make_data_dictionary_database(table_schema);
+
+    std::vector<oper_t> possible_operations = {oper_t::EQ,  oper_t::NEQ, oper_t::LT,
+                                               oper_t::LTE, oper_t::GT,  oper_t::GTE};
+
+    for (const oper_t& op : possible_operations) {
+        for (const comparison_order& comp_order : get_possible_comparison_orders()) {
+            expression to_prepare = binary_operator(
+                unresolved_identifier{.ident = ::make_shared<column_identifier_raw>("float_col", false)}, op,
+                make_null_untyped(), comp_order);
+
+            expression expected = binary_operator(column_value(table_schema->get_column_definition("float_col")), op,
+                                                  constant::make_null(float_type), comp_order);
+
+            test_prepare_good_binary_operator(to_prepare, expected, db, table_schema);
+
+            test_prepare_binary_operator_invalid_rhs_values(to_prepare, expected_rhs_type::float_type, db,
+                                                            table_schema);
+        }
+    }
 }

@@ -321,7 +321,11 @@ future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_inf
 
 future<> replicated_key_provider::validate() const {
     auto f = _system_key->validate().handle_exception([this](auto ep) {
-        std::throw_with_nested(std::invalid_argument(fmt::format("Could not validate system key: {} ({})", _system_key->name(), ep)));
+        try {
+            std::rethrow_exception(ep);
+        } catch (...) {
+            std::throw_with_nested(std::invalid_argument(fmt::format("Could not validate system key: {} ({})", _system_key->name(), ep)));
+        }
     });
     if (_local_provider){
         f = f.then([this] {
