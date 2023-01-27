@@ -64,7 +64,7 @@ rst_prolog = """
 .. |cql-version| replace:: 3.3.1
 """
 
-# Add tags to the project.
+# Add flags to the project.
 for flag in FLAGS:
     tags.add(flag)
 
