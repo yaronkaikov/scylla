@@ -521,14 +521,10 @@ compaction_group* table::single_compaction_group_if_available() const noexcept {
 }
 
 compaction_group& table::compaction_group_for_token(dht::token token) const noexcept {
-    unsigned idx = 0;
-    // avoids shift by 64.
-    if (_x_log2_compaction_groups) {
-        auto value = dht::token::to_int64(token);
-        auto mask = (1 << _x_log2_compaction_groups) - 1;
-        idx = (value >> (64 - _x_log2_compaction_groups)) & mask;
+    auto idx = dht::compaction_group_of(_x_log2_compaction_groups, token);
+    if (idx >= _compaction_groups.size()) {
+        on_fatal_internal_error(tlogger, format("compaction_group_for_token: index out of range: idx={} size_log2={} size={} token={}", idx, _x_log2_compaction_groups, _compaction_groups.size(), token));
     }
-    assert(idx < _compaction_groups.size());
     return *_compaction_groups[idx];
 }
 
@@ -1253,10 +1249,13 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
             cg.get_backlog_tracker().copy_ongoing_charges(new_bt, move_read_charges);
 
             new_sstables = make_lw_shared<sstables::sstable_set>(new_cs.make_sstable_set(t._schema));
-            cg.main_sstables()->for_each_sstable([this] (const sstables::shared_sstable& s) {
-                add_sstable_to_backlog_tracker(new_bt, s);
+            std::vector<sstables::shared_sstable> new_sstables_for_backlog_tracker;
+            new_sstables_for_backlog_tracker.reserve(cg.main_sstables()->all()->size());
+            cg.main_sstables()->for_each_sstable([this, &new_sstables_for_backlog_tracker] (const sstables::shared_sstable& s) {
                 new_sstables->insert(s);
+                new_sstables_for_backlog_tracker.push_back(s);
             });
+            new_bt.replace_sstables({}, std::move(new_sstables_for_backlog_tracker));
         }
 
         void execute() noexcept {
@@ -1470,7 +1469,7 @@ table::sstables_as_snapshot_source() {
             return make_compacting_reader(
                 std::move(reader),
                 gc_clock::now(),
-                [](const dht::decorated_key&) { return api::min_timestamp; },
+                [](const dht::decorated_key&) { return api::max_timestamp; },
                 _compaction_manager.get_tombstone_gc_state(),
                 fwd);
         }, [this, sst_set] {

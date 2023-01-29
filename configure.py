@@ -1649,7 +1649,6 @@ def configure_seastar(build_dir, mode, mode_config):
         '-DSeastar_API_LEVEL=6',
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
         '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
-        '-DSeastar_IO_URING=OFF', # Fedora 34's liburing is too old
         '-DSeastar_SCHEDULING_GROUPS_COUNT=17',
     ] + distro_extra_cmake_args
 

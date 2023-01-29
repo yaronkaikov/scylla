@@ -2276,7 +2276,10 @@ public:
         add_partition(mutation_sink, "trace_probability", format("{:.2}", tracing::tracing::get_local_tracing_instance().get_trace_probability()));
         co_await add_partition(mutation_sink, "memory", [this] () {
             struct stats {
-                uint64_t total = 0;
+                // take the pre-reserved memory into account, as seastar only returns
+                // the stats of memory managed by the seastar allocator, but we instruct
+                // it to reserve addition memory for system.
+                uint64_t total = db::config::wasm_udf_reserved_memory;
                 uint64_t free = 0;
                 static stats reduce(stats a, stats b) { return stats{a.total + b.total, a.free + b.free}; }
             };
@@ -3022,32 +3025,29 @@ future<> system_keyspace::get_repair_history(::table_id table_id, repair_history
 
 future<int> system_keyspace::increment_and_get_generation() {
     auto req = format("SELECT gossip_generation FROM system.{} WHERE key='{}'", LOCAL, LOCAL);
-    return qctx->qp().execute_internal(req, cql3::query_processor::cache_internal::yes).then([] (auto rs) {
-        int generation;
-        if (rs->empty() || !rs->one().has("gossip_generation")) {
-            // seconds-since-epoch isn't a foolproof new generation
-            // (where foolproof is "guaranteed to be larger than the last one seen at this ip address"),
-            // but it's as close as sanely possible
-            generation = utils::get_generation_number();
+    auto rs = co_await _qp.local().execute_internal(req, cql3::query_processor::cache_internal::yes);
+    int generation;
+    if (rs->empty() || !rs->one().has("gossip_generation")) {
+        // seconds-since-epoch isn't a foolproof new generation
+        // (where foolproof is "guaranteed to be larger than the last one seen at this ip address"),
+        // but it's as close as sanely possible
+        generation = utils::get_generation_number();
+    } else {
+        // Other nodes will ignore gossip messages about a node that have a lower generation than previously seen.
+        int stored_generation = rs->one().template get_as<int>("gossip_generation") + 1;
+        int now = utils::get_generation_number();
+        if (stored_generation >= now) {
+            slogger.warn("Using stored Gossip Generation {} as it is greater than current system time {}."
+                        "See CASSANDRA-3654 if you experience problems", stored_generation, now);
+            generation = stored_generation;
         } else {
-            // Other nodes will ignore gossip messages about a node that have a lower generation than previously seen.
-            int stored_generation = rs->one().template get_as<int>("gossip_generation") + 1;
-            int now = utils::get_generation_number();
-            if (stored_generation >= now) {
-                slogger.warn("Using stored Gossip Generation {} as it is greater than current system time {}."
-                            "See CASSANDRA-3654 if you experience problems", stored_generation, now);
-                generation = stored_generation;
-            } else {
-                generation = now;
-            }
+            generation = now;
         }
-        auto req = format("INSERT INTO system.{} (key, gossip_generation) VALUES ('{}', ?)", LOCAL, LOCAL);
-        return qctx->qp().execute_internal(req, {generation}, cql3::query_processor::cache_internal::yes).then([generation] (auto rs) {
-            return force_blocking_flush(LOCAL);
-        }).then([generation] {
-            return make_ready_future<int>(generation);
-        });
-    });
+    }
+    req = format("INSERT INTO system.{} (key, gossip_generation) VALUES ('{}', ?)", LOCAL, LOCAL);
+    co_await _qp.local().execute_internal(req, {generation}, cql3::query_processor::cache_internal::yes);
+    co_await force_blocking_flush(LOCAL);
+    co_return generation;
 }
 
 mutation system_keyspace::make_size_estimates_mutation(const sstring& ks, std::vector<system_keyspace::range_estimates> estimates) {

@@ -2071,7 +2071,7 @@ class scylla_memory(gdb.Command):
             short_name = exploded_name[1]
         else:
             short_name = exploded_name[0]
-        semaphore_name = "{} sstable reads:".format(short_name)
+        semaphore_name = "{}:".format(short_name)
         initial_count = int(semaphore["_initial_resources"]["count"])
         initial_memory = int(semaphore["_initial_resources"]["memory"])
         used_count = initial_count - int(semaphore["_resources"]["count"])
@@ -2080,7 +2080,7 @@ class scylla_memory(gdb.Command):
             waiters = int(semaphore["_wait_list"]["_admission_queue"]["_size"])
         except gdb.error: # 5.1 compatibility
             waiters = int(semaphore["_wait_list"]["_size"])
-        return f'{semaphore_name:<24} {used_count:>3}/{initial_count:>3}, {used_memory:>13}/{initial_memory:>13}, queued: {waiters}'
+        return f'{semaphore_name:<16} {used_count:>3}/{initial_count:>3}, {used_memory:>13}/{initial_memory:>13}, queued: {waiters}'
 
     @staticmethod
     def print_replica_stats():
