@@ -444,6 +444,7 @@ scylla_tests = set([
     'test/boost/reusable_buffer_test',
     'test/boost/restrictions_test',
     'test/boost/repair_test',
+    'test/boost/role_manager_test',
     'test/boost/row_cache_test',
     'test/boost/rust_test',
     'test/boost/schema_change_test',
@@ -1650,6 +1651,7 @@ def configure_seastar(build_dir, mode, mode_config):
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
         '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
         '-DSeastar_SCHEDULING_GROUPS_COUNT=17',
+        '-DSeastar_IO_URING=OFF', # io_uring backend is not stable enough
     ] + distro_extra_cmake_args
 
     if args.stack_guards is not None:

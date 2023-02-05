@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/core/coroutine.hh>
 
 #include "test/lib/cql_test_env.hh"

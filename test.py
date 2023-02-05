@@ -327,6 +327,8 @@ class UnitTestSuite(TestSuite):
         super().__init__(path, cfg, options, mode)
         # Map of custom test command line arguments, if configured
         self.custom_args = cfg.get("custom_args", {})
+        # Map of tests that cannot run with compaction groups
+        self.all_can_run_compaction_groups_except = cfg.get("all_can_run_compaction_groups_except")
 
     async def create_test(self, shortname, suite, args):
         test = UnitTest(self.next_id((shortname, self.suite_key)), shortname, suite, args)
@@ -362,6 +364,7 @@ class BoostTestSuite(UnitTestSuite):
 
     async def create_test(self, shortname: str, suite, args) -> None:
         options = self.options
+        allows_compaction_groups = self.all_can_run_compaction_groups_except != None and shortname not in self.all_can_run_compaction_groups_except
         if options.parallel_cases and (shortname not in self.no_parallel_cases):
             fqname = os.path.join(self.mode, self.name, shortname)
             if fqname not in self._case_cache:
@@ -381,14 +384,14 @@ class BoostTestSuite(UnitTestSuite):
 
             case_list = self._case_cache[fqname]
             if len(case_list) == 1:
-                test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, None)
+                test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, None, allows_compaction_groups)
                 self.tests.append(test)
             else:
                 for case in case_list:
-                    test = BoostTest(self.next_id((shortname, self.suite_key, case)), shortname, suite, args, case)
+                    test = BoostTest(self.next_id((shortname, self.suite_key, case)), shortname, suite, args, case, allows_compaction_groups)
                     self.tests.append(test)
         else:
-            test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, None)
+            test = BoostTest(self.next_id((shortname, self.suite_key)), shortname, suite, args, None, allows_compaction_groups)
             self.tests.append(test)
 
     def junit_tests(self) -> Iterable['Test']:
@@ -422,15 +425,26 @@ class PythonTestSuite(TestSuite):
         cluster_size = self.cfg.get("cluster_size", 1)
         pool_size = cfg.get("pool_size", 2)
 
-        self.create_cluster = self.get_cluster_factory(cluster_size)
-        self.clusters = Pool(pool_size, self.create_cluster)
+        self.create_cluster = self.get_cluster_factory(cluster_size, options)
+        async def recycle_cluster(cluster: ScyllaCluster) -> None:
+            """When a dirty cluster is returned to the cluster pool,
+               stop it and release the used IPs. We don't necessarily uninstall() it yet,
+               which would delete the log file and directory - we might want to preserve
+               these if it came from a failed test.
+            """
+            await cluster.stop()
+            await cluster.release_ips()
 
-    def get_cluster_factory(self, cluster_size: int) -> Callable[..., Awaitable]:
+        self.clusters = Pool(pool_size, self.create_cluster, recycle_cluster)
+
+    def get_cluster_factory(self, cluster_size: int, options: argparse.Namespace) -> Callable[..., Awaitable]:
         def create_server(create_cfg: ScyllaCluster.CreateServerParams):
             cmdline_options = self.cfg.get("extra_scylla_cmdline_options", [])
             if type(cmdline_options) == str:
                 cmdline_options = [cmdline_options]
             cmdline_options = merge_cmdline_options(cmdline_options, create_cfg.cmdline_from_test)
+            if options.x_log2_compaction_groups:
+                cmdline_options = merge_cmdline_options(cmdline_options, [ '--x-log2-compaction-groups={}'.format(options.x_log2_compaction_groups) ])
 
             # There are multiple sources of config options, with increasing priority
             # (if two sources provide the same config option, the higher priority one wins):
@@ -661,7 +675,7 @@ class BoostTest(UnitTest):
     """A unit test which can produce its own XML output"""
 
     def __init__(self, test_no: int, shortname: str, suite, args: str,
-                 casename: Optional[str]) -> None:
+                 casename: Optional[str], allows_compaction_groups : bool) -> None:
         boost_args = []
         if casename:
             shortname += '.' + casename
@@ -677,6 +691,7 @@ class BoostTest(UnitTest):
         self.casename = casename
         BoostTest._reset(self)
         self.__junit_etree: Optional[ET.ElementTree] = None
+        self.allows_compaction_groups = allows_compaction_groups
 
     def _reset(self) -> None:
         """Reset the test before a retry, if it is retried as flaky"""
@@ -715,6 +730,8 @@ class BoostTest(UnitTest):
     async def run(self, options):
         if options.random_seed:
             self.args += ['--random-seed', options.random_seed]
+        if self.allows_compaction_groups and options.x_log2_compaction_groups:
+            self.args += [ "--x-log2-compaction-groups", str(options.x_log2_compaction_groups) ]
         return await super().run(options)
 
     def write_junit_failure_report(self, xml_res: ET.Element) -> None:
@@ -757,7 +774,7 @@ class LdapTest(BoostTest):
     """A unit test which can produce its own XML output, and needs an ldap server"""
 
     def __init__(self, test_no, shortname, args, suite):
-        super().__init__(test_no, shortname, args, suite, None)
+        super().__init__(test_no, shortname, args, suite, None, False)
 
     async def setup(self, port, options):
         instances_root = os.path.join(options.tmpdir, self.mode, 'ldap_instances');
@@ -871,7 +888,8 @@ class CQLApprovalTest(Test):
             if self.server_log is not None:
                 logger.info("Server log:\n%s", self.server_log)
 
-        async with self.suite.clusters.instance(logger) as cluster:
+        # TODO: consider dirty_on_exception=True
+        async with self.suite.clusters.instance(False, logger) as cluster:
             try:
                 cluster.before_test(self.uname)
                 logger.info("Leasing Scylla cluster %s for test %s", cluster, self.uname)
@@ -1049,11 +1067,9 @@ class PythonTest(Test):
                 print("Test {} post-check failed: {}".format(self.name, str(e)))
                 print("Server log of the first server:\n{}".format(self.server_log))
                 logger.info(f"Discarding cluster after failed test %s...", self.name)
-            await self.suite.clusters.steal()
-            await cluster.stop()
-            await cluster.release_ips()
+            await self.suite.clusters.put(cluster, is_dirty=True)
         else:
-            await self.suite.clusters.put(cluster)
+            await self.suite.clusters.put(cluster, is_dirty=False)
         logger.info("Test %s %s", self.uname, "succeeded" if self.success else "failed ")
         return self
 
@@ -1352,6 +1368,10 @@ def parse_cmd_line() -> argparse.Namespace:
                         help='Let me manually run the test executable at the moment this script would run it')
     parser.add_argument('--byte-limit', action="store", default=None, type=int,
                         help="Specific byte limit for failure injection (random by default)")
+
+    scylla_additional_options = parser.add_argument_group('Additional options for Scylla tests')
+    scylla_additional_options.add_argument('--x-log2-compaction-groups', action="store", default="0", type=int,
+                             help="Controls number of compaction groups to be used by Scylla tests. Value of 3 implies 8 groups.")
 
     boost_group = parser.add_argument_group('boost suite options')
     boost_group.add_argument('--random-seed', action="store",

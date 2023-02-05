@@ -962,7 +962,7 @@ void sstable::filesystem_storage::open(sstable& sst, const io_priority_class& pc
         // the generation of a sstable that exists.
         w.close();
         remove_mirrored_file(file_path).get();
-        throw std::runtime_error(format("SSTable write failed due to existence of TOC file for generation {:d} of {}.{}", sst._generation, sst._schema->ks_name(), sst._schema->cf_name()));
+        throw std::runtime_error(format("SSTable write failed due to existence of TOC file for generation {:d} of {}.{}", sst._generation.value(), sst._schema->ks_name(), sst._schema->cf_name()));
     }
 
     for (auto&& key : sst._recognized_components) {
@@ -2519,9 +2519,14 @@ static future<bool> do_validate_uncompressed(input_stream<char>& stream, const c
         offset += buf.size();
     }
 
-    if (!stream.eof()) {
-        sstlog.error("Chunk count mismatch between CRC.db and Data.db at offset {}: expected {} chunks but data file has more", offset, checksum.checksums.size());
-        valid = false;
+    {
+        // We should be at EOF here, but the flag might not be set yet. To ensure
+        // it is set, try to read some more. This should return an empty buffer.
+        auto buf = co_await stream.read();
+        if (!buf.empty()) {
+            sstlog.error("Chunk count mismatch between CRC.db and Data.db at offset {}: expected {} chunks but data file has more", offset, checksum.checksums.size());
+            valid = false;
+        }
     }
 
     if (actual_full_checksum != expected_digest) {

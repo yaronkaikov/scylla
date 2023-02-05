@@ -45,6 +45,8 @@
 #include "db/config.hh"
 #include "db/commitlog/commitlog.hh"
 #include "utils/lister.hh"
+#include "dht/token.hh"
+#include "dht/i_partitioner.hh"
 
 #include <boost/range/algorithm/remove_if.hpp>
 #include <boost/range/algorithm.hpp>
@@ -387,19 +389,9 @@ static bool belongs_to_other_shard(const std::vector<shard_id>& shards) {
     return shards.size() != size_t(belongs_to_current_shard(shards));
 }
 
-sstables::shared_sstable table::make_sstable(sstring dir, sstables::generation_type generation, sstables::sstable_version_types v, sstables::sstable_format_types f,
-        io_error_handler_gen error_handler_gen) {
-    return get_sstables_manager().make_sstable(_schema, dir, generation, v, f, gc_clock::now(), error_handler_gen);
-}
-
-sstables::shared_sstable table::make_sstable(sstring dir, sstables::generation_type generation,
-        sstables::sstable_version_types v, sstables::sstable_format_types f) {
-    return get_sstables_manager().make_sstable(_schema, dir, generation, v, f);
-}
-
 sstables::shared_sstable table::make_sstable(sstring dir) {
-    return make_sstable(dir, calculate_generation_for_new_table(),
-                        get_sstables_manager().get_highest_supported_format(), sstables::sstable::format_types::big);
+    auto& sstm = get_sstables_manager();
+    return sstm.make_sstable(_schema, dir, calculate_generation_for_new_table(), sstm.get_highest_supported_format(), sstables::sstable::format_types::big);
 }
 
 sstables::shared_sstable table::make_sstable() {
@@ -508,10 +500,10 @@ void table::enable_off_strategy_trigger() {
 
 std::vector<std::unique_ptr<compaction_group>> table::make_compaction_groups() {
     std::vector<std::unique_ptr<compaction_group>> ret;
-    auto number_of_cg = 1 << _x_log2_compaction_groups;
-    ret.reserve(number_of_cg);
-    for (auto i = 0; i < number_of_cg; i++) {
-        ret.emplace_back(std::make_unique<compaction_group>(*this));
+    auto&& ranges = dht::split_token_range_msb(_x_log2_compaction_groups);
+    tlogger.debug("Created {} compaction groups for {}.{}", ranges.size(), _schema->ks_name(), _schema->cf_name());
+    for (auto&& range : ranges) {
+        ret.emplace_back(std::make_unique<compaction_group>(*this, std::move(range)));
     }
     return ret;
 }
@@ -525,7 +517,12 @@ compaction_group& table::compaction_group_for_token(dht::token token) const noex
     if (idx >= _compaction_groups.size()) {
         on_fatal_internal_error(tlogger, format("compaction_group_for_token: index out of range: idx={} size_log2={} size={} token={}", idx, _x_log2_compaction_groups, _compaction_groups.size(), token));
     }
-    return *_compaction_groups[idx];
+    auto& ret = *_compaction_groups[idx];
+    if (!ret.token_range().contains(token, dht::token_comparator())) {
+        on_fatal_internal_error(tlogger, format("compaction_group_for_token: compaction_group idx={} range={} does not contain token={}",
+                idx, ret.token_range(), token));
+    }
+    return ret;
 }
 
 compaction_group& table::compaction_group_for_key(partition_key_view key, const schema_ptr& s) const noexcept {
@@ -1220,8 +1217,45 @@ future<bool> table::perform_offstrategy_compaction() {
 
 future<> table::perform_cleanup_compaction(compaction::owned_ranges_ptr sorted_owned_ranges) {
     co_await flush();
-    co_await parallel_foreach_compaction_group([this, sorted_owned_ranges = std::move(sorted_owned_ranges)] (compaction_group& cg) {
-        return get_compaction_manager().perform_cleanup(sorted_owned_ranges, cg.as_table_state());
+
+    if (_compaction_groups.size() == 1) {
+        auto& cg = *_compaction_groups[0];
+        co_return co_await get_compaction_manager().perform_cleanup(std::move(sorted_owned_ranges), cg.as_table_state());
+    }
+
+    // candidate ranges for the next compaction_group
+    std::deque<dht::token_range> candidates;
+    for (auto&& range : *sorted_owned_ranges) {
+        candidates.emplace_back(std::move(range));
+    }
+
+    auto cmp = dht::token_comparator();
+    dht::token_range_vector cg_ranges;
+    std::unordered_map<dht::token_range, compaction::owned_ranges_ptr> cg_ranges_map;
+    for (const auto& cg : _compaction_groups) {
+        const auto& cg_range = cg->token_range();
+        while (!candidates.empty()) {
+            auto range = std::move(candidates.front());
+            auto trimmed = range.intersection(cg_range, cmp);
+            if (!trimmed) {
+                assert(!cg_ranges.empty());
+                break;
+            }
+            cg_ranges.emplace_back(*trimmed);
+            candidates.pop_front();
+            if (!trimmed->contains(range, cmp)) {
+                auto remainder = range.subtract(*trimmed, cmp);
+                assert(remainder.size() == 1);
+                candidates.emplace_front(std::move(remainder[0]));
+                break;
+            }
+        }
+        cg_ranges_map[cg_range] = compaction::make_owned_ranges_ptr(std::move(cg_ranges));
+        co_await coroutine::maybe_yield();
+    }
+    co_await parallel_foreach_compaction_group([&] (compaction_group& cg) {
+        auto&& cg_ranges = std::move(cg_ranges_map.at(cg.token_range()));
+        return get_compaction_manager().perform_cleanup(std::move(cg_ranges), cg.as_table_state());
     });
 }
 
@@ -1379,9 +1413,10 @@ table::make_memtable_list(compaction_group& cg) {
     return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.dirty_memory_manager, _stats, _config.memory_compaction_scheduling_group);
 }
 
-compaction_group::compaction_group(table& t)
+compaction_group::compaction_group(table& t, dht::token_range token_range)
     : _t(t)
     , _table_state(std::make_unique<table_state>(t, *this))
+    , _token_range(std::move(token_range))
     , _memtables(_t._config.enable_disk_writes ? _t.make_memtable_list(*this) : _t.make_memory_only_memtable_list())
     , _main_sstables(make_lw_shared<sstables::sstable_set>(t._compaction_strategy.make_sstable_set(t.schema())))
     , _maintenance_sstables(t.make_maintenance_sstable_set())
@@ -1405,6 +1440,16 @@ void compaction_group::clear_sstables() {
     _maintenance_sstables = _t.make_maintenance_sstable_set();
 }
 
+static std::atomic<unsigned> minimum_x_log2_compaction_groups{0};
+
+void set_minimum_x_log2_compaction_groups(unsigned x_log2_compaction_groups) {
+    minimum_x_log2_compaction_groups.store(x_log2_compaction_groups, std::memory_order_relaxed);
+}
+
+static inline unsigned get_x_log2_compaction_groups(unsigned x_log2_compaction_groups) {
+    return std::max(x_log2_compaction_groups, minimum_x_log2_compaction_groups.load(std::memory_order_relaxed));
+}
+
 table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_manager& compaction_manager,
         sstables::sstables_manager& sst_manager, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
     : _schema(std::move(schema))
@@ -1413,7 +1458,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
                          keyspace_label(_schema->ks_name()),
                          column_family_label(_schema->cf_name())
                         )
-    , _x_log2_compaction_groups(_config.x_log2_compaction_groups)
+    , _x_log2_compaction_groups(get_x_log2_compaction_groups(_config.x_log2_compaction_groups))
     , _compaction_manager(compaction_manager)
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
     , _compaction_groups(make_compaction_groups())
