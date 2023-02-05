@@ -2042,7 +2042,7 @@ with open(buildfile, 'w') as f:
                 f.write('   libs = {}\n'.format(local_libs))
             else:
                 if binary == 'scylla':
-                    local_libs += ' ' + "$seastar_testing_libs_{}".format(mode)
+                    local_libs += f' {seastar_testing_libs}'
                 f.write('build $builddir/{}/{}: {}.{} {} | {} {}\n'.format(mode, binary, regular_link_rule, mode, str.join(' ', objs), seastar_dep, seastar_testing_dep))
                 f.write('   libs = {}\n'.format(local_libs))
                 f.write(f'build $builddir/{mode}/{binary}.stripped: strip $builddir/{mode}/{binary}\n')
