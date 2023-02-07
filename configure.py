@@ -410,6 +410,7 @@ scylla_tests = set([
     'test/boost/json_test',
     'test/boost/keys_test',
     'test/boost/large_paging_state_test',
+    'test/boost/recent_entries_map_test',
     'test/boost/like_matcher_test',
     'test/boost/limiting_data_source_test',
     'test/boost/linearizing_input_stream_test',
@@ -707,6 +708,7 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/human_readable.cc',
                 'utils/histogram_metrics_helper.cc',
                 'mutation_partition.cc',
+                'mutation_partition_v2.cc',
                 'mutation_partition_view.cc',
                 'mutation_partition_serializer.cc',
                 'converting_mutation_partition_applier.cc',
@@ -1198,6 +1200,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
     'test/lib/data_model.cc',
     'test/lib/exception_utils.cc',
     'test/lib/random_schema.cc',
+    'test/lib/key_utils.cc',
 ]
 
 scylla_raft_dependencies = scylla_raft_core + ['utils/uuid.cc', 'utils/error_injection.cc']
@@ -1214,6 +1217,9 @@ scylla_perfs = ['test/perf/perf_fast_forward.cc',
                 'test/lib/test_services.cc',
                 'test/lib/test_utils.cc',
                 'test/lib/tmpdir.cc',
+                'test/lib/key_utils.cc',
+                'test/lib/random_schema.cc',
+                'test/lib/data_model.cc',
                 'seastar/tests/perf/linux_perf_event.cc']
 
 deps = {

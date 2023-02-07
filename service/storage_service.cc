@@ -648,14 +648,11 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
 }
 
 future<> storage_service::mark_existing_views_as_built(sharded<db::system_distributed_keyspace>& sys_dist_ks) {
-    return _db.invoke_on(0, [this, &sys_dist_ks] (replica::database& db) {
-        return do_with(db.get_views(), [this, &sys_dist_ks] (std::vector<view_ptr>& views) {
-            return parallel_for_each(views, [this, &sys_dist_ks] (view_ptr& view) {
-                return db::system_keyspace::mark_view_as_built(view->ks_name(), view->cf_name()).then([this, view, &sys_dist_ks] {
-                    return sys_dist_ks.local().finish_view_build(view->ks_name(), view->cf_name());
-                });
-            });
-        });
+    assert(this_shard_id() == 0);
+    auto views = _db.local().get_views();
+    co_await coroutine::parallel_for_each(views, [this, &sys_dist_ks] (view_ptr& view) -> future<> {
+        co_await _sys_ks.local().mark_view_as_built(view->ks_name(), view->cf_name());
+        co_await sys_dist_ks.local().finish_view_build(view->ks_name(), view->cf_name());
     });
 }
 
@@ -2750,6 +2747,26 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
             slogger.debug("decommission[{}]: Updated heartbeat from coordinator={}", req.ops_uuid,  coordinator);
             node_ops_update_heartbeat(ops_uuid).get();
         } else if (req.cmd == node_ops_cmd::decommission_done) {
+            bool check_again = false;
+            auto start_time = std::chrono::steady_clock::now();
+            slogger.info("decommission[{}]: Started to check if nodes={} have left the cluster, coordinator={}", req.ops_uuid, req.leaving_nodes, coordinator);
+            do {
+                check_again = false;
+                for (auto& node : req.leaving_nodes) {
+                    auto tmptr = get_token_metadata_ptr();
+                    if (tmptr->is_normal_token_owner(node)) {
+                        check_again = true;
+                        if (std::chrono::steady_clock::now() > start_time + std::chrono::seconds(60)) {
+                            auto msg = format("decommission[{}]: Node {} is still in the cluster", req.ops_uuid, node);
+                            throw std::runtime_error(msg);
+                        }
+                        slogger.warn("decommission[{}]: Node {} is still in the cluster, sleep and check again", req.ops_uuid, node);
+                        sleep_abortable(std::chrono::milliseconds(500), _abort_source).get();
+                        break;
+                    }
+                }
+            } while (check_again);
+            slogger.info("decommission[{}]: Finished to check if nodes={} have left the cluster, coordinator={}", req.ops_uuid, req.leaving_nodes, coordinator);
             slogger.info("decommission[{}]: Marked ops done from coordinator={}", req.ops_uuid, coordinator);
             slogger.debug("Triggering off-strategy compaction for all non-system tables on decommission completion");
             _db.invoke_on_all([](replica::database &db) {

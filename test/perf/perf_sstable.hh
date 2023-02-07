@@ -109,10 +109,9 @@ public:
 
     future<> fill_memtable() {
         auto idx = boost::irange(0, int(_cfg.partitions / _cfg.sstables));
-        auto local_keys = make_local_keys(int(_cfg.partitions / _cfg.sstables), s, _cfg.key_size);
+        auto local_keys = tests::generate_partition_keys(int(_cfg.partitions / _cfg.sstables), s, local_shard_only::yes, tests::key_size{_cfg.key_size, _cfg.key_size});
         return do_for_each(idx.begin(), idx.end(), [this, local_keys = std::move(local_keys)] (auto iteration) {
-            auto key = partition_key::from_deeply_exploded(*s, { local_keys.at(iteration) });
-            auto mut = mutation(this->s, key);
+            auto mut = mutation(this->s, local_keys.at(iteration));
             for (auto& cdef: this->s->regular_columns()) {
                 const auto ts = _cfg.timestamp_range ? tests::random::get_int<api::timestamp_type>(-_cfg.timestamp_range, _cfg.timestamp_range) : 0;
                 mut.set_clustered_cell(clustering_key::make_empty(), cdef, atomic_cell::make_live(*utf8_type, ts, utf8_type->decompose(this->random_column())));
@@ -170,7 +169,8 @@ public:
 
                 cache_tracker tracker;
                 cell_locker_stats cl_stats;
-                auto cm = make_lw_shared<compaction_manager>(compaction_manager::for_testing_tag{});
+                tasks::task_manager tm;
+                auto cm = make_lw_shared<compaction_manager>(tm, compaction_manager::for_testing_tag{});
                 auto cf = make_lw_shared<replica::column_family>(s, env.make_table_config(), replica::column_family::no_commitlog(), *cm, env.manager(), cl_stats, tracker);
 
                 auto start = perf_sstable_test_env::now();

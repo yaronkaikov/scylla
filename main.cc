@@ -1052,7 +1052,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     .throughput_mb_per_sec = cfg->compaction_throughput_mb_per_sec,
                 };
             });
-            cm.start(std::move(get_cm_cfg), std::ref(stop_signal.as_sharded_abort_source())).get();
+            cm.start(std::move(get_cm_cfg), std::ref(stop_signal.as_sharded_abort_source()), std::ref(task_manager)).get();
             auto stop_cm = deferred_stop(cm);
 
             supervisor::notify("starting database");
@@ -1325,7 +1325,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 api::unset_server_snitch(ctx).get();
             });
             api::set_server_storage_proxy(ctx, ss).get();
-            api::set_server_load_sstable(ctx).get();
+            api::set_server_load_sstable(ctx, sys_ks).get();
+            auto stop_cf_api = defer_verbose_shutdown("column family API", [&ctx] {
+                api::unset_server_load_sstable(ctx).get();
+            });
             static seastar::sharded<memory_threshold_guard> mtg;
             mtg.start(cfg->large_memory_allocation_warning_threshold()).get();
             supervisor::notify("initializing migration manager RPC verbs");
@@ -1606,7 +1609,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             static sharded<db::view::view_builder> view_builder;
             if (cfg->view_building()) {
                 supervisor::notify("starting the view builder");
-                view_builder.start(std::ref(db), std::ref(sys_dist_ks), std::ref(mm_notifier)).get();
+                view_builder.start(std::ref(db), std::ref(sys_ks), std::ref(sys_dist_ks), std::ref(mm_notifier)).get();
                 view_builder.invoke_on_all([&mm] (db::view::view_builder& vb) { 
                     return vb.start(mm.local());
                 }).get();
