@@ -20,6 +20,7 @@
 #include <openssl/rand.h>
 #include <openssl/md5.h>
 #include <openssl/sha.h>
+#include <openssl/hmac.h>
 
 #include <boost/range/adaptor/map.hpp>
 #include <boost/filesystem.hpp>
@@ -37,12 +38,13 @@
 #include "replicated_key_provider.hh"
 #include "kmip_key_provider.hh"
 #include "kmip_host.hh"
+#include "kms_key_provider.hh"
+#include "kms_host.hh"
 #include "bytes.hh"
 #include "utils/class_registrator.hh"
 #include "cql3/query_processor.hh"
 #include "db/extensions.hh"
 #include "db/system_keyspace.hh"
-#include "utils/class_registrator.hh"
 #include "serializer.hh"
 #include "serializer_impl.hh"
 #include "schema.hh"
@@ -72,6 +74,7 @@ static const std::set<sstring> keywords = { KEY_PROVIDER,
 static constexpr auto REPLICATED_KEY_PROVIDER_FACTORY = "ReplicatedKeyProviderFactory";
 static constexpr auto LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY = "LocalFileSystemKeyProviderFactory";
 static constexpr auto KMIP_KEY_PROVIDER_FACTORY = "KmipKeyProviderFactory";
+static constexpr auto KMS_KEY_PROVIDER_FACTORY = "KmsKeyProviderFactory";
 
 bytes base64_decode(const sstring& s, size_t off, size_t len) {
     if (off >= s.size()) {
@@ -132,13 +135,29 @@ bytes calculate_md5(const bytes& b, size_t off, size_t len) {
     return res;
 }
 
+bytes calculate_sha256(bytes_view b) {
+    bytes res{bytes::initialized_later(), SHA256_DIGEST_LENGTH};
+    SHA256(reinterpret_cast<const uint8_t*>(b.data()), b.size(), reinterpret_cast<uint8_t *>(res.data()));
+    return res;
+}
+
 bytes calculate_sha256(const bytes& b, size_t off, size_t len) {
     if (off >= b.size()) {
         throw std::out_of_range("Invalid offset");
     }
     len = std::min(len, b.size() - off);
+    return calculate_sha256(bytes_view(b.data() + off, len));
+}
+
+bytes hmac_sha256(bytes_view msg, bytes_view key) {
     bytes res{bytes::initialized_later(), SHA256_DIGEST_LENGTH};
-    SHA256(reinterpret_cast<const uint8_t*>(b.data() + off), len, reinterpret_cast<uint8_t *>(res.data()));
+
+    std::unique_ptr<HMAC_CTX, void (*)(HMAC_CTX*)> ctxt(HMAC_CTX_new(), &HMAC_CTX_free);
+
+    HMAC_Init_ex(ctxt.get(), key.data(), static_cast<int>(key.size()), EVP_sha256(), nullptr);
+    HMAC_Update(ctxt.get(), reinterpret_cast<const uint8_t*>(msg.data()), msg.size());
+    unsigned length;
+    HMAC_Final(ctxt.get(), reinterpret_cast<uint8_t*>(res.data()), &length);
     return res;
 }
 
@@ -230,6 +249,7 @@ class encryption_context_impl : public encryption_context {
     std::vector<std::unordered_map<sstring, shared_ptr<key_provider>>> _per_thread_provider_cache;
     std::vector<std::unordered_map<sstring, shared_ptr<system_key>>> _per_thread_system_key_cache;
     std::vector<std::unordered_map<sstring, shared_ptr<kmip_host>>> _per_thread_kmip_host_cache;
+    std::vector<std::unordered_map<sstring, shared_ptr<kms_host>>> _per_thread_kms_host_cache;
     const encryption_config& _cfg;
     shared_ptr<symmetric_key> _cfg_encryption_key;
 public:
@@ -237,6 +257,7 @@ public:
         : _per_thread_provider_cache(smp::count)
         , _per_thread_system_key_cache(smp::count)
         , _per_thread_kmip_host_cache(smp::count)
+        , _per_thread_kms_host_cache(smp::count)
         , _cfg(cfg)
     {}
 
@@ -256,6 +277,7 @@ public:
             map[REPLICATED_KEY_PROVIDER_FACTORY] = std::make_unique<replicated_key_provider_factory>();
             map[LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY] = std::make_unique<local_file_provider_factory>();
             map[KMIP_KEY_PROVIDER_FACTORY] = std::make_unique<kmip_key_provider_factory>();
+            map[KMS_KEY_PROVIDER_FACTORY] = std::make_unique<kms_key_provider_factory>();
 
             return map;
         }();
@@ -312,6 +334,23 @@ public:
         auto j = _cfg.kmip_hosts().find(host);
         if (j != _cfg.kmip_hosts().end()) {
             auto result = ::make_shared<kmip_host>(*this, host, j->second);
+            cache.emplace(host, result);
+            return result;
+        }
+
+        throw std::invalid_argument("No such host: "+ host);
+    }
+
+    shared_ptr<kms_host> get_kms_host(const sstring& host) override {
+        auto& cache = _per_thread_kms_host_cache[this_shard_id()];
+        auto i = cache.find(host);
+        if (i != cache.end()) {
+            return i->second;
+        }
+
+        auto j = _cfg.kms_hosts().find(host);
+        if (j != _cfg.kms_hosts().end()) {
+            auto result = ::make_shared<kms_host>(*this, host, j->second);
             cache.emplace(host, result);
             return result;
         }
@@ -751,6 +790,16 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
             return parallel_for_each(cfg.kmip_hosts(), [ctxt](auto& p) {
                 auto host = ctxt->get_kmip_host(p.first);
                 return host->connect();
+            });
+        });
+    }
+
+    if (!cfg.kms_hosts().empty()) {
+        // only pre-create on shard 0.
+        f = f.then([&cfg, ctxt] {
+            return parallel_for_each(cfg.kms_hosts(), [ctxt](auto& p) {
+                auto host = ctxt->get_kms_host(p.first);
+                return host->init();
             });
         });
     }
