@@ -636,7 +636,7 @@ class encryption_commitlog_file_extension : public db::commitlog_file_extension 
 
     static const inline std::regex prop_expr = std::regex("^([^=]+)=(\\S+)$");
     static const inline sstring id_key = "key_id";
-    static const inline sstring end_of_file_mark = "#-- end of file";
+    static const inline std::string end_of_file_mark = "#-- end of file";
 
 public:
     encryption_commitlog_file_extension(::shared_ptr<encryption_context> ctxt, options opts)
