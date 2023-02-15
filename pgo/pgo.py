@@ -607,6 +607,20 @@ trainers: dict[str, tuple[str, Trainer]] = {}
 # Maps dataset names to the functions responsible for populating them.
 populators: dict[str, Populator] = {}
 
+# BASIC ==================================================
+
+async def populate_basic(executable: PathLike, workdir: PathLike) -> None:
+    async with with_cs_populate(executable=executable, workdir=workdir) as server:
+        await cs(cmd=["write"], n=2000000, cl="local_quorum", schema=RF3_SCHEMA, node=server)
+
+async def train_basic(executable: PathLike, workdir: PathLike) -> None:
+    N = 2500000 # Preferably keep big enough to cause compactions.
+    async with with_cs_train(executable=executable, workdir=workdir) as server:
+        await cs(cmd=["mixed", "ratio(read=1,write=1)"], n=N, pop=f"dist=UNIFORM(1..{2000000})", cl="local_quorum", node=server)
+
+#trainers["basic"] = ("basic_dataset", train_basic)
+populators["basic_dataset"] = populate_basic
+
 ################################################################################
 # Training procedures
 
