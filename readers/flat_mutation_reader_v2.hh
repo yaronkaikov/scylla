@@ -13,9 +13,9 @@
 #include <seastar/core/circular_buffer.hh>
 
 #include "dht/i_partitioner.hh"
-#include "mutation_fragment_v2.hh"
-#include "mutation.hh"
-#include "mutation_consumer_concepts.hh"
+#include "mutation/mutation_fragment_v2.hh"
+#include "mutation/mutation.hh"
+#include "mutation/mutation_consumer_concepts.hh"
 #include "reader_permit.hh"
 
 using seastar::future;
@@ -322,7 +322,7 @@ public:
         // This method returns whatever is returned from Consumer::consume_end_of_stream().S
         auto consume(Consumer consumer) {
             return do_with(consumer_adapter<Consumer>(*this, std::move(consumer)), [this] (consumer_adapter<Consumer>& adapter) {
-                return consume_pausable(std::ref(adapter)).then([this, &adapter] {
+                return consume_pausable(std::ref(adapter)).then([&adapter] {
                     return adapter._consumer.consume_end_of_stream();
                 });
             });

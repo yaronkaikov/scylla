@@ -9,9 +9,9 @@
 #include "converting_mutation_partition_applier.hh"
 #include "concrete_types.hh"
 
-#include "mutation_partition_view.hh"
-#include "mutation_partition.hh"
-#include "schema.hh"
+#include "mutation/mutation_partition_view.hh"
+#include "mutation/mutation_partition.hh"
+#include "schema/schema.hh"
 
 bool
 converting_mutation_partition_applier::is_compatible(const column_definition& new_def, const abstract_type& old_type, column_kind kind) {

@@ -36,16 +36,16 @@
 #include "test/lib/key_utils.hh"
 
 #include "dht/sharder.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "cell_locking.hh"
 #include "sstables/sstables.hh"
 #include "sstables/sstable_set_impl.hh"
 #include "replica/database.hh"
 #include "partition_slice_builder.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "service/priority_manager.hh"
 #include "utils/ranges.hh"
-#include "mutation_rebuilder.hh"
+#include "mutation/mutation_rebuilder.hh"
 
 #include <boost/range/algorithm/sort.hpp>
 #include "readers/from_mutations_v2.hh"

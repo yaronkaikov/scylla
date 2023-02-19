@@ -16,8 +16,8 @@
 #include "db/commitlog/commitlog.hh"
 #include "storage_proxy.hh"
 #include "unimplemented.hh"
-#include "mutation.hh"
-#include "frozen_mutation.hh"
+#include "mutation/mutation.hh"
+#include "mutation/frozen_mutation.hh"
 #include "supervisor.hh"
 #include "query_result_merger.hh"
 #include <seastar/core/do_with.hh>
@@ -53,9 +53,9 @@
 #include <boost/intrusive/list.hpp>
 #include <boost/outcome/result.hpp>
 #include "utils/latency.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "query_ranges_to_vnodes.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include <seastar/util/lazy.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/core/execution_stage.hh>
@@ -78,11 +78,11 @@
 #include <seastar/coroutine/all.hh>
 #include "locator/abstract_replication_strategy.hh"
 #include "service/paxos/cas_request.hh"
-#include "mutation_partition_view.hh"
+#include "mutation/mutation_partition_view.hh"
 #include "service/paxos/paxos_state.hh"
 #include "gms/feature_service.hh"
 #include "db/virtual_table.hh"
-#include "canonical_mutation.hh"
+#include "mutation/canonical_mutation.hh"
 #include "schema_mutations.hh"
 #include "idl/frozen_schema.dist.hh"
 #include "idl/frozen_schema.dist.impl.hh"
@@ -714,7 +714,7 @@ private:
             bool local = shard == this_shard_id();
             sp.get_stats().replica_cross_shard_ops += !local;
             return sp.container().invoke_on(shard, sp._write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
-                                     local, cmd = make_lw_shared<query::read_command>(std::move(cmd)), key = std::move(key),
+                                     cmd = make_lw_shared<query::read_command>(std::move(cmd)), key = std::move(key),
                                      ballot, only_digest, da, timeout, src_ip] (storage_proxy& sp) {
                 tracing::trace_state_ptr tr_state = gt;
                 return paxos::paxos_state::prepare(sp, tr_state, gs, *cmd, key, ballot, only_digest, da, *timeout).then([src_ip, tr_state] (paxos::prepare_response r) {
@@ -744,7 +744,7 @@ private:
             bool local = shard == this_shard_id();
             sp.get_stats().replica_cross_shard_ops += !local;
             return sp.container().invoke_on(shard, sp._write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
-                                     local, proposal = std::move(proposal), timeout, token] (storage_proxy& sp) {
+                                     proposal = std::move(proposal), timeout, token] (storage_proxy& sp) {
                 return paxos::paxos_state::accept(sp, gt, gs, token, proposal, *timeout);
             });
         });
@@ -2097,20 +2097,16 @@ future<> paxos_response_handler::learn_decision(lw_shared_ptr<paxos::proposal> d
 
         auto cdc = _proxy->get_cdc_service();
         if (cdc && cdc->needs_cdc_augmentation(update_mut_vec)) {
-            f_cdc = cdc->augment_mutation_call(_timeout, std::move(update_mut_vec), tr_state, _cl_for_learn)
-                    .then([this, base_tbl_id, cdc = cdc->shared_from_this()] (std::tuple<std::vector<mutation>, lw_shared_ptr<cdc::operation_result_tracker>>&& t) {
-                auto mutations = std::move(std::get<0>(t));
-                auto tracker = std::move(std::get<1>(t));
-                // Pick only the CDC ("augmenting") mutations
-                std::erase_if(mutations, [base_tbl_id = std::move(base_tbl_id)] (const mutation& v) {
-                    return v.schema()->id() == base_tbl_id;
-                });
-                if (mutations.empty()) {
-                    return make_ready_future<>();
-                }
-                return _proxy->mutate_internal(std::move(mutations), _cl_for_learn, false, tr_state, _permit, _timeout, std::move(tracker))
-                        .then(utils::result_into_future<result<>>);
+            auto cdc_shared = cdc->shared_from_this(); // keep CDC service alive
+            auto [mutations, tracker] = co_await cdc->augment_mutation_call(_timeout, std::move(update_mut_vec), tr_state, _cl_for_learn);
+            // Pick only the CDC ("augmenting") mutations
+            std::erase_if(mutations, [base_tbl_id = std::move(base_tbl_id)] (const mutation& v) {
+                return v.schema()->id() == base_tbl_id;
             });
+            if (!mutations.empty()) {
+                f_cdc = _proxy->mutate_internal(std::move(mutations), _cl_for_learn, false, tr_state, _permit, _timeout, std::move(tracker))
+                        .then(utils::result_into_future<result<>>);
+            }
         }
     }
 
@@ -2119,7 +2115,7 @@ future<> paxos_response_handler::learn_decision(lw_shared_ptr<paxos::proposal> d
     future<> f_lwt = _proxy->mutate_internal(std::move(m), _cl_for_learn, false, tr_state, _permit, _timeout)
             .then(utils::result_into_future<result<>>);
 
-    return when_all_succeed(std::move(f_cdc), std::move(f_lwt)).discard_result();
+    co_await when_all_succeed(std::move(f_cdc), std::move(f_lwt)).discard_result();
 }
 
 void paxos_response_handler::prune(utils::UUID ballot) {

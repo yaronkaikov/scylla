@@ -16,7 +16,7 @@
 #include <seastar/testing/thread_test_case.hh>
 #include "sstables/sstables.hh"
 #include "compaction/incremental_compaction_strategy.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "replica/database.hh"
 #include "compaction/compaction_manager.hh"
 #include "sstable_test.hh"

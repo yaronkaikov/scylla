@@ -47,7 +47,7 @@
 #include "db/system_keyspace.hh"
 #include "serializer.hh"
 #include "serializer_impl.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "sstables/sstables.hh"
 #include "service/storage_service.hh"
 #include "service/migration_manager.hh"

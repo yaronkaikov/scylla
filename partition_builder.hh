@@ -8,12 +8,12 @@
 
 #pragma once
 
-#include "schema.hh"
-#include "mutation_partition.hh"
-#include "mutation_partition_visitor.hh"
-#include "tombstone.hh"
-#include "atomic_cell.hh"
-#include "range_tombstone.hh"
+#include "schema/schema.hh"
+#include "mutation/mutation_partition.hh"
+#include "mutation/mutation_partition_visitor.hh"
+#include "mutation/tombstone.hh"
+#include "mutation/atomic_cell.hh"
+#include "mutation/range_tombstone.hh"
 #include "collection_mutation.hh"
 
 // Partition visitor which builds mutation_partition corresponding to the data its fed with.

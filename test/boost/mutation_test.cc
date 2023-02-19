@@ -13,8 +13,8 @@
 #include <boost/range/algorithm_ext/push_back.hpp>
 #include <boost/range/combine.hpp>
 #include "mutation_query.hh"
-#include "hashers.hh"
-#include "xx_hasher.hh"
+#include "utils/hashers.hh"
+#include "utils/xx_hasher.hh"
 
 #include <seastar/core/sstring.hh>
 #include <seastar/core/do_with.hh>
@@ -25,7 +25,7 @@
 #include "replica/database.hh"
 #include "utils/UUID_gen.hh"
 #include "clustering_interval_set.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "query-result-set.hh"
 #include "query-result-reader.hh"
 #include "partition_slice_builder.hh"
@@ -52,8 +52,8 @@
 #include "types/set.hh"
 #include "types/user.hh"
 #include "concrete_types.hh"
-#include "mutation_rebuilder.hh"
-#include "mutation_partition.hh"
+#include "mutation/mutation_rebuilder.hh"
+#include "mutation/mutation_partition.hh"
 #include "clustering_key_filter.hh"
 #include "readers/from_mutations_v2.hh"
 #include "readers/from_fragments_v2.hh"

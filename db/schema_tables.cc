@@ -18,13 +18,13 @@
 #include "query_context.hh"
 #include "query-result-set.hh"
 #include "query-result-writer.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "map_difference.hh"
 #include "utils/UUID_gen.hh"
 #include <seastar/coroutine/all.hh>
 #include "log.hh"
 #include "frozen_schema.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "mutation_query.hh"
 #include "system_keyspace.hh"
 #include "system_distributed_keyspace.hh"
@@ -39,7 +39,7 @@
 #include "db/marshal/type_parser.hh"
 #include "db/config.hh"
 #include "db/extensions.hh"
-#include "hashers.hh"
+#include "utils/hashers.hh"
 
 #include <seastar/util/noncopyable_function.hh>
 #include <seastar/rpc/rpc_types.hh>
@@ -1358,11 +1358,11 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
     // was already dropped (see https://github.com/scylladb/scylla/issues/5614)
     auto& db = proxy.local().get_db();
     auto ts = db_clock::now();
-    co_await max_concurrent_for_each(views_diff.dropped, max_concurrent, [&db, ts] (schema_diff::dropped_schema& dt) {
+    co_await max_concurrent_for_each(views_diff.dropped, max_concurrent, [&db] (schema_diff::dropped_schema& dt) {
         auto& s = *dt.schema.get();
         return replica::database::drop_table_on_all_shards(db, s.ks_name(), s.cf_name());
     });
-    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [&db, ts] (schema_diff::dropped_schema& dt) -> future<> {
+    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [&db] (schema_diff::dropped_schema& dt) -> future<> {
         auto& s = *dt.schema.get();
         return replica::database::drop_table_on_all_shards(db, s.ks_name(), s.cf_name());
     });
@@ -1420,7 +1420,7 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
             store_column_mapping(proxy, altered.old_schema.get(), true),
             store_column_mapping(proxy, altered.new_schema.get(), false));
     });
-    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [&proxy] (schema_diff::dropped_schema& dropped) -> future<> {
+    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [] (schema_diff::dropped_schema& dropped) -> future<> {
         schema_ptr s = dropped.schema.get();
         co_await drop_column_mapping(s->id(), s->version());
     });
@@ -2239,15 +2239,15 @@ std::vector<mutation> make_create_aggregate_mutations(schema_features features, 
     mutation& m = p.first;
     clustering_key& ckey = p.second;
 
-    data_type state_type = aggregate->sfunc().arg_types()[0];
+    data_type state_type = aggregate->sfunc()->arg_types()[0];
     if (aggregate->has_finalfunc()) {
-        m.set_clustered_cell(ckey, "final_func", aggregate->finalfunc().name().name, timestamp);
+        m.set_clustered_cell(ckey, "final_func", aggregate->finalfunc()->name().name, timestamp);
     }
     if (aggregate->initcond()) {
         m.set_clustered_cell(ckey, "initcond", state_type->deserialize(*aggregate->initcond()).to_parsable_string(), timestamp);
     }
     m.set_clustered_cell(ckey, "return_type", aggregate->return_type()->as_cql3_type().to_string(), timestamp);
-    m.set_clustered_cell(ckey, "state_func", aggregate->sfunc().name().name, timestamp);
+    m.set_clustered_cell(ckey, "state_func", aggregate->sfunc()->name().name, timestamp);
     m.set_clustered_cell(ckey, "state_type", state_type->as_cql3_type().to_string(), timestamp);
     std::vector<mutation> muts = {m};
 
@@ -2256,7 +2256,7 @@ std::vector<mutation> make_create_aggregate_mutations(schema_features features, 
         auto sa_p = get_mutation(sa_schema, *aggregate);
         mutation& sa_mut = sa_p.first;
         clustering_key& sa_ckey = sa_p.second;
-        sa_mut.set_clustered_cell(sa_ckey, "reduce_func", aggregate->reducefunc().name().name, timestamp);
+        sa_mut.set_clustered_cell(sa_ckey, "reduce_func", aggregate->reducefunc()->name().name, timestamp);
         sa_mut.set_clustered_cell(sa_ckey, "state_type", state_type->as_cql3_type().to_string(), timestamp);
 
         muts.emplace_back(sa_mut);

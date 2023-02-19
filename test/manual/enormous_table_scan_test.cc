@@ -22,11 +22,11 @@
 
 #include "clustering_bounds_comparator.hh"
 #include "dht/i_partitioner.hh"
-#include "mutation_fragment.hh"
+#include "mutation/mutation_fragment.hh"
 #include "partition_range_compat.hh"
 #include "range.hh"
 #include "sstables/sstables.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "readers/forwardable_v2.hh"
 
 class enormous_table_reader final : public flat_mutation_reader_v2::impl {

@@ -212,7 +212,6 @@ std::vector<sstables::shared_sstable> compaction_manager::get_candidates(compact
     auto partial_run_identifiers = boost::copy_range<std::unordered_set<sstables::run_id>>(_tasks
             | boost::adaptors::filtered(std::mem_fn(&task::generating_output_run))
             | boost::adaptors::transformed(std::mem_fn(&task::output_run_id)));
-    auto& cs = t.get_compaction_strategy();
 
     // Filter out sstables that are being compacted.
     for (auto& sst : in_strategy_sstables(t)) {
@@ -359,6 +358,14 @@ future<> compaction_manager::task::update_history(compaction::table_state& t, co
         co_await sys_ks->update_compaction_history(cdata.compaction_uuid, t.schema()->ks_name(), t.schema()->cf_name(),
                 ended_at.count(), res.stats.start_size, res.stats.end_size, std::unordered_map<int32_t, int64_t>{});
     }
+}
+
+future<> compaction_manager::get_compaction_history(compaction_history_consumer&& f) {
+    if (!_sys_ks) {
+        return make_ready_future<>();
+    }
+
+    return _sys_ks->get_compaction_history(std::move(f)).finally([s = _sys_ks] {});
 }
 
 class compaction_manager::major_compaction_task : public compaction_manager::task {
@@ -799,7 +806,7 @@ future<> compaction_manager::stop_tasks(std::vector<shared_ptr<task>> tasks, sst
         cmlog.debug("Stopping {}", *t);
         t->stop(reason);
     }
-    co_await coroutine::parallel_for_each(tasks, [this] (auto& task) -> future<> {
+    co_await coroutine::parallel_for_each(tasks, [] (auto& task) -> future<> {
         try {
             co_await task->compaction_done();
         } catch (sstables::compaction_stopped_exception&) {
@@ -1121,7 +1128,7 @@ private:
 
         std::exception_ptr err;
         while (auto desc = get_next_job()) {
-            desc->creator = [this, &new_unused_sstables, &t] (shard_id dummy) {
+            desc->creator = [&new_unused_sstables, &t] (shard_id dummy) {
                 auto sst = t.make_sstable();
                 new_unused_sstables.insert(sst);
                 return sst;
@@ -1307,7 +1314,7 @@ future<compaction_manager::compaction_stats_opt> compaction_manager::perform_tas
     // compaction.
     std::vector<sstables::shared_sstable> sstables;
     compacting_sstable_registration compacting(*this);
-    co_await run_with_compaction_disabled(t, [this, &sstables, &compacting, get_func = std::move(get_func)] () -> future<> {
+    co_await run_with_compaction_disabled(t, [&sstables, &compacting, get_func = std::move(get_func)] () -> future<> {
         // Getting sstables and registering them as compacting must be atomic, to avoid a race condition where
         // regular compaction runs in between and picks the same files.
         sstables = co_await get_func();
@@ -1551,7 +1558,7 @@ future<compaction_manager::compaction_stats_opt> compaction_manager::perform_sst
     if (scrub_mode == sstables::compaction_type_options::scrub::mode::validate) {
         return perform_sstable_scrub_validate_mode(t);
     }
-    return rewrite_sstables(t, sstables::compaction_type_options::make_scrub(scrub_mode), [this, &t, opts] {
+    return rewrite_sstables(t, sstables::compaction_type_options::make_scrub(scrub_mode), [&t, opts] {
         auto all_sstables = get_all_sstables(t);
         std::vector<sstables::shared_sstable> sstables = boost::copy_range<std::vector<sstables::shared_sstable>>(all_sstables
                 | boost::adaptors::filtered([&opts] (const sstables::shared_sstable& sst) {

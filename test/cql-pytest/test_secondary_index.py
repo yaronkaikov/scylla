@@ -544,6 +544,37 @@ def test_filter_and_limit_2(cql, test_keyspace):
         for i in [3, 1, N]:
             assert results[0:i] == list(cql.execute(f'SELECT ck1 FROM {table} WHERE pk = 1 AND ck2 = 2 AND x = 3 LIMIT {i} ALLOW FILTERING'))
 
+# Yet another reproducer for #10649, this time using a local index instead
+# of a global index. As before, test that a LIMIT works correctly in
+# conjunction filtering. A user tried this variant in issue #12766.
+# This is a scylla_only test because local index is a Scylla-only feature.
+@pytest.mark.parametrize("use_local_index", [
+        pytest.param(True, marks=pytest.mark.xfail(reason="#10649")), False])
+def test_filter_and_limit_local_index(cql, test_keyspace, use_local_index, driver_bug_1, scylla_only):
+    with new_test_table(cql, test_keyspace, 'p int, c int, x int, y int, primary key (p, c)') as table:
+        if use_local_index:
+            cql.execute(f'CREATE INDEX ON {table}((p), x)')
+        stmt = cql.prepare(f'INSERT INTO {table} (p, c, x, y) VALUES (?, ?, ?, ?)')
+        cql.execute(stmt, [0, 0, 1, 0])
+        cql.execute(stmt, [0, 1, 1, 1])
+        cql.execute(stmt, [0, 2, 1, 0])
+        cql.execute(stmt, [0, 3, 1, 1])
+        cql.execute(stmt, [0, 4, 1, 0])
+        cql.execute(stmt, [0, 5, 1, 1])
+        cql.execute(stmt, [0, 6, 1, 0])
+        cql.execute(stmt, [0, 7, 1, 1])
+        results = list(cql.execute(f'SELECT c FROM {table} WHERE p = 0 AND x = 1 AND y = 1 ALLOW FILTERING'))
+        assert sorted(results) == [(1,), (3,), (5,), (7,)]
+        # Make sure that with LIMIT N we get back exactly N results - not
+        # less and also not more.
+        assert [(1,)] == sorted(list(cql.execute(f'SELECT c FROM {table} WHERE p = 0 AND x = 1 AND y = 1 LIMIT 1 ALLOW FILTERING')))
+        assert [(1,), (3,), (5,)] == sorted(list(cql.execute(f'SELECT c FROM {table} WHERE p = 0 AND x = 1 AND y = 1 LIMIT 3 ALLOW FILTERING')))
+        # Make the test even harder (exercising more code paths) by asking
+        # to fetch the 3 results in tiny one-result pages instead of one page.
+        s = cql.prepare(f'SELECT c FROM {table} WHERE p = 0 AND x = 1 AND y = 1 LIMIT 3 ALLOW FILTERING')
+        s.fetch_size = 1
+        assert sorted(cql.execute(s)) == [(1,), (3,), (5,)]
+
 # Tests for issue #2962 - different type of indexing on collection columns.
 # Note that we also have a randomized test for this feature as a C++ unit
 # tests, as well as many tests translated from Cassandra's unit tests (grep
@@ -1344,6 +1375,24 @@ def test_static_column_index_build(cql, test_keyspace):
 
         assert [(0,),(1,),(2,)] == rows
 
+# Tests combinations of lookup in an index of static column with other
+# restrictions. Reproduces #12829.
+# NOTE: currently marked with skip instead of xfail because
+# on_internal_error() crashes Scylla.
+@pytest.mark.skip(reason="issue #12829")
+def test_static_column_index_restrictions(cql, test_keyspace):
+    schema = 'pk int, c int, s int STATIC, v int, PRIMARY KEY(pk, c)'
+    with new_test_table(cql, test_keyspace, schema) as table:
+        cql.execute(f'CREATE INDEX ON {table}(s)')
+        cql.execute(f'INSERT INTO {table} (pk, c, s) VALUES (0, 3, 1)')
+        cql.execute(f'INSERT INTO {table} (pk, c, s) VALUES (0, 4, 1)')
+        cql.execute(f'INSERT INTO {table} (pk, c, s) VALUES (1, 4, 2)')
+
+        assert [(0,3),(0,4)] == sorted(cql.execute(f'SELECT pk,c FROM {table} WHERE s = 1'))
+        assert [(0,3),(0,4)] == sorted(cql.execute(f'SELECT pk,c FROM {table} WHERE pk = 0 AND s = 1'))
+        # Reproduces #12829:
+        assert [(0,3)] == sorted(cql.execute(f'SELECT pk,c FROM {table} WHERE pk = 0 AND s = 1 AND c = 3'))
+
 # Checks that clustering row deletions do not affect static columns.
 def test_static_column_index_unaffected_by_clustering_row_ops(cql, test_keyspace):
     schema = 'pk int, c int, s int STATIC, v int, PRIMARY KEY(pk, c)'
@@ -1556,3 +1605,47 @@ def test_local_secondary_index_null_lookup2(cql, test_keyspace, scylla_only):
         p = unique_key_int()
         cql.execute(f'INSERT INTO {table}(p,c,v) VALUES ({p},0,1)')
         assert [] == list(cql.execute(f'SELECT * FROM {table} WHERE p={p} AND c=0 AND v=null'))
+
+# Reproducers for issue #7659, which involves a query with multiple indexes
+# which wrongly tries to use an index for a non-EQ restriction (whereas an
+# index can only be used for EQ). We have one reproducer for this issue as
+# a C++ test, but this test shows the bug for two kinds of non-EQ restrictions
+# with two different symptoms (one used to assert, the other "just" threw an
+# exception), and for both global and local indexes.
+
+def test_7659_global(cql, test_keyspace):
+    with new_test_table(cql, test_keyspace, 'a int, d int, f int, PRIMARY KEY (a, d)') as table:
+        cql.execute(f'CREATE INDEX ON {table}(d)')
+        cql.execute(f'CREATE INDEX ON {table}(f)')
+        cql.execute(f'INSERT INTO {table}(a,d,f) VALUES (1, 0, 1)')
+        cql.execute(f'INSERT INTO {table}(a,d,f) VALUES (2, 0, 2)')
+        cql.execute(f'INSERT INTO {table}(a,d,f) VALUES (3, 0, 3)')
+        cql.execute(f'INSERT INTO {table}(a,d,f) VALUES (4, 0, 0)')
+        cql.execute(f'INSERT INTO {table}(a,d,f) VALUES (5, 1, 1)')
+        # With issue #7659, this generated an assertion failure:
+        assert [(1,),(2,)] == sorted(list(cql.execute(f"SELECT a FROM {table} WHERE d=0 AND f in (1,2) ALLOW FILTERING")))
+        # With issue #7659, this generated an exception and failed request:
+        assert [(1,),(2,),(3,)] == sorted(list(cql.execute(f"SELECT a FROM {table} WHERE d=0 AND f>0 ALLOW FILTERING")))
+
+def test_7659_local(cql, test_keyspace):
+    with new_test_table(cql, test_keyspace, 'a int, b int, c int, d int, e int, f int, PRIMARY KEY ((a, b), c, d)') as table:
+        cql.execute(f'CREATE INDEX ON {table}((a, b), f)')
+        cql.execute(f'CREATE INDEX ON {table}(d)')
+        cql.execute(f'INSERT INTO {table}(a,b,c,d,e,f) VALUES (0,0,0,0,0,1)')
+        # With issue #7659, this generated an assertion failure:
+        assert [(0,)] == list(cql.execute(f"SELECT a FROM {table} WHERE a=0 and b=0 AND d=0 AND f in (1,2) ALLOW FILTERING"))
+        # With issue #7659, this generated an exception and failed request:
+        assert [(0,)] == list(cql.execute(f"SELECT a FROM {table} WHERE a=0 and b=0 AND d=0 AND f>0 ALLOW FILTERING"))
+
+# An index can be used to satisfy equality relations (a=2) but not
+# inequality (e.g., a>=2). If those are present, Scylla needs to ignore
+# the index and just do filtering normally.
+# Reproduces #5823
+def test_index_non_eq_relation(cql, test_keyspace):
+    with new_test_table(cql, test_keyspace, 'a bigint, b bigint, c bigint, PRIMARY KEY ((a, b))') as table:
+        cql.execute(f'CREATE INDEX ON {table}(a)')
+        cql.execute(f'INSERT INTO {table} (a,b,c) VALUES (0,2,1)')
+        cql.execute(f'INSERT INTO {table} (a,b,c) VALUES (1,2,3)')
+        cql.execute(f'INSERT INTO {table} (a,b,c) VALUES (2,2,4)')
+        assert [(3,),(4,)] == sorted(cql.execute(f"SELECT c FROM {table} WHERE a>0 and b=2 ALLOW FILTERING"))
+        assert [(4,)] == sorted(cql.execute(f"SELECT c FROM {table} WHERE a>=2 ALLOW FILTERING"))

@@ -23,13 +23,13 @@
 #include "db/system_keyspace.hh"
 #include "log.hh"
 #include "converting_mutation_partition_applier.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "commitlog_entry.hh"
 #include "service/priority_manager.hh"
 #include "db/extensions.hh"
 #include "utils/fragmented_temporary_buffer.hh"
 #include "validation.hh"
-#include "mutation_partition_view.hh"
+#include "mutation/mutation_partition_view.hh"
 
 static logging::logger rlogger("commitlog_replayer");
 
@@ -126,9 +126,9 @@ future<> db::commitlog_replayer::impl::init() {
                 }
             }
         }
-    }, [this](replica::database& db) {
-        return do_with(shard_rpm_map{}, [this, &db](shard_rpm_map& map) {
-            return parallel_for_each(db.get_column_families(), [&map, &db](auto& cfp) {
+    }, [](replica::database& db) {
+        return do_with(shard_rpm_map{}, [&db](shard_rpm_map& map) {
+            return parallel_for_each(db.get_column_families(), [&map](auto& cfp) {
                 auto uuid = cfp.first;
                 // We do this on each cpu, for each CF, which technically is a little wasteful, but the values are
                 // cached, this is only startup, and it makes the code easier.
@@ -246,7 +246,7 @@ future<> db::commitlog_replayer::impl::process(stats* s, commitlog::buffer_and_r
 
         const auto& schema = *_db.local().find_column_family(uuid).schema();
         auto shard = fm.shard_of(schema);
-        return _db.invoke_on(shard, [this, cer = std::move(cer), &src_cm, rp, shard, s] (replica::database& db) mutable -> future<> {
+        return _db.invoke_on(shard, [this, cer = std::move(cer), &src_cm, rp] (replica::database& db) mutable -> future<> {
             auto& fm = cer.mutation();
             // TODO: might need better verification that the deserialized mutation
             // is schema compatible. My guess is that just applying the mutation

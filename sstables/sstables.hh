@@ -21,7 +21,7 @@
 #include <unordered_map>
 #include <variant>
 #include "types.hh"
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include <seastar/core/stream.hh>
 #include "encoding_stats.hh"
 #include "filter.hh"
@@ -34,7 +34,7 @@
 #include "utils/observable.hh"
 #include "sstables/shareable_components.hh"
 #include "sstables/generation_type.hh"
-#include "mutation_fragment_stream_validator.hh"
+#include "mutation/mutation_fragment_stream_validator.hh"
 #include "readers/flat_mutation_reader_fwd.hh"
 #include "tracing/trace_state.hh"
 #include "utils/updateable_value.hh"

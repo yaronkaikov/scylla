@@ -675,24 +675,29 @@ scylla_core = (['message/messaging_service.cc',
                 'replica/memtable.cc',
                 'replica/exceptions.cc',
                 'replica/dirty_memory_manager.cc',
+                'mutation/atomic_cell.cc',
+                'mutation/canonical_mutation.cc',
+                'mutation/frozen_mutation.cc',
+                'mutation/mutation.cc',
+                'mutation/mutation_fragment.cc',
+                'mutation/mutation_partition.cc',
+                'mutation/mutation_partition_v2.cc',
+                'mutation/mutation_partition_view.cc',
+                'mutation/mutation_partition_serializer.cc',
+                'mutation/partition_version.cc',
+                'mutation/range_tombstone.cc',
+                'mutation/range_tombstone_list.cc',
                 'absl-flat_hash_map.cc',
-                'atomic_cell.cc',
-                'caching_options.cc',
                 'collection_mutation.cc',
                 'client_data.cc',
                 'debug.cc',
-                'hashers.cc',
-                'schema.cc',
+                'schema/caching_options.cc',
+                'schema/schema.cc',
+                'schema/schema_registry.cc',
                 'frozen_schema.cc',
-                'schema_registry.cc',
                 'bytes.cc',
                 'timeout_config.cc',
-                'mutation.cc',
-                'mutation_fragment.cc',
-                'partition_version.cc',
                 'row_cache.cc',
-                'canonical_mutation.cc',
-                'frozen_mutation.cc',
                 'schema_mutations.cc',
                 'generic_server.cc',
                 'utils/array-search.cc',
@@ -707,10 +712,6 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/rjson.cc',
                 'utils/human_readable.cc',
                 'utils/histogram_metrics_helper.cc',
-                'mutation_partition.cc',
-                'mutation_partition_v2.cc',
-                'mutation_partition_view.cc',
-                'mutation_partition_serializer.cc',
                 'converting_mutation_partition_applier.cc',
                 'readers/combined.cc',
                 'readers/multishard.cc',
@@ -861,7 +862,6 @@ scylla_core = (['message/messaging_service.cc',
                 'cql3/constants.cc',
                 'cql3/query_processor.cc',
                 'cql3/query_options.cc',
-                'cql3/column_condition.cc',
                 'cql3/user_types.cc',
                 'cql3/untyped_result_set.cc',
                 'cql3/selection/abstract_function_selector.cc',
@@ -1013,11 +1013,10 @@ scylla_core = (['message/messaging_service.cc',
                 'audit/audit.cc',
                 'audit/audit_cf_storage_helper.cc',
                 'audit/audit_syslog_storage_helper.cc',
-                'range_tombstone.cc',
-                'range_tombstone_list.cc',
                 'tombstone_gc_options.cc',
                 'tombstone_gc.cc',
                 'utils/disk-error-handler.cc',
+                'utils/hashers.cc',
                 'duration.cc',
                 'vint-serialization.cc',
                 'utils/arch/powerpc/crc32-vpmsum/crc32_wrapper.cc',
@@ -1320,7 +1319,7 @@ deps['test/boost/bytes_ostream_test'] = [
 ]
 
 deps['test/boost/input_stream_test'] = ['test/boost/input_stream_test.cc']
-deps['test/boost/UUID_test'] = ['utils/UUID_gen.cc', 'test/boost/UUID_test.cc', 'utils/uuid.cc', 'utils/dynamic_bitset.cc', 'hashers.cc']
+deps['test/boost/UUID_test'] = ['utils/UUID_gen.cc', 'test/boost/UUID_test.cc', 'utils/uuid.cc', 'utils/dynamic_bitset.cc', 'utils/hashers.cc']
 deps['test/boost/murmur_hash_test'] = ['bytes.cc', 'utils/murmur_hash.cc', 'test/boost/murmur_hash_test.cc']
 deps['test/boost/allocation_strategy_test'] = ['test/boost/allocation_strategy_test.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
 deps['test/boost/log_heap_test'] = ['test/boost/log_heap_test.cc']
@@ -2168,12 +2167,14 @@ with open(buildfile, 'w') as f:
                     mode=mode, hh=hh, gen_headers_dep=gen_headers_dep))
 
         for suffix in [''] + ['.lto'] * modes[mode]['has_lto']:
-            f.write('build $builddir/{mode}/seastar{suffix}/libseastar.a: ninja $builddir/{mode}/seastar{suffix}/build.ninja | always\n'
+            seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.a'
+            seastar_testing_dep = f'$builddir/{mode}/seastar{suffix}/libseastar_testing.a'
+            f.write('build {seastar_dep}: ninja $builddir/{mode}/seastar{suffix}/build.ninja | always\n'
                     .format(**locals()))
             f.write('  pool = submodule_pool\n')
             f.write('  subdir = $builddir/{mode}/seastar{suffix}\n'.format(**locals()))
             f.write('  target = seastar\n'.format(**locals()))
-            f.write('build $builddir/{mode}/seastar{suffix}/libseastar_testing.a: ninja $builddir/{mode}/seastar{suffix}/build.ninja | always\n'
+            f.write('build {seastar_testing_dep}: ninja $builddir/{mode}/seastar{suffix}/build.ninja | always\n'
                     .format(**locals()))
             f.write('  pool = submodule_pool\n')
             f.write('  subdir = $builddir/{mode}/seastar{suffix}\n'.format(**locals()))

@@ -13,13 +13,13 @@
 #include <seastar/core/thread.hh>
 
 #include "partition_slice_builder.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "replica/memtable.hh"
 #include "row_cache.hh"
-#include "frozen_mutation.hh"
+#include "mutation/frozen_mutation.hh"
 #include "test/lib/tmpdir.hh"
 #include "sstables/sstables.hh"
-#include "canonical_mutation.hh"
+#include "mutation/canonical_mutation.hh"
 #include "test/lib/sstable_utils.hh"
 #include "test/lib/test_services.hh"
 #include "test/lib/sstable_test_env.hh"

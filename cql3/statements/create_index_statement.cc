@@ -15,8 +15,8 @@
 #include "validation.hh"
 #include "service/storage_proxy.hh"
 #include "service/migration_manager.hh"
-#include "schema.hh"
-#include "schema_builder.hh"
+#include "schema/schema.hh"
+#include "schema/schema_builder.hh"
 #include "request_validations.hh"
 #include "data_dictionary/data_dictionary.hh"
 #include "index/target_parser.hh"
@@ -25,7 +25,7 @@
 #include "cql3/index_name.hh"
 #include "cql3/statements/index_prop_defs.hh"
 #include "index/secondary_index_manager.hh"
-#include "mutation.hh"
+#include "mutation/mutation.hh"
 
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/algorithm/string/join.hpp>

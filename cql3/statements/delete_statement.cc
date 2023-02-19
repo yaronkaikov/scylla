@@ -15,7 +15,7 @@
 #include "delete_statement.hh"
 #include "raw/delete_statement.hh"
 #include "utils/overloaded_functor.hh"
-#include "mutation.hh"
+#include "mutation/mutation.hh"
 #include "cql3/expr/expression.hh"
 
 namespace cql3 {
@@ -98,7 +98,7 @@ delete_statement::delete_statement(cf_name name,
                                  std::unique_ptr<attributes::raw> attrs,
                                  std::vector<std::unique_ptr<operation::raw_deletion>> deletions,
                                  expr::expression where_clause,
-                                 conditions_vector conditions,
+                                 std::optional<expr::expression> conditions,
                                  bool if_exists)
     : raw::modification_statement(std::move(name), std::move(attrs), std::move(conditions), false, if_exists)
     , _deletions(std::move(deletions))

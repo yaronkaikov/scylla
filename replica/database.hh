@@ -33,7 +33,7 @@
 #include "db/commitlog/replay_position.hh"
 #include "db/commitlog/commitlog_types.hh"
 #include <limits>
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include "db/view/view.hh"
 #include "db/snapshot-ctl.hh"
 #include "memtable.hh"
@@ -279,7 +279,7 @@ using sstable_list = sstables::sstable_list;
 namespace replica {
 
 class distributed_loader;
-struct table_population_metadata;
+class table_populator;
 
 // The CF has a "stats" structure. But we don't want all fields here,
 // since some of them are fairly complex for exporting to collectd. Also,
@@ -548,6 +548,7 @@ private:
     bool cache_enabled() const {
         return _config.enable_cache && _schema->caching_options().enabled();
     }
+    void update_stats_for_new_sstable(const sstables::shared_sstable& sst) noexcept;
     future<> do_add_sstable_and_update_cache(sstables::shared_sstable sst, sstables::offstrategy offstrategy);
     // Helpers which add sstable on behalf of a compaction group and refreshes compound set.
     void add_sstable(compaction_group& cg, sstables::shared_sstable sstable);
@@ -1098,7 +1099,7 @@ public:
     friend class ::column_family_test;
 
     friend class distributed_loader;
-    friend class table_population_metadata;
+    friend class table_populator;
 
 private:
     timer<> _off_strategy_trigger;

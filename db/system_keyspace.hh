@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include "utils/UUID.hh"
 #include "gms/inet_address.hh"
 #include "query-result-set.hh"
@@ -87,6 +87,18 @@ public:
     virtual ~table_selector() = default;
     virtual bool contains(const schema_ptr&) = 0;
     virtual bool contains_keyspace(std::string_view) = 0;
+};
+
+struct compaction_history_entry {
+    utils::UUID id;
+    sstring ks;
+    sstring cf;
+    int64_t compacted_at = 0;
+    int64_t bytes_in = 0;
+    int64_t bytes_out = 0;
+    // Key: number of rows merged
+    // Value: counter
+    std::unordered_map<int32_t, int64_t> rows_merged;
 };
 
 class system_keyspace : public seastar::peering_sharded_service<system_keyspace>, public seastar::async_sharded_service<system_keyspace> {
@@ -297,22 +309,10 @@ public:
         DECOMMISSIONED
     };
 
-    struct compaction_history_entry {
-        utils::UUID id;
-        sstring ks;
-        sstring cf;
-        int64_t compacted_at = 0;
-        int64_t bytes_in = 0;
-        int64_t bytes_out = 0;
-        // Key: number of rows merged
-        // Value: counter
-        std::unordered_map<int32_t, int64_t> rows_merged;
-    };
-
     future<> update_compaction_history(utils::UUID uuid, sstring ksname, sstring cfname, int64_t compacted_at, int64_t bytes_in, int64_t bytes_out,
                                        std::unordered_map<int32_t, int64_t> rows_merged);
     using compaction_history_consumer = noncopyable_function<future<>(const compaction_history_entry&)>;
-    static future<> get_compaction_history(compaction_history_consumer&& f);
+    future<> get_compaction_history(compaction_history_consumer&& f);
 
     struct repair_history_entry {
         tasks::task_id id;

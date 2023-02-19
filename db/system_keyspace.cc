@@ -36,8 +36,8 @@
 #include "db/config.hh"
 #include "gms/feature_service.hh"
 #include "system_keyspace_view_types.hh"
-#include "schema_builder.hh"
-#include "hashers.hh"
+#include "schema/schema_builder.hh"
+#include "utils/hashers.hh"
 #include "release.hh"
 #include "log.hh"
 #include <seastar/core/enum.hh>
@@ -1390,8 +1390,6 @@ namespace db {
 
 typedef utils::UUID truncation_key;
 typedef std::unordered_map<truncation_key, truncation_record> truncation_map;
-
-static constexpr uint8_t current_version = 1;
 
 future<truncation_record> system_keyspace::get_truncation_record(table_id cf_id) {
     if (qctx->qp().db().get_config().ignore_truncation_record.is_set()) {
@@ -2850,7 +2848,6 @@ future<> system_keyspace_make(db::system_keyspace& sys_ks, distributed<replica::
 
     auto& db = dist_db.local();
     auto& db_config = db.get_config();
-    auto enable_cache = db_config.enable_cache();
     bool durable = db_config.data_file_directories().size() > 0;
     for (auto&& table : system_keyspace::all_tables(db_config)) {
         if (!tables.contains(table)) {
@@ -2982,9 +2979,9 @@ future<> system_keyspace::update_compaction_history(utils::UUID uuid, sstring ks
 
 future<> system_keyspace::get_compaction_history(compaction_history_consumer&& f) {
     return do_with(compaction_history_consumer(std::move(f)),
-            [](compaction_history_consumer& consumer) mutable {
+            [this](compaction_history_consumer& consumer) mutable {
         sstring req = format("SELECT * from system.{}", COMPACTION_HISTORY);
-        return qctx->qp().query_internal(req, [&consumer] (const cql3::untyped_result_set::row& row) mutable {
+        return _qp.local().query_internal(req, [&consumer] (const cql3::untyped_result_set::row& row) mutable {
             compaction_history_entry entry;
             entry.id = row.get_as<utils::UUID>("id");
             entry.ks = row.get_as<sstring>("keyspace_name");
@@ -3284,9 +3281,11 @@ future<> system_keyspace::enable_features_on_startup(sharded<gms::feature_servic
             }
         }
         if (is_registered_feat) {
-            // `gms::feature::enable` should be run within a seastar thread context
-            co_await seastar::async([&local_feat_srv, f] {
-                local_feat_srv.enable(sstring(f));
+            co_await feat.invoke_on_all([f] (auto& srv) -> future<> {
+                // `gms::feature::enable` should be run within a seastar thread context
+                co_await seastar::async([&srv, f] {
+                    srv.enable(sstring(f));
+                });
             });
         }
         // If a feature is not in `registered_features` but still in `known_features` list

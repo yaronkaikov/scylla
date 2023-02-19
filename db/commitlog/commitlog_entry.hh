@@ -11,8 +11,8 @@
 #include <optional>
 
 #include "commitlog_types.hh"
-#include "frozen_mutation.hh"
-#include "schema_fwd.hh"
+#include "mutation/frozen_mutation.hh"
+#include "schema/schema_fwd.hh"
 
 class commitlog_entry {
     std::optional<column_mapping> _mapping;

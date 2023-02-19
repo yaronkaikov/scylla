@@ -40,7 +40,7 @@
 #include "utils/error_injection.hh"
 #include "utils/histogram_metrics_helper.hh"
 #include "utils/fb_utilities.hh"
-#include "mutation_source_metadata.hh"
+#include "mutation/mutation_source_metadata.hh"
 #include "gms/gossiper.hh"
 #include "db/config.hh"
 #include "db/commitlog/commitlog.hh"
@@ -546,6 +546,12 @@ future<> table::parallel_foreach_compaction_group(std::function<future<>(compact
     });
 }
 
+void table::update_stats_for_new_sstable(const sstables::shared_sstable& sst) noexcept {
+    _stats.live_disk_space_used += sst->bytes_on_disk();
+    _stats.total_disk_space_used += sst->bytes_on_disk();
+    _stats.live_sstable_count++;
+}
+
 future<>
 table::do_add_sstable_and_update_cache(sstables::shared_sstable sst, sstables::offstrategy offstrategy) {
     auto permit = co_await seastar::get_units(_sstable_set_mutation_sem, 1);
@@ -558,6 +564,7 @@ table::do_add_sstable_and_update_cache(sstables::shared_sstable sst, sstables::o
         } else {
             add_maintenance_sstable(cg, sst);
         }
+        update_stats_for_new_sstable(sst);
     }), dht::partition_range::make({sst->get_first_decorated_key(), true}, {sst->get_last_decorated_key(), true}));
 }
 
@@ -597,6 +604,7 @@ table::update_cache(compaction_group& cg, lw_shared_ptr<memtable> m, std::vector
     auto adder = row_cache::external_updater([this, m, ssts = std::move(ssts), new_ssts_ms = std::move(*ms_opt), &cg] () mutable {
         for (auto& sst : ssts) {
             add_sstable(cg, sst);
+            update_stats_for_new_sstable(sst);
         }
         m->mark_flushed(std::move(new_ssts_ms));
         try_trigger_compaction(cg);
@@ -842,7 +850,7 @@ table::try_flush_memtable_to_sstable(compaction_group& cg, lw_shared_ptr<memtabl
             co_await _compaction_manager.maybe_wait_for_sstable_count_reduction(cg.as_table_state());
         }
 
-        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, metadata, estimated_partitions, &cg] (flat_mutation_reader_v2 reader) mutable -> future<> {
+        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, estimated_partitions, &cg] (flat_mutation_reader_v2 reader) mutable -> future<> {
           std::exception_ptr ex;
           try {
             auto&& priority = service::get_local_memtable_flush_priority();
@@ -991,8 +999,7 @@ void table::set_metrics() {
 }
 
 size_t compaction_group::live_sstable_count() const noexcept {
-    // FIXME: switch to sstable_set::size() once available.
-    return _main_sstables->all()->size() + _maintenance_sstables->all()->size();
+    return _main_sstables->size() + _maintenance_sstables->size();
 }
 
 uint64_t compaction_group::live_disk_space_used() const noexcept {
@@ -1360,11 +1367,11 @@ future<std::unordered_set<sstring>> table::get_sstables_by_partition_key(const s
             partition_key(partition_key::from_nodetool_style_string(_schema, key)),
             [this] (std::unordered_set<sstring>& filenames, lw_shared_ptr<sstables::sstable_set::incremental_selector>& sel, partition_key& pk) {
         return do_with(dht::decorated_key(dht::decorate_key(*_schema, pk)),
-                [this, &filenames, &sel, &pk](dht::decorated_key& dk) mutable {
+                [this, &filenames, &sel](dht::decorated_key& dk) mutable {
             const auto& sst = sel->select(dk).sstables;
             auto hk = sstables::sstable::make_hashed_key(*_schema, dk.key());
 
-            return do_for_each(sst, [this, &filenames, &dk, hk = std::move(hk)] (std::vector<sstables::shared_sstable>::const_iterator::reference s) mutable {
+            return do_for_each(sst, [&filenames, &dk, hk = std::move(hk)] (std::vector<sstables::shared_sstable>::const_iterator::reference s) mutable {
                 auto name = s->get_filename();
                 return s->has_partition_key(hk, dk).then([name = std::move(name), &filenames] (bool contains) mutable {
                     if (contains) {
@@ -1853,7 +1860,7 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
         tlogger.debug("cleaning out row cache");
     }));
     rebuild_statistics();
-    co_await coroutine::parallel_for_each(p->remove, [this, p] (pruner::removed_sstable& r) {
+    co_await coroutine::parallel_for_each(p->remove, [p] (pruner::removed_sstable& r) {
         if (r.enable_backlog_tracker) {
             remove_sstable_from_backlog_tracker(r.cg.get_backlog_tracker(), r.sst);
         }
@@ -1933,7 +1940,7 @@ const std::vector<view_ptr>& table::views() const {
 
 std::vector<view_ptr> table::affected_views(const schema_ptr& base, const mutation& update) const {
     //FIXME: Avoid allocating a vector here; consider returning the boost iterator.
-    return boost::copy_range<std::vector<view_ptr>>(_views | boost::adaptors::filtered([&, this] (auto&& view) {
+    return boost::copy_range<std::vector<view_ptr>>(_views | boost::adaptors::filtered([&] (auto&& view) {
         return db::view::partition_key_matches(*base, *view->view_info(), update.decorated_key());
     }));
 }

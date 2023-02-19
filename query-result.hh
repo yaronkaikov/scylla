@@ -9,7 +9,7 @@
 #pragma once
 
 #include "bytes_ostream.hh"
-#include "digest_algorithm.hh"
+#include "utils/digest_algorithm.hh"
 #include "query-request.hh"
 #include "full_position.hh"
 #include <optional>
@@ -382,9 +382,7 @@ public:
         w.reduce_chunk_count();
     }
     result(result&&) = default;
-    result(const result&) = default;
     result& operator=(result&&) = default;
-    result& operator=(const result&) = default;
 
     const bytes_ostream& buf() const {
         return _w;

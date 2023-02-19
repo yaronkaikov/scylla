@@ -11,9 +11,9 @@
 #include <boost/range/algorithm/unique.hpp>
 
 #include "cql3/cql3_type.hh"
-#include "mutation.hh"
-#include "mutation_fragment.hh"
-#include "schema_builder.hh"
+#include "mutation/mutation.hh"
+#include "mutation/mutation_fragment.hh"
+#include "schema/schema_builder.hh"
 #include "test/lib/random_schema.hh"
 #include "test/lib/random_utils.hh"
 #include "types/list.hh"

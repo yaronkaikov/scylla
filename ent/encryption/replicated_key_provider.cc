@@ -36,7 +36,7 @@
 #include "service/migration_manager.hh"
 #include "compaction/compaction_manager.hh"
 #include "replica/distributed_loader.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "db/system_keyspace.hh"
 #include "locator/everywhere_replication_strategy.hh"
 

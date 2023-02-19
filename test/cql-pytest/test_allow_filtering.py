@@ -96,6 +96,30 @@ def test_allow_filtering_partition_slice(cql, table1):
     check_af_optional(cql, table1, 'k=1 AND c=2', lambda row: row.k==1 and row.c==2)
     check_af_optional(cql, table1, 'k=1 AND c>=2 AND c<=4', lambda row: row.k==1 and row.c>=2 and row.c<=4)
 
+# Although as the above test showed that a partition slice does not require
+# filtering, if we add another restriction like 'v=2' the filtering *is*
+# required: The point is that the slice may have many rows, out of which
+# only a small number might match 'v=2'.
+# The above is true only for potentially-long slices. The single-row slice
+# 'k=1 and c=2' is different, and will be tested in the following test
+# test_allow_filtering_single_row().
+def test_allow_filtering_partition_slice_and_restriction(cql, table1):
+    check_af_mandatory(cql, table1, 'k=1 AND v=2', lambda row: row.k==1 and row.v==2)
+    check_af_mandatory(cql, table1, 'k=1 AND c>2 AND v=2', lambda row: row.k==1 and row.c>2 and row.v==2)
+    check_af_mandatory(cql, table1, 'k=1 AND c<2 AND v=2', lambda row: row.k==1 and row.c<2 and row.v==2)
+    check_af_mandatory(cql, table1, 'k=1 AND c>=2 AND c<=4 AND v=2', lambda row: row.k==1 and row.c>=2 and row.c<=4 and row.v==2)
+
+# Reading a clustering single row 'k=1 AND c=2' always takes a O(1) amount
+# of work and returns one or zero results. Adding another restriction
+# like 'v=2' doesn't change any of the above, so doesn't require filtering.
+# Reproduces #7964 on Scylla, and also wrong on Cassandra so marked
+# cassandra_bug.
+@pytest.mark.xfail(reason="#7964")
+def test_allow_filtering_single_row(cql, table1, cassandra_bug):
+    check_af_optional(cql, table1, 'k=1 AND c=2', lambda row: row.k==1 and row.c==2)
+    # Reproduces #7964, as ALLOW FILTERING is considered mandatory, not optional
+    check_af_optional(cql, table1, 'k=1 AND c=2 AND v=2', lambda row: row.k==1 and row.c==2 and row.v==2)
+
 # A scan of the whole table or of a whole partition looking for one particular
 # regular column value requires filtering.
 def test_allow_filtering_regular_column(cql, table1):
@@ -209,15 +233,18 @@ def test_allow_filtering_indexed_a_and_k(cql, table2):
 def table3(cql, test_keyspace):
     table = test_keyspace + "." + unique_name()
     cql.execute("CREATE TABLE " + table +
-        "(k1 int, k2 int, c1 int, c2 int, a int, b int, PRIMARY KEY ((k1,k2),c1,c2))")
+        "(k1 int, k2 int, c1 int, c2 int, a int, b int, s int static, PRIMARY KEY ((k1,k2),c1,c2))")
+    cql.execute("CREATE INDEX ON " + table + "(s)")
     cql.execute("CREATE INDEX ON " + table + "(a)")
     cql.execute("CREATE INDEX ON " + table + "(b)")
     for i in range(0, 5):
         for j in range(0, 5):
-            cql.execute("INSERT INTO {} (k1, k2, c1, c2, a, b) VALUES ({}, {}, {}, {}, {}, {})".format(
-                table, i, j, i*10, j*10, i*100, j*100))
+            cql.execute("INSERT INTO {} (k1, k2, c1, c2, a, b, s) VALUES ({}, {}, {}, {}, {}, {}, {})".format(
+                table, i, j, i*10, j*10, i*100, j*100, i+j))
     everything = list(cql.execute('SELECT * FROM ' + table))
+    wait_for_index(cql, table, 'a', everything)
     wait_for_index(cql, table, 'b', everything)
+    wait_for_index(cql, table, 's', everything)
     yield (table, everything)
     cql.execute("DROP TABLE " + table)
 
@@ -235,6 +262,12 @@ def test_allow_filtering_multi_column(cql, table3):
 # the given clustering key value requires filtering.
 def test_allow_filtering_indexed_a_and_c(cql, table3):
     check_af_mandatory(cql, table3, 'a=100 AND c1=10', lambda row: row.a==100 and row.c1==10)
+
+# Exactly the same for an indexed static column: s=5 may match many rows,
+# and c1=10 may restrict the returned list to much fewer.
+# (See also discussion in #12828)
+def test_allow_filtering_indexed_s_and_c(cql, table3):
+    check_af_mandatory(cql, table3, 's=5 AND c1=10', lambda row: row.s==5 and row.c1==10)
 
 # Similarly, trying two combine two different indexes requires filtering.
 # Scylla does not have efficient intersections of two indexes.

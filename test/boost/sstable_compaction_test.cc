@@ -19,8 +19,8 @@
 #include "compaction/compaction.hh"
 #include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
-#include "schema.hh"
-#include "schema_builder.hh"
+#include "schema/schema.hh"
+#include "schema/schema_builder.hh"
 #include "replica/database.hh"
 #include "compaction/leveled_manifest.hh"
 #include "sstables/metadata_collector.hh"
@@ -51,12 +51,12 @@
 #include "test/lib/make_random_string.hh"
 #include "test/lib/sstable_run_based_compaction_strategy_for_tests.hh"
 #include "compatible_ring_position.hh"
-#include "mutation_compactor.hh"
+#include "mutation/mutation_compactor.hh"
 #include "service/priority_manager.hh"
 #include "db/config.hh"
 #include "mutation_writer/partition_based_splitting_writer.hh"
 #include "compaction/table_state.hh"
-#include "mutation_rebuilder.hh"
+#include "mutation/mutation_rebuilder.hh"
 
 #include <stdio.h>
 #include <ftw.h>
@@ -142,6 +142,12 @@ public:
 
 static std::unique_ptr<strategy_control> make_strategy_control_for_test(bool has_ongoing_compaction) {
     return std::make_unique<strategy_control_for_test>(has_ongoing_compaction);
+}
+
+static void assert_table_sstable_count(table_for_tests& t, size_t expected_count) {
+    testlog.info("sstable_set_size={}, live_sstable_count={}, expected={}", t->get_sstables()->size(), t->get_stats().live_sstable_count, expected_count);
+    BOOST_REQUIRE(t->get_sstables()->size() == expected_count);
+    BOOST_REQUIRE(t->get_stats().live_sstable_count == expected_count);
 }
 
 SEASTAR_TEST_CASE(compaction_manager_basic_test) {
@@ -460,7 +466,8 @@ SEASTAR_TEST_CASE(compact_02) {
     // By the way, automatic compaction isn't tested here, instead the
     // strategy algorithm that selects candidates for compaction.
 
-    return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
+    return test_env::do_with([] (test_env& env) {
+        auto tmpdir_path = env.tempdir().path().native();
         // Compact 4 sstables into 1 using size-tiered strategy to select sstables.
         // E.g.: generations 18, 19, 20 and 21 will be compacted into generation 22.
         return compact_sstables(env, tmpdir_path, { 18, 19, 20, 21 }, 22).then([&env, tmpdir_path] {
@@ -763,7 +770,8 @@ SEASTAR_TEST_CASE(leveled_04) {
 
 SEASTAR_TEST_CASE(leveled_05) {
     // NOTE: Generations from 48 to 51 are used here.
-    return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
+    return test_env::do_with([] (test_env& env) {
+        auto tmpdir_path = env.tempdir().path().native();
 
         // Check compaction code with leveled strategy. In this test, two sstables of level 0 will be created.
         return compact_sstables(env, tmpdir_path, { 48, 49 }, 50, true, 1024*1024, compaction_strategy_type::leveled).then([tmpdir_path] (auto generations) {
@@ -1186,7 +1194,8 @@ SEASTAR_TEST_CASE(tombstone_purge_test) {
 
 SEASTAR_TEST_CASE(sstable_rewrite) {
     BOOST_REQUIRE(smp::count == 1);
-    return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
+    return test_env::do_with([] (test_env& env) {
+        auto tmpdir_path = env.tempdir().path().native();
         auto s = make_shared_schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", utf8_type}}, {}, utf8_type);
 
@@ -1244,8 +1253,8 @@ SEASTAR_TEST_CASE(test_sstable_max_local_deletion_time_2) {
     // Create sstable A with 5x column with TTL 100 and 1x column with TTL 1000
     // Create sstable B with tombstone for column in sstable A with TTL 1000.
     // Compact them and expect that maximum deletion time is that of column with TTL 100.
-    return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
-        return seastar::async([&env, tmpdir_path] {
+    return test_env::do_with_async([] (test_env& env) {
+            auto tmpdir_path = env.tempdir().path().native();
             for (auto version : writable_sstable_versions) {
                 schema_builder builder(some_keyspace, some_column_family);
                 builder.with_column("p1", utf8_type, column_kind::partition_key);
@@ -1293,7 +1302,6 @@ SEASTAR_TEST_CASE(test_sstable_max_local_deletion_time_2) {
                 BOOST_REQUIRE(((now + gc_clock::duration(100)).time_since_epoch().count()) ==
                               info.new_sstables.front()->get_stats_metadata().max_local_deletion_time);
             }
-        });
     });
 }
 
@@ -3614,7 +3622,8 @@ SEASTAR_TEST_CASE(autocompaction_control_test) {
 // Test that https://github.com/scylladb/scylla/issues/6472 is gone
 //
 SEASTAR_TEST_CASE(test_bug_6472) {
-    return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
+    return test_env::do_with_async([] (test_env& env) {
+        auto tmpdir_path = env.tempdir().path().native();
         auto builder = schema_builder("tests", "test_bug_6472")
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("cl", int32_type, column_kind::clustering_key)
@@ -3678,7 +3687,6 @@ SEASTAR_TEST_CASE(test_bug_6472) {
         auto ret = compact_sstables(sstables::compaction_descriptor(sstables_spanning_many_windows,
             default_priority_class()), cf, sst_gen, replacer_fn_no_op()).get0();
         BOOST_REQUIRE(ret.new_sstables.size() == 1);
-        return make_ready_future<>();
     });
 }
 
@@ -3723,7 +3731,8 @@ SEASTAR_TEST_CASE(sstable_needs_cleanup_test) {
 }
 
 SEASTAR_TEST_CASE(test_twcs_partition_estimate) {
-    return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
+    return test_env::do_with_async([] (test_env& env) {
+        auto tmpdir_path = env.tempdir().path().native();
         auto builder = schema_builder("tests", "test_bug_6472")
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("cl", int32_type, column_kind::clustering_key)
@@ -3782,7 +3791,6 @@ SEASTAR_TEST_CASE(test_twcs_partition_estimate) {
         // this is only here as a sanity check.
         BOOST_REQUIRE_EQUAL(ret.new_sstables.size(), std::min(sstables_spanning_many_windows.size() * rows_per_partition,
                     sstables::time_window_compaction_strategy::max_data_segregation_window_count));
-        return make_ready_future<>();
     });
 }
 
@@ -3898,7 +3906,7 @@ SEASTAR_TEST_CASE(test_twcs_interposer_on_memtable_flush) {
 
         auto expected_ssts = (split_during_flush) ? target_windows_span : 1;
         testlog.info("split_during_flush={}, actual={}, expected={}", split_during_flush, cf->get_sstables()->size(), expected_ssts);
-        BOOST_REQUIRE(cf->get_sstables()->size() == expected_ssts);
+        assert_table_sstable_count(cf, expected_ssts);
       };
 
       test_interposer_on_flush(true);
@@ -4670,7 +4678,7 @@ SEASTAR_TEST_CASE(test_major_does_not_miss_data_in_memtable) {
         }();
         auto sst = make_sstable_containing(sst_gen, {std::move(row_mut)});
         cf->add_sstable_and_update_cache(sst).get();
-        BOOST_REQUIRE(cf->get_sstables()->size() == 1);
+        assert_table_sstable_count(cf, 1);
 
         auto deletion_mut = [&] () {
             mutation m(s, pkey);
@@ -4681,7 +4689,7 @@ SEASTAR_TEST_CASE(test_major_does_not_miss_data_in_memtable) {
         cf->apply(deletion_mut);
 
         cf->compact_all_sstables().get();
-        BOOST_REQUIRE(cf->get_sstables()->size() == 1);
+        assert_table_sstable_count(cf, 1);
         auto new_sst = *(cf->get_sstables()->begin());
         BOOST_REQUIRE(new_sst->generation() != sst->generation());
         assert_that(sstable_reader(new_sst, s, env.make_reader_permit()))

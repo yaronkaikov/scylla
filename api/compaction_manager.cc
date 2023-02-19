@@ -65,8 +65,8 @@ void set_compaction_manager(http_context& ctx, routes& r) {
     });
 
     cm::get_pending_tasks_by_table.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return ctx.db.map_reduce0([&ctx](replica::database& db) {
-            return do_with(std::unordered_map<std::pair<sstring, sstring>, uint64_t, utils::tuple_hash>(), [&ctx, &db](std::unordered_map<std::pair<sstring, sstring>, uint64_t, utils::tuple_hash>& tasks) {
+        return ctx.db.map_reduce0([](replica::database& db) {
+            return do_with(std::unordered_map<std::pair<sstring, sstring>, uint64_t, utils::tuple_hash>(), [&db](std::unordered_map<std::pair<sstring, sstring>, uint64_t, utils::tuple_hash>& tasks) {
                 return do_for_each(db.get_column_families(), [&tasks](const std::pair<table_id, seastar::lw_shared_ptr<replica::table>>& i) -> future<> {
                     replica::table& cf = *i.second.get();
                     tasks[std::make_pair(cf.schema()->ks_name(), cf.schema()->cf_name())] = cf.estimate_pending_compactions();
@@ -150,11 +150,11 @@ void set_compaction_manager(http_context& ctx, routes& r) {
         return make_ready_future<json::json_return_type>(0);
     });
 
-    cm::get_compaction_history.set(r, [] (std::unique_ptr<request> req) {
-        std::function<future<>(output_stream<char>&&)> f = [](output_stream<char>&& s) {
-            return do_with(output_stream<char>(std::move(s)), true, [] (output_stream<char>& s, bool& first){
-                return s.write("[").then([&s, &first] {
-                    return db::system_keyspace::get_compaction_history([&s, &first](const db::system_keyspace::compaction_history_entry& entry) mutable {
+    cm::get_compaction_history.set(r, [&ctx] (std::unique_ptr<request> req) {
+        std::function<future<>(output_stream<char>&&)> f = [&ctx](output_stream<char>&& s) {
+            return do_with(output_stream<char>(std::move(s)), true, [&ctx] (output_stream<char>& s, bool& first){
+                return s.write("[").then([&ctx, &s, &first] {
+                    return ctx.db.local().get_compaction_manager().get_compaction_history([&s, &first](const db::compaction_history_entry& entry) mutable {
                         cm::history h;
                         h.id = entry.id.to_sstring();
                         h.ks = std::move(entry.ks);
