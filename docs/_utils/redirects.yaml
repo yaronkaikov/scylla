@@ -777,7 +777,6 @@ stable/operating-scylla/manager/2.1/index.html: https://manager.docs.scylladb.co
 /using-scylla/features/index.html: /stable/using-scylla/features
 /using-scylla/features-ent/index.html: /stable/using-scylla/features-ent
 /using-scylla/features-open-source/index.html: /stable/using-scylla/features-open-source
-/using-scylla/in-memory/index.html: /stable/using-scylla/in-memory
 /using-scylla/index.html: /stable/using-scylla
 /using-scylla/integrations/index.html: /stable/using-scylla/integrations
 /using-scylla/integrations/integration-ansible/index.html: /stable/using-scylla/integrations/integration-ansible
