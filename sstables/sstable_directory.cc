@@ -14,7 +14,6 @@
 #include "sstables/sstable_directory.hh"
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
-#include "mirror-file-impl.hh"
 #include "compaction/compaction_manager.hh"
 #include "log.hh"
 #include "sstable_directory.hh"
@@ -427,7 +426,7 @@ future<> sstable_directory::delete_atomically(std::vector<shared_sstable> ssts) 
 
             auto dir_f = open_directory(pending_delete_dir).get0();
             // Once flushed and closed, the temporary log file can be renamed.
-            rename_mirrored_file(tmp_pending_delete_log, pending_delete_log).get();
+            rename_file(tmp_pending_delete_log, pending_delete_log).get();
 
             // Guarantee that the changes above reached the disk.
             dir_f.flush().get();
