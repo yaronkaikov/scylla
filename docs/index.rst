@@ -2,6 +2,11 @@
 ScyllaDB Enterprise Documentation
 ====================================
 
+.. meta::
+   :title: ScyllaDB Enterprise Documentation
+   :description: ScyllaDB Enterprise Documentation
+   :keywords: ScyllaDB Enterprise, Scylla Enterprise, ScyllaDB Enterprise documentation, ScyllaDB support, ScyllaDB Enterprise features, Scylla Enterprise features
+
 About This User Guide
 -----------------------
 
