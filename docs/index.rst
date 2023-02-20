@@ -43,6 +43,14 @@ ScyllaDB Enterprise comes with a number of features that are unavailable in Scyl
 * :doc:`Audit </operating-scylla/security/auditing>`
 * :ref:`Incremental Compaction Strategy (ICS) <incremental-compaction-strategy-ics>`
 
+ScyllaDB Enterprise Support
+-----------------------------
+
+ScyllaDB customers can open or check on tickets in the `ScyllaDB Customer Portal <https://www.scylladb.com/customer-portal/#support>`_.
+
+In addition, the Customer Portal allows you to download ScyllaDB Enterprise and learn about premium training options.
+
+
 
 Learn Now to Use ScyllaDB
 ---------------------------
