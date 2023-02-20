@@ -1287,7 +1287,6 @@ private:
             cf_def.__set_memtable_flush_period_in_ms(s->memtable_flush_period());
             cf_def.__set_default_time_to_live(s->default_time_to_live().count());
             cf_def.__set_speculative_retry(s->speculative_retry().to_sstring());
-            cf_def.__set_in_memory(s->is_in_memory());
             cfs.emplace_back(std::move(cf_def));
         }
         def.__set_cf_defs(cfs);

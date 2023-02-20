@@ -50,8 +50,6 @@ const sstring cf_prop_defs::KW_CRC_CHECK_CHANCE = "crc_check_chance";
 
 const sstring cf_prop_defs::KW_ID = "id";
 
-const sstring cf_prop_defs::KW_IN_MEMORY = "in_memory";
-
 const sstring cf_prop_defs::COMPACTION_STRATEGY_CLASS_KEY = "class";
 
 const sstring cf_prop_defs::COMPACTION_ENABLED_KEY = "enabled";
@@ -86,8 +84,6 @@ void cf_prop_defs::validate(const data_dictionary::database db, sstring ks_name,
         KW_BF_FP_CHANCE, KW_MEMTABLE_FLUSH_PERIOD, KW_COMPACTION,
         KW_COMPRESSION, KW_CRC_CHECK_CHANCE,  KW_ID, KW_PAXOSGRACESECONDS,
         KW_SYNCHRONOUS_UPDATES
-        // enterprise
-        , KW_IN_MEMORY
     });
     static std::set<sstring> obsolete_keywords({
         sstring("index_interval"),
@@ -336,10 +332,6 @@ void cf_prop_defs::apply_to_builder(schema_builder& builder, schema::extensions_
     auto compression_options = get_compression_options();
     if (compression_options) {
         builder.set_compressor_params(compression_parameters(*compression_options));
-    }
-
-    if (has_property(KW_IN_MEMORY)) {
-        builder.set_in_memory(get_boolean(KW_IN_MEMORY, builder.get_in_memory()));
     }
 
     auto caching_options = get_caching_options();
