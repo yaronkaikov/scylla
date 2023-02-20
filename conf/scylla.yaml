@@ -588,12 +588,6 @@ force_schema_commit_log: true
 # documentation, section 'Enabling Raft in ScyllaDB 5.2 and further', for the procedure.
 consistent_cluster_management: true
 
-# In memory storage size for sstables in MB
-# If this value is not zero the specified amount of memory
-# will be reserved to store sstables for tables with in_memory
-# property set to 'true'.
-# in_memory_storage_size_mb: 0
-
 #
 # System information encryption settings
 #
