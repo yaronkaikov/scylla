@@ -51,15 +51,10 @@ ScyllaDB customers can open or check on tickets in the `ScyllaDB Customer Portal
 In addition, the Customer Portal allows you to download ScyllaDB Enterprise and learn about premium training options.
 
 
-
-Learn Now to Use ScyllaDB
+Learn How to Use ScyllaDB
 ---------------------------
 
 You can learn to use ScyllaDB by taking free courses at `ScyllaDB University <https://university.scylladb.com/>`_. Also, you can read our `blog <https://www.scylladb.com/blog/>`_ and attend ScyllaDB's `webinars, workshops, and conferences <https://www.scylladb.com/company/events/>`_.
-
-If you have specific questions, go to the `ScyllaDB Community Forum <https://forum.scylladb.com/>`_. The ScyllaDB community will help you out.
-
-
 
 
 .. toctree::
