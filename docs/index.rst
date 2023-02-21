@@ -12,11 +12,11 @@ About This User Guide
 
 ScyllaDB Enterprise is a distributed NoSQL wide-column database for data-intensive apps that require 
 high performance and low latency. It provides the functionality of ScyllaDB Open Source, with the addition of
-**premium features**, **24/7 support**, and **professional services**.
+:ref:`Enterprise-only features <landing-page-enterprise-features>` and :ref:`24/7 support <landing-page-enterprise-support>`.
 
 You can deploy ScyllaDB Enterprise:
 
-* On AWS or GCP.
+* On AWS, GCP, and Azure.
 * On premises.
 * With `ScyllaDB Cloud <https://cloud.scylladb.com/>`_ - a fully managed DBaaS. 
 
@@ -35,18 +35,20 @@ Documentation Highlights
 * :doc:`CQL Reference </cql/index>`
 * :doc:`ScyllaDB Drivers </using-scylla/drivers/index>`
 
+.. _landing-page-enterprise-features:
 
-Premium Features
---------------------
+Enterprise-only  Features
+------------------------------
 
-ScyllaDB Enterprise comes with a number of features that are unavailable in ScyllaDB Open Source, including:
+ScyllaDB Enterprise comes with a number of features that are not available in ScyllaDB Open Source, including:
 
 * :doc:`Encryption at Rest </operating-scylla/security/encryption-at-rest>`
 * :doc:`Workload Prioritization </using-scylla/workload-prioritization>`
-* :doc:`In-memory Tables </using-scylla/in-memory>`
-* :doc:`LDAP Authorization </operating-scylla/security/ldap-authorization>`
+* :doc:`LDAP Authorization </operating-scylla/security/ldap-authorization>` and :doc:`LDAP Authentication </operating-scylla/security/ldap-authentication>`
 * :doc:`Audit </operating-scylla/security/auditing>`
 * :ref:`Incremental Compaction Strategy (ICS) <incremental-compaction-strategy-ics>`
+
+.. _landing-page-enterprise-support:
 
 ScyllaDB Enterprise Support
 -----------------------------
