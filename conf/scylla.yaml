@@ -560,11 +560,9 @@ murmur3_partitioner_ignore_msb_bits: 12
 # Set to `false` to fall-back to the old algorithm.
 # enable_optimized_reversed_reads: true
 
-# This parameter is temporarilt set to `false` due to bug with timeouts.
-#
 # Use on a new, parallel algorithm for performing aggregate queries.
 # Set to `false` to fall-back to the old algorithm.
-# enable_parallelized_aggregation: false
+# enable_parallelized_aggregation: true
 
 # When enabled, the node will start using separate commit log for schema changes
 # right from the boot. Without this, it only happens following a restart after
