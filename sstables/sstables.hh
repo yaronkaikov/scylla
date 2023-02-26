@@ -20,7 +20,6 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <variant>
-#include "types.hh"
 #include "schema/schema_fwd.hh"
 #include <seastar/core/stream.hh>
 #include "encoding_stats.hh"
@@ -102,7 +101,6 @@ struct sstable_writer_config {
     size_t promoted_index_auto_scale_threshold;
     uint64_t max_sstable_size = std::numeric_limits<uint64_t>::max();
     bool backup = false;
-    bool leave_unsealed = false;
     mutation_fragment_stream_validation_level validation_level;
     std::optional<db::replay_position> replay_position;
     std::optional<int> sstable_level;
@@ -138,7 +136,9 @@ struct sstable_open_config {
     // fields respectively. Problematic sstables might fail to load. Set to
     // false if you want to disable this, to be able to read such sstables.
     // Should only be disabled for diagnostics purposes.
-    bool load_first_and_last_position_metadata = true;
+    // FIXME: Enable it by default once the root cause of large allocation when reading sstable in reverse is fixed.
+    //  Ref: https://github.com/scylladb/scylladb/issues/11642
+    bool load_first_and_last_position_metadata = false;
 };
 
 class sstable : public enable_lw_shared_from_this<sstable> {
@@ -554,8 +554,8 @@ private:
 
     filesystem_storage _storage;
 
-    version_types _version;
-    format_types _format;
+    const version_types _version;
+    const format_types _format;
 
     filter_tracker _filter_tracker;
     std::unique_ptr<partition_index_cache> _index_cache;

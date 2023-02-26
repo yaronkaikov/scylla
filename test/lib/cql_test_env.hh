@@ -18,6 +18,7 @@
 
 #include "db/view/view_update_generator.hh"
 #include "service/qos/service_level_controller.hh"
+#include "replica/database.hh"
 #include "transport/messages/result_message_base.hh"
 #include "cql3/query_options_fwd.hh"
 #include "cql3/values.hh"
@@ -37,6 +38,7 @@ class batchlog_manager;
 
 namespace db::view {
 class view_builder;
+class view_update_generator;
 }
 
 namespace auth {

@@ -33,7 +33,6 @@
 #include <seastar/coroutine/as_future.hh>
 
 #include "dht/sharder.hh"
-#include "types.hh"
 #include "writer.hh"
 #include "m_format_read_helpers.hh"
 #include "open_info.hh"
@@ -2748,7 +2747,6 @@ future<> sstable::close_files() {
     }
 
     auto unlinked = make_ready_future<>();
-    auto unlinked_temp_dir = make_ready_future<>();
     if (_marked_for_deletion != mark_for_deletion::none) {
         // If a deletion fails for some reason we
         // log and ignore this failure, because on startup we'll again try to
@@ -2771,7 +2769,7 @@ future<> sstable::close_files() {
 
     _on_closed(*this);
 
-    return when_all_succeed(std::move(index_closed), std::move(data_closed), std::move(unlinked), std::move(unlinked_temp_dir)).discard_result().then([this, me = shared_from_this()] {
+    return when_all_succeed(std::move(index_closed), std::move(data_closed), std::move(unlinked)).discard_result().then([this, me = shared_from_this()] {
         if (_open_mode) {
             if (_open_mode.value() == open_flags::ro) {
                 _stats.on_close_for_reading();

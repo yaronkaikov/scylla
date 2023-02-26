@@ -106,7 +106,6 @@ target_sources(cql3
     restrictions/statement_restrictions.cc
     result_set.cc
     prepare_context.cc
-    ${CMAKE_SOURCE_DIR}/types.cc
     ${cql_grammar_srcs})
 target_include_directories(cql3
   PUBLIC
@@ -114,5 +113,6 @@ target_include_directories(cql3
     ${CMAKE_BINARY_DIR})
 target_link_libraries(cql3
     idl
+    wasmtime_bindings
     Seastar::seastar
     xxHash::xxhash)

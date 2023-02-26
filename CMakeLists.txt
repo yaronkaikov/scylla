@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.18)
 
 project(scylla)
 
+include(CTest)
+
 list(APPEND CMAKE_MODULE_PATH
   ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
@@ -34,50 +36,6 @@ find_package(xxHash REQUIRED)
 set(scylla_gen_build_dir "${CMAKE_BINARY_DIR}/gen")
 file(MAKE_DIRECTORY "${scylla_gen_build_dir}")
 
-# Generate C++ source files from thrift definitions
-function(scylla_generate_thrift)
-    set(one_value_args TARGET VAR IN_FILE OUT_DIR SERVICE)
-    cmake_parse_arguments(args "" "${one_value_args}" "" ${ARGN})
-
-    get_filename_component(in_file_name ${args_IN_FILE} NAME_WE)
-
-    set(aux_out_file_name ${args_OUT_DIR}/${in_file_name})
-    set(outputs
-        ${aux_out_file_name}_types.cpp
-        ${aux_out_file_name}_types.h
-        ${aux_out_file_name}_constants.cpp
-        ${aux_out_file_name}_constants.h
-        ${args_OUT_DIR}/${args_SERVICE}.cpp
-        ${args_OUT_DIR}/${args_SERVICE}.h)
-
-    add_custom_command(
-        DEPENDS
-            ${args_IN_FILE}
-            thrift
-        OUTPUT ${outputs}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${args_OUT_DIR}
-        COMMAND thrift -gen cpp:cob_style,no_skeleton -out "${args_OUT_DIR}" "${args_IN_FILE}")
-
-    add_custom_target(${args_TARGET}
-        DEPENDS ${outputs})
-
-    set(${args_VAR} ${outputs} PARENT_SCOPE)
-endfunction()
-
-scylla_generate_thrift(
-    TARGET scylla_thrift_gen_cassandra
-    VAR scylla_thrift_gen_cassandra_files
-    IN_FILE "${CMAKE_SOURCE_DIR}/interface/cassandra.thrift"
-    OUT_DIR ${scylla_gen_build_dir}
-    SERVICE Cassandra)
-
-
-# Generate C++ sources from ragel grammar files
-seastar_generate_ragel(
-    TARGET scylla_ragel_gen_protocol_parser
-    VAR scylla_ragel_gen_protocol_parser_file
-    IN_FILE "${CMAKE_SOURCE_DIR}/redis/protocol_parser.rl"
-    OUT_FILE ${scylla_gen_build_dir}/redis/protocol_parser.hh)
 
 set(scylla_sources
     absl-flat_hash_map.cc
@@ -95,6 +53,7 @@ set(scylla_sources
     compaction/compaction_strategy.cc
     compaction/leveled_compaction_strategy.cc
     compaction/size_tiered_compaction_strategy.cc
+    compaction/task_manager_module.cc
     compaction/time_window_compaction_strategy.cc
     compress.cc
     converting_mutation_partition_applier.cc
@@ -216,20 +175,6 @@ set(scylla_sources
     tombstone_gc_options.cc
     tombstone_gc.cc
     reader_concurrency_semaphore.cc
-    redis/controller.cc
-    redis/server.cc
-    redis/query_processor.cc
-    redis/protocol_parser.rl
-    redis/keyspace_utils.cc
-    redis/options.cc
-    redis/stats.cc
-    redis/mutation_utils.cc
-    redis/query_utils.cc
-    redis/abstract_command.cc
-    redis/command_factory.cc
-    redis/commands.cc
-    redis/lolwut.cc
-    release.cc
     repair/repair.cc
     repair/row_level.cc
     replica/database.cc
@@ -302,30 +247,30 @@ set(scylla_sources
     transport/event_notifier.cc
     transport/messages/result_message.cc
     transport/server.cc
-    types.cc
     unimplemented.cc
     validation.cc
     vint-serialization.cc
     zstd.cc)
-set(scylla_gen_sources
-    "${scylla_thrift_gen_cassandra_files}"
-    "${scylla_ragel_gen_protocol_parser_file}"
-    "${swagger_gen_files}")
 
 add_subdirectory(api)
 add_subdirectory(alternator)
 add_subdirectory(auth)
 add_subdirectory(cql3)
 add_subdirectory(idl)
+add_subdirectory(interface)
+add_subdirectory(redis)
+add_subdirectory(rust)
 add_subdirectory(schema)
 add_subdirectory(sstables)
 add_subdirectory(test)
+add_subdirectory(types)
 add_subdirectory(utils)
-add_subdirectory(rust)
-
+include(add_version_library)
+add_version_library(scylla_version
+    release.cc)
 add_executable(scylla
     ${scylla_sources}
-    ${scylla_gen_sources})
+    ${swagger_gen_files})
 
 target_link_libraries(scylla PRIVATE
     api
@@ -333,9 +278,13 @@ target_link_libraries(scylla PRIVATE
     alternator
     cql3
     idl
+    interface
+    redis
     schema
+    scylla_version
     sstables
     test-perf
+    types
     utils
     wasmtime_bindings)
 target_link_libraries(Boost::regex
@@ -381,38 +330,29 @@ target_link_libraries(scylla PRIVATE
     snappy
     ${LUA_LIBRARIES}
     thrift
-    crypt)
+    crypt
+    xxHash::xxhash)
 
-target_link_libraries(scylla PRIVATE
-    -Wl,--build-id=sha1 # Force SHA1 build-id generation
-    # TODO: Use lld linker if it's available, otherwise gold, else bfd
-    -fuse-ld=lld)
+# Force SHA1 build-id generation
+set(default_linker_flags "-Wl,--build-id=sha1")
+include(CheckLinkerFlag)
+foreach(linker "lld" "gold")
+    set(linker_flag "-fuse-ld=${linker}")
+    check_linker_flag(CXX ${linker_flag} "CXX_LINKER_HAVE_${linker}")
+    if(CXX_LINKER_HAVE_${linker})
+        string(APPEND default_linker_flags " ${linker_flag}")
+        break()
+    endif()
+endforeach()
+
+set(CMAKE_EXE_LINKER_FLAGS "${default_linker_flags}" CACHE INTERNAL "")
+
 # TODO: patch dynamic linker to match configure.py behavior
-
-# Hacks needed to expose internal APIs for xxhash dependencies
-target_compile_definitions(scylla PRIVATE XXH_PRIVATE_API HAVE_LZ4_COMPRESS_DEFAULT)
 
 target_include_directories(scylla PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${scylla_gen_build_dir}")
 
-###
-### Generate version file and supply appropriate compile definitions for release.cc
-###
-execute_process(COMMAND ${CMAKE_SOURCE_DIR}/SCYLLA-VERSION-GEN --output-dir "${CMAKE_BINARY_DIR}/gen" RESULT_VARIABLE scylla_version_gen_res)
-if(scylla_version_gen_res)
-    message(SEND_ERROR "Version file generation failed. Return code: ${scylla_version_gen_res}")
-endif()
-
-file(READ "${CMAKE_BINARY_DIR}/gen/SCYLLA-VERSION-FILE" scylla_version)
-string(STRIP "${scylla_version}" scylla_version)
-
-file(READ "${CMAKE_BINARY_DIR}/gen/SCYLLA-RELEASE-FILE" scylla_release)
-string(STRIP "${scylla_release}" scylla_release)
-
-get_property(release_cdefs SOURCE "${CMAKE_SOURCE_DIR}/release.cc" PROPERTY COMPILE_DEFINITIONS)
-list(APPEND release_cdefs "SCYLLA_VERSION=\"${scylla_version}\"" "SCYLLA_RELEASE=\"${scylla_release}\"")
-set_source_files_properties("${CMAKE_SOURCE_DIR}/release.cc" PROPERTIES COMPILE_DEFINITIONS "${release_cdefs}")
 
 # TODO: create cmake/ directory and move utilities (generate functions etc) there
 # TODO: Build tests if BUILD_TESTING=on (using CTest module)

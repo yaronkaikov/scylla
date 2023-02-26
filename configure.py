@@ -736,6 +736,7 @@ scylla_core = (['message/messaging_service.cc',
                 'compaction/compaction_strategy.cc',
                 'compaction/size_tiered_compaction_strategy.cc',
                 'compaction/leveled_compaction_strategy.cc',
+                'compaction/task_manager_module.cc',
                 'compaction/time_window_compaction_strategy.cc',
                 'compaction/compaction_manager.cc',
                 'compaction/incremental_compaction_strategy.cc',
@@ -846,7 +847,7 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/murmur_hash.cc',
                 'utils/uuid.cc',
                 'utils/big_decimal.cc',
-                'types.cc',
+                'types/types.cc',
                 'validation.cc',
                 'service/priority_manager.cc',
                 'service/migration_manager.cc',
@@ -1521,14 +1522,15 @@ if not try_compile(compiler=args.cxx, source='''\
     print('Installed boost version too old.  Please update {}.'.format(pkgname("boost-devel")))
     sys.exit(1)
 
-if try_compile(args.cxx, source = textwrap.dedent('''\
+if not try_compile(args.cxx, source=textwrap.dedent('''\
         #include <lz4.h>
 
         void m() {
             LZ4_compress_default(static_cast<const char*>(0), static_cast<char*>(0), 0, 0);
         }
         '''), flags=args.user_cflags.split()):
-    defines.append("HAVE_LZ4_COMPRESS_DEFAULT")
+    print('Installed lz4-devel is too old. Please upgrade it to r129 / v1.73 and up')
+    sys.exit(1)
 
 has_sanitize_address_use_after_scope = try_compile(compiler=args.cxx, flags=['-fsanitize-address-use-after-scope'], source='int f() {}')
 
