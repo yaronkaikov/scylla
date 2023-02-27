@@ -21,6 +21,7 @@
 
 struct mutation_source_metadata;
 class compaction_backlog_tracker;
+extern logging::logger compaction_strategy_logger;
 
 using namespace compaction;
 

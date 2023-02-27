@@ -26,7 +26,6 @@
 #include "date_tiered_compaction_strategy.hh"
 #include "leveled_compaction_strategy.hh"
 #include "time_window_compaction_strategy.hh"
-#include "in_memory_compaction_strategy.hh"
 #include "backlog_controller.hh"
 #include "compaction_backlog_manager.hh"
 #include "size_tiered_backlog_tracker.hh"
@@ -36,6 +35,7 @@
 
 logging::logger date_tiered_manifest::logger = logging::logger("DateTieredCompactionStrategy");
 logging::logger leveled_manifest::logger("LeveledManifest");
+logging::logger compaction_strategy_logger("CompactionStrategy");
 
 namespace sstables {
 
@@ -785,7 +785,11 @@ compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, 
         impl = ::make_shared<time_window_compaction_strategy>(options);
         break;
     case compaction_strategy_type::in_memory:
-        impl = make_shared<in_memory_compaction_strategy>(in_memory_compaction_strategy(options));
+        compaction_strategy_logger.warn(
+                "{} is no longer supported. Defaulting to {}.",
+                compaction_strategy::name(compaction_strategy_type::in_memory),
+                compaction_strategy::name(compaction_strategy_type::null));
+        impl = ::make_shared<null_compaction_strategy>();
         break;
     case compaction_strategy_type::incremental:
         impl = make_shared<incremental_compaction_strategy>(incremental_compaction_strategy(options));
