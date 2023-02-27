@@ -89,6 +89,7 @@ public:
     future<std::tuple<key_ptr, opt_bytes>> key(const key_info&, opt_bytes = {}) override;
     future<> validate() const override;
     future<> maybe_initialize_tables();
+    static future<> do_initialize_tables(const ::replica::database& db, service::migration_manager&);
 
     bool should_delay_read(const opt_bytes& id) const override {
         if (!id || _initialized) {
@@ -297,9 +298,11 @@ future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_inf
             store_key(id, uuid, k);
             return _system_key->encrypt(k->key()).then([this, id = std::move(id), cipher = std::move(cipher), uuid](bytes b) {
                 auto ks = base64_encode(b);
+                log.trace("Inserting generated key {}", uuid);
                 return query(fmt::format("INSERT INTO {}.{} (key_file, cipher, strength, key_id, key) VALUES (?, ?, ?, ?, ?)", KSNAME, TABLENAME)
                                 , _system_key->name(), cipher, int32_t(id.info.len), uuid, ks
                 ).then([this](auto&&) {
+                    log.trace("Flushing key table");
                     return force_blocking_flush();
                 });
             }).then([k, uuid]() {
@@ -324,7 +327,7 @@ future<> replicated_key_provider::validate() const {
         try {
             std::rethrow_exception(ep);
         } catch (...) {
-            std::throw_with_nested(std::invalid_argument(fmt::format("Could not validate system key: {} ({})", _system_key->name(), ep)));
+            std::throw_with_nested(std::invalid_argument(fmt::format("Could not validate system key: {}", _system_key->name())));
         }
     });
     if (_local_provider){
@@ -351,15 +354,18 @@ schema_ptr encrypted_keys_table() {
 }
 
 future<> replicated_key_provider::maybe_initialize_tables() {
-    auto& db = _ctxt.get_database().local();
+    if (!_initialized) {
+        co_await do_initialize_tables(_ctxt.get_database().local(), _ctxt.get_migration_manager().local());
+        _initialized = true;
+    }
+}
 
+future<> replicated_key_provider::do_initialize_tables(const ::replica::database& db, service::migration_manager& mm) {
     if (db.has_schema(KSNAME, TABLENAME)) {
         co_await db.find_keyspace(KSNAME).ensure_populated();
-        _initialized = true;
         co_return;
     }
 
-    auto& mm = _ctxt.get_migration_manager().local();
     log.debug("Creating keyspace and table");
     if (!db.has_keyspace(KSNAME)) {
         auto group0_guard = co_await mm.start_group0_operation();
@@ -386,7 +392,6 @@ future<> replicated_key_provider::maybe_initialize_tables() {
     if (rs.get_type() != locator::replication_strategy_type::everywhere_topology) {
         // TODO: reset to everywhere + repair.
     }
-    _initialized = true;
 }
 
 const size_t replicated_key_provider::header_size;
@@ -425,6 +430,10 @@ shared_ptr<key_provider> replicated_key_provider_factory::get_provider(encryptio
 
 void replicated_key_provider_factory::init() {
     replica::distributed_loader::mark_keyspace_as_load_prio(KSNAME);
+}
+
+future<> replicated_key_provider_factory::on_started(const ::replica::database& db, service::migration_manager& mm) {
+    return replicated_key_provider::do_initialize_tables(db, mm);
 }
 
 }

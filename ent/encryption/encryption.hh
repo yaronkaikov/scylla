@@ -164,9 +164,14 @@ public:
     virtual distributed<service::migration_manager>& get_migration_manager() const = 0;
 
     sstring maybe_decrypt_config_value(const sstring&) const;
+
+    virtual future<> start() = 0;
+    virtual future<> stop() = 0;
 };
 
-future<> register_extensions(const db::config&, const encryption_config&, db::extensions&);
+future<seastar::shared_ptr<encryption_context>>
+register_extensions(const db::config&, const encryption_config&, db::extensions&);
+
 
 }
 

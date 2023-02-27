@@ -389,6 +389,12 @@ public:
     distributed<service::migration_manager>& get_migration_manager() const override {
         return *hack_migration_manager_for_encryption;
     }
+    future<> start() override {
+        return replicated_key_provider_factory::on_started(get_database().local(), get_migration_manager().local());
+    }
+    future<> stop() override {
+        co_return;
+    }
 };
 
 class encryption_schema_extension : public schema_extension {
@@ -738,7 +744,7 @@ public:
     }
 };
 
-future<> register_extensions(const db::config&, const encryption_config& cfg, db::extensions& exts) {
+future<seastar::shared_ptr<encryption_context>> register_extensions(const db::config&, const encryption_config& cfg, db::extensions& exts) {
     auto ctxt = ::make_shared<encryption_context_impl>(cfg);
     // Note: extensions are immutable and shared across shards.
     // Object in them must be stateless. We anchor the context in the
@@ -813,7 +819,9 @@ future<> register_extensions(const db::config&, const encryption_config& cfg, db
 
     replicated_key_provider_factory::init();
 
-    return f;
+    return f.then([ctxt]() -> ::shared_ptr<encryption_context> {
+        return ctxt;
+    });
 }
 
 }
