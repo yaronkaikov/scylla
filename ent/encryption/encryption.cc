@@ -55,13 +55,9 @@
 #include "encrypted_file_impl.hh"
 #include "encryption_config.hh"
 #include "utils/UUID_gen.hh"
+#include "init.hh"
 
 static seastar::logger logg{"encryption"};
-
-sharded<cql3::query_processor>* hack_query_processor_for_encryption;
-sharded<service::migration_manager>* hack_migration_manager_for_encryption;
-sharded<replica::database>* hack_database_for_encryption;
-sharded<service::storage_service>* hack_storage_service_for_encryption;
 
 namespace encryption {
 
@@ -258,14 +254,22 @@ class encryption_context_impl : public encryption_context {
     std::vector<std::unordered_map<sstring, shared_ptr<kmip_host>>> _per_thread_kmip_host_cache;
     std::vector<std::unordered_map<sstring, shared_ptr<kms_host>>> _per_thread_kms_host_cache;
     const encryption_config& _cfg;
+    sharded<cql3::query_processor>* _qp;;
+    sharded<service::migration_manager>* _mm;
+    sharded<replica::database>* _db;
+    sharded<service::storage_service>* _ss;
     shared_ptr<symmetric_key> _cfg_encryption_key;
 public:
-    encryption_context_impl(const encryption_config& cfg)
+    encryption_context_impl(const encryption_config& cfg, const service_set& services)
         : _per_thread_provider_cache(smp::count)
         , _per_thread_system_key_cache(smp::count)
         , _per_thread_kmip_host_cache(smp::count)
         , _per_thread_kms_host_cache(smp::count)
         , _cfg(cfg)
+        , _qp(&services.find<cql3::query_processor>())
+        , _mm(&services.find<service::migration_manager>())
+        , _db(&services.find<replica::database>())
+        , _ss(&services.find<service::storage_service>())
     {}
 
     shared_ptr<key_provider> get_provider(const options& map) override {
@@ -377,18 +381,18 @@ public:
         });
     }
     distributed<cql3::query_processor>& get_query_processor() const override {
-        return *hack_query_processor_for_encryption;
+        return *_qp;
     }
     distributed<service::storage_service>& get_storage_service() const override {
-        return *hack_storage_service_for_encryption;
+        return *_ss;
     }
     distributed<replica::database>& get_database() const override {
-        return *hack_database_for_encryption;
+        return *_db;
+    }
+    distributed<service::migration_manager>& get_migration_manager() const override {
+        return *_mm;
     }
 
-    distributed<service::migration_manager>& get_migration_manager() const override {
-        return *hack_migration_manager_for_encryption;
-    }
     future<> start() override {
         return replicated_key_provider_factory::on_started(get_database().local(), get_migration_manager().local());
     }
@@ -445,14 +449,16 @@ public:
         return ser::serialize_to_buffer<bytes>(_options, 0);
     }
     future<> validate(const schema& s) const override {
-        return _provider->validate().then([this, &s] {
-            return key_for_write().discard_result().then([this, &s] {
-                logg.info("Added encryption extension to {}.{}", s.ks_name(), s.cf_name());
-                logg.info("   Options: {}", _options);
-                logg.info("   Key Algorithm: {}", _info);
-                logg.info("   Provider: {}", *_provider);
-            });
-        });
+        try {
+            co_await _provider->validate();
+            co_await key_for_write();
+            logg.info("Added encryption extension to {}.{}", s.ks_name(), s.cf_name());
+            logg.info("   Options: {}", _options);
+            logg.info("   Key Algorithm: {}", _info);
+            logg.info("   Provider: {}", *_provider);
+        } catch (...) {
+            std::throw_with_nested(exceptions::configuration_exception((std::stringstream{} << "Validation failed:" << std::current_exception()).str()));
+        }
     }
 
     bool should_delay_read(const opt_bytes& id) {
@@ -744,8 +750,8 @@ public:
     }
 };
 
-future<seastar::shared_ptr<encryption_context>> register_extensions(const db::config&, const encryption_config& cfg, db::extensions& exts) {
-    auto ctxt = ::make_shared<encryption_context_impl>(cfg);
+future<seastar::shared_ptr<encryption_context>> register_extensions(const db::config&, const encryption_config& cfg, db::extensions& exts, const ::service_set& services) {
+    auto ctxt = ::make_shared<encryption_context_impl>(cfg, services);
     // Note: extensions are immutable and shared across shards.
     // Object in them must be stateless. We anchor the context in the
     // extension objects, and while it is not as such 100% stateless,

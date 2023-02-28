@@ -19,6 +19,8 @@
 #include "../../bytes.hh"
 #include "../../compress.hh"
 
+class service_set;
+
 namespace replica {
 class database;
 }
@@ -170,8 +172,7 @@ public:
 };
 
 future<seastar::shared_ptr<encryption_context>>
-register_extensions(const db::config&, const encryption_config&, db::extensions&);
-
+register_extensions(const db::config&, const encryption_config&, db::extensions&, const ::service_set&);
 
 }
 

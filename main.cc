@@ -526,17 +526,11 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     sharded<service::endpoint_lifecycle_notifier> lifecycle_notifier;
     sharded<compaction_manager> cm;
     distributed<replica::database> db;
-    extern sharded<replica::database>* hack_database_for_encryption;
-    hack_database_for_encryption = &db;
     seastar::sharded<service::cache_hitrate_calculator> cf_cache_hitrate_calculator;
     service::load_meter load_meter;
     auto& proxy = service::get_storage_proxy();
     sharded<service::storage_service> ss;
-    extern sharded<service::storage_service>* hack_storage_service_for_encryption;
-    hack_storage_service_for_encryption = &ss;
     sharded<service::migration_manager> mm;
-    extern sharded<service::migration_manager>* hack_migration_manager_for_encryption;
-    hack_migration_manager_for_encryption = &mm;
     sharded<tasks::task_manager> task_manager;
     api::http_context ctx(db, proxy, load_meter, token_metadata, task_manager);
     httpd::http_server_control prometheus_server;
@@ -1166,8 +1160,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             auth_prep_cache_config.refresh = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
 
             qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config), std::move(auth_prep_cache_config), std::ref(group0_client), std::move(wasm_ctx)).get();
-            extern sharded<cql3::query_processor>* hack_query_processor_for_encryption;
-            hack_query_processor_for_encryption = &qp;
             // #293 - do not stop anything
             // engine().at_exit([&qp] { return qp.stop(); });
             sstables::init_metrics().get();

@@ -95,8 +95,8 @@ public:
         // hook into main scylla.yaml.
         cfg.add(values());
     }
-    future<notify_func> initialize_ex(const boost::program_options::variables_map& opts, const db::config& cfg, db::extensions& exts) override {
-        auto ctxt = co_await encryption::register_extensions(cfg, *this, exts);
+    future<notify_func> initialize_ex(const boost::program_options::variables_map& opts, const db::config& cfg, db::extensions& exts, const service_set& services) override {
+        auto ctxt = co_await encryption::register_extensions(cfg, *this, exts, services);
         co_return [ctxt](system_state e) {
             switch (e) {
                 case system_state::started:
