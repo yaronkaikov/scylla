@@ -1,0 +1,19 @@
+add_library(replica STATIC)
+target_sources(replica
+  PRIVATE
+    distributed_loader.cc
+    database.cc
+    table.cc
+    distributed_loader.cc
+    memtable.cc
+    exceptions.cc
+    dirty_memory_manager.cc)
+target_include_directories(replica
+  PUBLIC
+    ${CMAKE_SOURCE_DIR})
+target_link_libraries(replica
+  PUBLIC
+    db
+    wasmtime_bindings
+    Seastar::seastar
+    xxHash::xxhash)

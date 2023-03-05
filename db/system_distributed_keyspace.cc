@@ -272,10 +272,6 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
         co_return;
     }
 
-    static auto ignore_existing = [] (seastar::noncopyable_function<future<>()> func) {
-        return futurize_invoke(std::move(func)).handle_exception_type([] (exceptions::already_exists_exception& ignored) { });
-    };
-
     // FIXME: fix this code to `announce` once
 
     if (!_sp.get_db().local().has_keyspace(NAME)) {

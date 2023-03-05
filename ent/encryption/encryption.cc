@@ -717,7 +717,7 @@ public:
 
                 logg.debug("Creating commitlog segment {} using {} (id: {})", filename, provider, id);
 
-                return write_text_file_fully(cfg_file, ss.str()).then([f, this, k] {
+                return write_text_file_fully(cfg_file, ss.str()).then([f, k] {
                     return make_ready_future<file>(make_encrypted_file(f, k));
                 });
             });

@@ -138,11 +138,11 @@ future<> ldap_connection::close() {
     _ldap.reset(); // Sends one last message to the server before reclaiming memory.
     return when_all(
             _read_consumer.finally([this] { return _input_stream.close(); })
-            .handle_exception([this] (std::exception_ptr ep) {
+            .handle_exception([] (std::exception_ptr ep) {
                 mylog.error("Seastar input stream closing failed: {}", ep);
             }),
             _outstanding_write.finally([this] { return _output_stream.close(); })
-            .handle_exception([this] (std::exception_ptr ep) {
+            .handle_exception([] (std::exception_ptr ep) {
                 mylog.error("Seastar output stream closing failed: {}", ep);
             })
     ).discard_result().then([this] {

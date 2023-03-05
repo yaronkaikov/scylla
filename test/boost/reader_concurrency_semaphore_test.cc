@@ -779,7 +779,7 @@ SEASTAR_THREAD_TEST_CASE(test_reader_concurrency_semaphore_admission) {
         BOOST_REQUIRE_EQUAL(stats_after.reads_enqueued_for_admission, stats_before.reads_enqueued_for_admission + 1);
         BOOST_REQUIRE_EQUAL(semaphore.waiters(), 1);
 
-        auto cookie2 = post_enqueue_hook(cookie1);
+        std::ignore = post_enqueue_hook(cookie1);
 
         if (!eventually_true([&] { return permit2_fut.available(); })) {
             semaphore.broken();
@@ -1311,7 +1311,7 @@ public:
         if (_admission_fut) {
             co_await std::move(_admission_fut).value();
         }
-        co_await coroutine::parallel_for_each(_pending_resource_units.begin(), _pending_resource_units.end(), [this] (future<reader_permit::resource_units>& fut) {
+        co_await coroutine::parallel_for_each(_pending_resource_units.begin(), _pending_resource_units.end(), [] (future<reader_permit::resource_units>& fut) {
             return std::move(fut).then_wrapped([] (future<reader_permit::resource_units>&& fut) {
                 try {
                     fut.get();
@@ -1463,7 +1463,7 @@ memory_limit_table create_memory_limit_table(cql_test_env& env, uint64_t target_
 
     auto num_sstables = 0;
     parallel_for_each(boost::irange(0, sstable_write_concurrency), [&] (int i) {
-        return seastar::async([&, i] {
+        return seastar::async([&] {
             while (num_sstables != target_num_sstables) {
                 ++num_sstables;
                 auto sst = sst_man.make_sstable(s, sstables_dir.path().string(), sstables::generation_type{num_sstables}, sst_man.get_highest_supported_format(), sstables::sstable_format_types::big);
@@ -1483,17 +1483,21 @@ memory_limit_table create_memory_limit_table(cql_test_env& env, uint64_t target_
     return {s, std::move(sstables_dir), std::move(dk.key()), std::move(ck), std::move(value)};
 }
 
+#ifndef DEBUG
 constexpr uint64_t target_memory = uint64_t(1) << 28; // 256MB
+#endif
 
 // Check that the memory consumption limiting mechanism of the semaphore does
 // prevent OOM crashes.
 // The test fails by OOM crashing.
 // This test should be run with 256MB of memory.
 SEASTAR_TEST_CASE(test_reader_concurrency_semaphore_memory_limit_no_oom) {
+#ifndef DEBUG
     if (memory::stats().total_memory() != target_memory) {
         std::cerr << "Test " << get_name() << " should be run with 256M of memory, make sure you invoke with -m256M" << std::endl;
         return make_ready_future<>();
     }
+#endif
 
     auto db_cfg_ptr = make_shared<db::config>();
     auto& db_cfg = *db_cfg_ptr;
@@ -1507,10 +1511,11 @@ SEASTAR_TEST_CASE(test_reader_concurrency_semaphore_memory_limit_no_oom) {
     return do_with_cql_env_thread([] (cql_test_env& env) {
         auto tbl = create_memory_limit_table(env, 256);
 
-        auto& db = env.local_db();
-        auto& semaphore = db.get_reader_concurrency_semaphore();
-
+#ifdef DEBUG
+        const auto num_reads = 16;
+#else
         const auto num_reads = 128;
+#endif
 
         auto read_id = env.prepare("SELECT value FROM ks.tbl WHERE pk = ? AND ck = ?").get0();
 
@@ -1539,10 +1544,12 @@ SEASTAR_TEST_CASE(test_reader_concurrency_semaphore_memory_limit_no_oom) {
 // failures were caused by the limiting mechanism.
 // This test should be run with 256M memory.
 SEASTAR_TEST_CASE(test_reader_concurrency_semaphore_memory_limit_engages) {
+#ifndef DEBUG
     if (memory::stats().total_memory() != target_memory) {
         std::cerr << "Test " << get_name() << " should be run with 256M of memory, make sure you invoke with -m256M" << std::endl;
         return make_ready_future<>();
     }
+#endif
     auto db_cfg_ptr = make_shared<db::config>();
     auto& db_cfg = *db_cfg_ptr;
 

@@ -733,7 +733,7 @@ future<> test_schema_digest_does_not_change_with_disabled_features(sstring data_
     // hide a digest calculation bug. Separate commits that touch the schema from commits which
     // could potentially modify the digest calculation algorithm (for example). And DO test whether
     // rolling upgrade works.
-    const bool regenerate = false;
+    static const bool regenerate = false;
 
     auto db_cfg_ptr = ::make_shared<db::config>(std::move(extensions));
     auto& db_cfg = *db_cfg_ptr;
@@ -753,7 +753,7 @@ future<> test_schema_digest_does_not_change_with_disabled_features(sstring data_
     db_cfg.create_role_attributes_table = false;
     db_cfg.create_service_levels_table = false;
 
-    return do_with_cql_env_thread([regenerate, expected_digests = std::move(expected_digests), extra_schema_changes = std::move(extra_schema_changes)] (cql_test_env& e) {
+    return do_with_cql_env_thread([expected_digests = std::move(expected_digests), extra_schema_changes = std::move(extra_schema_changes)] (cql_test_env& e) {
         if (regenerate) {
             // Exercise many different kinds of schema changes.
             e.execute_cql(

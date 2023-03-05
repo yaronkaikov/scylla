@@ -903,6 +903,7 @@ future<> storage_service::handle_state_normal(inet_address endpoint) {
             bool left = std::any_of(nodes.begin(), nodes.end(), [this] (const gms::inet_address& node) { return _gossiper.is_left(node); });
             if (left) {
                 slogger.info("Skip to set host_id={} to be owned by node={}, because the node is removed from the cluster, nodes {} used to own the host_id", host_id, endpoint, nodes);
+                _normal_state_handled_on_boot.insert(endpoint);
                 co_return;
             }
             slogger.info("Set host_id={} to be owned by node={}", host_id, endpoint);
@@ -1021,6 +1022,7 @@ future<> storage_service::handle_state_normal(inet_address endpoint) {
             slogger.debug("handle_state_normal: token_metadata.ring_version={}, token={} -> endpoint={}", ver, x.first, x.second);
         }
     }
+    _normal_state_handled_on_boot.insert(endpoint);
 }
 
 future<> storage_service::handle_state_leaving(inet_address endpoint) {
@@ -2200,6 +2202,7 @@ void storage_service::run_bootstrap_ops(std::unordered_set<token>& bootstrap_tok
                 sync_nodes.push_back(node);
             }
         }
+        wait_for_normal_state_handled_on_boot(sync_nodes, "bootstrap", uuid).get();
         sync_nodes.push_front(get_broadcast_address());
 
         // Step 2: Wait until no pending node operations
@@ -2319,6 +2322,7 @@ void storage_service::run_replace_ops(std::unordered_set<token>& bootstrap_token
             sync_nodes.push_back(node);
         }
     }
+    wait_for_normal_state_handled_on_boot(sync_nodes, "replace", uuid).get();
     sync_nodes.push_front(get_broadcast_address());
     auto sync_nodes_generations = _gossiper.get_generation_for_nodes(sync_nodes).get();
     // Map existing nodes to replacing nodes
@@ -3742,6 +3746,27 @@ future<> storage_service::notify_cql_change(inet_address endpoint, bool ready) {
     }
 }
 
+bool storage_service::is_normal_state_handled_on_boot(gms::inet_address node) {
+    return _normal_state_handled_on_boot.contains(node);
+}
+
+// Wait for normal state handler to finish on boot
+future<> storage_service::wait_for_normal_state_handled_on_boot(std::list<gms::inet_address> nodes, sstring ops, node_ops_id uuid) {
+    slogger.info("{}[{}]: Started waiting for normal state handler for nodes {}", ops, uuid, nodes);
+    auto start_time = std::chrono::steady_clock::now();
+    for (auto& node: nodes) {
+        while (!is_normal_state_handled_on_boot(node)) {
+            slogger.debug("{}[{}]: Waiting for normal state handler for node {}", ops, uuid, node);
+            co_await sleep_abortable(std::chrono::milliseconds(100), _abort_source);
+            if (std::chrono::steady_clock::now() > start_time + std::chrono::seconds(60)) {
+                throw std::runtime_error(format("{}[{}]: Node {} did not finish normal state handler, reject the node ops", ops, uuid, node));
+            }
+        }
+    }
+    slogger.info("{}[{}]: Finished waiting for normal state handler for nodes {}", ops, uuid, nodes);
+    co_return;
+}
+
 future<bool> storage_service::is_cleanup_allowed(sstring keyspace) {
     return container().invoke_on(0, [keyspace = std::move(keyspace)] (storage_service& ss) {
         auto my_address = ss.get_broadcast_address();
@@ -3865,11 +3890,7 @@ future<> storage_service::node_ops_abort(node_ops_id ops_uuid) {
                 as->request_abort();
             }
         }
-
-        for (auto it = _node_ops.begin(); it != _node_ops.end(); it = _node_ops.erase(it)) {
-            node_ops_meta_data& meta = it->second;
-        }
-
+        _node_ops.clear();
         co_return;
     }
 
@@ -3918,7 +3939,7 @@ future<> storage_service::start_workload_prioritization(workload_prioritization_
         if (create_tables) {
             co_await sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start_workload_prioritization);
         }
-        co_await _sl_controller.invoke_on_all([this, &sys_dist_ks] (qos::service_level_controller& sl_controller) {
+        co_await _sl_controller.invoke_on_all([&sys_dist_ks] (qos::service_level_controller& sl_controller) {
             sl_controller.set_distributed_data_accessor(::static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
                     ::make_shared<qos::standard_service_level_distributed_data_accessor>(sys_dist_ks.local())));
         });

@@ -55,29 +55,29 @@ public:
 };
 
 namespace kms_errors {
-    static const char* AccessDeniedException = "AccessDeniedException";
-    static const char* IncompleteSignature = "IncompleteSignature";
-    static const char* InternalFailure = "InternalFailure";
-    static const char* InvalidAction = "InvalidAction";
-    static const char* InvalidClientTokenId = "InvalidClientTokenId";
-    static const char* InvalidParameterCombination = "InvalidParameterCombination";
-    static const char* InvalidParameterValue = "InvalidParameterValue";
-    static const char* InvalidQueryParameter = "InvalidQueryParameter";
-    static const char* MalformedQueryString = "MalformedQueryString";
-    static const char* MissingAction = "MissingAction";
-    static const char* MissingAuthenticationToken = "MissingAuthenticationToken";
-    static const char* MissingParameter = "MissingParameter";
-    static const char* NotAuthorized = "NotAuthorized";
-    static const char* OptInRequired = "OptInRequired";
-    static const char* RequestExpired = "RequestExpired";
-    static const char* ServiceUnavailable = "ServiceUnavailable";
-    static const char* ThrottlingException = "ThrottlingException";
-    static const char* ValidationError = "ValidationError";
-    static const char* DependencyTimeoutException = "DependencyTimeoutException";
-    static const char* InvalidArnExceptio = "InvalidArnException";
-    static const char* KMSInternalException = "KMSInternalException";
-    static const char* NotFoundException = "NotFoundException";
-    static const char* AlreadyExistsException = "AlreadyExistsException";
+    [[maybe_unused]] static const char* AccessDeniedException = "AccessDeniedException";
+    [[maybe_unused]] static const char* IncompleteSignature = "IncompleteSignature";
+    [[maybe_unused]] static const char* InternalFailure = "InternalFailure";
+    [[maybe_unused]] static const char* InvalidAction = "InvalidAction";
+    [[maybe_unused]] static const char* InvalidClientTokenId = "InvalidClientTokenId";
+    [[maybe_unused]] static const char* InvalidParameterCombination = "InvalidParameterCombination";
+    [[maybe_unused]] static const char* InvalidParameterValue = "InvalidParameterValue";
+    [[maybe_unused]] static const char* InvalidQueryParameter = "InvalidQueryParameter";
+    [[maybe_unused]] static const char* MalformedQueryString = "MalformedQueryString";
+    [[maybe_unused]] static const char* MissingAction = "MissingAction";
+    [[maybe_unused]] static const char* MissingAuthenticationToken = "MissingAuthenticationToken";
+    [[maybe_unused]] static const char* MissingParameter = "MissingParameter";
+    [[maybe_unused]] static const char* NotAuthorized = "NotAuthorized";
+    [[maybe_unused]] static const char* OptInRequired = "OptInRequired";
+    [[maybe_unused]] static const char* RequestExpired = "RequestExpired";
+    [[maybe_unused]] static const char* ServiceUnavailable = "ServiceUnavailable";
+    [[maybe_unused]] static const char* ThrottlingException = "ThrottlingException";
+    [[maybe_unused]] static const char* ValidationError = "ValidationError";
+    [[maybe_unused]] static const char* DependencyTimeoutException = "DependencyTimeoutException";
+    [[maybe_unused]] static const char* InvalidArnExceptio = "InvalidArnException";
+    [[maybe_unused]] static const char* KMSInternalException = "KMSInternalException";
+    [[maybe_unused]] static const char* NotFoundException = "NotFoundException";
+    [[maybe_unused]] static const char* AlreadyExistsException = "AlreadyExistsException";
 }
 
 class encryption::kms_host::impl {
@@ -265,7 +265,7 @@ future<encryption::kms_host::impl::httpclient::result_type> encryption::kms_host
                 }
                 // parse
                 boost::asio::const_buffer wrap(buf.get(), buf.size());
-                auto const used = p.put(wrap, ec);
+                p.put(wrap, ec);
                 if (ec.failed() && ec != http::error::need_more) {
                     break;
                 }
@@ -363,13 +363,11 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
     static constexpr const char* CREDENTIAL = "Credential";
     static constexpr const char* SIGNATURE = "Signature";
     static constexpr const char* SIGNED_HEADERS = "SignedHeaders";
-    static constexpr const char* ACTION_HEADER = "Action";
+    [[maybe_unused]] static constexpr const char* ACTION_HEADER = "Action";
 
     static constexpr const char* ISO_8601_BASIC = "{:%Y%m%dT%H%M%SZ}";
     static constexpr const char* SIMPLE_DATE_FORMAT_STR = "{:%Y%m%d}";
     static constexpr auto NEWLINE = '\n';
-
-    static constexpr auto expiration_in_s = 30;
 
     if (_options.host.empty()) {
         // resolve region -> endpoint
@@ -754,7 +752,7 @@ encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name
 {}
 
 encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name, const std::unordered_map<sstring, sstring>& map)
-    : kms_host(ctxt, name, [&ctxt, &map] {
+    : kms_host(ctxt, name, [&map] {
         host_options opts;
         map_wrapper<std::unordered_map<sstring, sstring>> m(map);
 

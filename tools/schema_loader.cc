@@ -106,7 +106,7 @@ private:
         );
     }
     virtual std::vector<sstring> get_all_keyspaces(data_dictionary::database db) const override {
-        return boost::copy_range<std::vector<sstring>>(unwrap(db).keyspaces | boost::adaptors::transformed([this] (const keyspace& ks) { return ks.metadata->name(); }));
+        return boost::copy_range<std::vector<sstring>>(unwrap(db).keyspaces | boost::adaptors::transformed([] (const keyspace& ks) { return ks.metadata->name(); }));
     }
     virtual std::vector<data_dictionary::table> get_tables(data_dictionary::database db) const override {
         return boost::copy_range<std::vector<data_dictionary::table>>(unwrap(db).tables | boost::adaptors::transformed([this] (const table& ks) { return wrap(ks); }));
@@ -325,23 +325,6 @@ namespace tools {
 future<std::vector<schema_ptr>> load_schemas(std::string_view schema_str) {
     return async([schema_str] () mutable {
         return do_load_schemas(schema_str);
-    });
-}
-
-future<schema_ptr> load_one_schema(std::string_view schema_str) {
-    return async([schema_str] () mutable {
-        auto schemas = do_load_schemas(schema_str);
-        if (schemas.size() != 1) {
-            throw std::runtime_error(fmt::format("Schema string expected to contain exactly 1 schema, actually has {}", schemas.size()));
-        }
-        return std::move(schemas.front());
-    });
-
-}
-
-future<std::vector<schema_ptr>> load_schemas_from_file(std::filesystem::path path) {
-    return async([path] () mutable {
-        return do_load_schemas(read_file(path));
     });
 }
 

@@ -171,7 +171,6 @@ SEASTAR_TEST_CASE(test_truncate_without_snapshot_during_writes) {
                 auto pkey = partition_key::from_single_value(*s, to_bytes(fmt::format("key-{}", tests::random::get_int<uint64_t>())));
                 mutation m(s, pkey);
                 m.set_clustered_cell(clustering_key_prefix::make_empty(), "v", int32_t(42), {});
-                auto shard = m.shard_of();
                 return apply_mutation(e.db(), uuid, m, true /* do_flush */).finally([&] {
                     ++count;
                 });
@@ -1102,7 +1101,7 @@ SEASTAR_THREAD_TEST_CASE(max_result_size_for_unlimited_query_selection_test) {
 // Refs: #9494 (https://github.com/scylladb/scylla/issues/9494)
 SEASTAR_TEST_CASE(upgrade_sstables) {
     return do_with_cql_env_and_compaction_groups([] (cql_test_env& e) {
-        e.db().invoke_on_all([&e] (replica::database& db) -> future<> {
+        e.db().invoke_on_all([] (replica::database& db) -> future<> {
             auto& cm = db.get_compaction_manager();
             for (auto& [ks_name, ks] : db.get_keyspaces()) {
                 auto owned_ranges_ptr = compaction::make_owned_ranges_ptr(db.get_keyspace_local_ranges(ks_name));
@@ -1171,7 +1170,6 @@ SEASTAR_THREAD_TEST_CASE(per_service_level_reader_concurrency_semaphore_test) {
             BOOST_REQUIRE_EQUAL(total_distributed_memory, total_memory);
         }
 
-        size_t total_weight = dbt.get_total_user_reader_concurrency_semaphore_weight();
         auto get_semaphores_stats_snapshot = [&] () {
             std::unordered_map<sstring, reader_concurrency_semaphore::stats> snapshot;
             for (auto&& sl_name : sl_names) {
@@ -1234,7 +1232,7 @@ SEASTAR_TEST_CASE(populate_from_quarantine_works) {
                     auto idx = tests::random::get_int<size_t>(0, sstables.size() - 1);
                     testlog.debug("Moving sstable #{} out of {} to quarantine", idx, sstables.size());
                     auto sst = sstables[idx];
-                    co_await sst->move_to_quarantine();
+                    co_await sst->change_state(sstables::quarantine_dir);
                     found |= true;
                 });
                 co_return found;
@@ -1288,7 +1286,7 @@ SEASTAR_TEST_CASE(snapshot_with_quarantine_works) {
                     }
                     auto idx = tests::random::get_int<size_t>(0, sstables.size() - 1);
                     auto sst = sstables[idx];
-                    co_await sst->move_to_quarantine();
+                    co_await sst->change_state(sstables::quarantine_dir);
                 });
             });
         }
@@ -1322,7 +1320,6 @@ SEASTAR_TEST_CASE(database_drop_column_family_clears_querier_cache) {
     return do_with_cql_env_and_compaction_groups([] (cql_test_env& e) {
         e.execute_cql("create table ks.cf (k text, v int, primary key (k));").get();
         auto& db = e.local_db();
-        const auto ts = db_clock::now();
         auto& tbl = db.find_column_family("ks", "cf");
 
         auto op = std::optional(tbl.read_in_progress());

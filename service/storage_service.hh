@@ -771,6 +771,11 @@ private:
     struct workload_prioritization_create_tables_tag {};
     using workload_prioritization_create_tables = bool_class<workload_prioritization_create_tables_tag>;
     future<> start_workload_prioritization(workload_prioritization_create_tables create_tables, sharded<db::system_distributed_keyspace>& sys_dist_ks);
+
+private:
+    std::unordered_set<gms::inet_address> _normal_state_handled_on_boot;
+    bool is_normal_state_handled_on_boot(gms::inet_address);
+    future<> wait_for_normal_state_handled_on_boot(std::list<gms::inet_address> nodes, sstring ops, node_ops_id uuid);
 };
 
 }

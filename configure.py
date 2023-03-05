@@ -284,6 +284,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Debug',
         'can_have_debug_info': True,
+        'build_seastar_shared_libs': False,
         'default': True,
         'description': 'a mode with no optimizations, with sanitizers, and with additional debug checks enabled, used for testing',
         'advanced_optimizations': False,
@@ -296,6 +297,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'RelWithDebInfo',
         'can_have_debug_info': True,
+        'build_seastar_shared_libs': False,
         'default': True,
         'description': 'a mode with optimizations and no debug checks, used for production builds',
         'advanced_optimizations': True,
@@ -308,6 +310,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Dev',
         'can_have_debug_info': False,
+        'build_seastar_shared_libs': False,
         'default': True,
         'description': 'a mode with no optimizations and no debug checks, optimized for fast build times, used for development',
         'advanced_optimizations': False,
@@ -320,6 +323,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Sanitize',
         'can_have_debug_info': True,
+        'build_seastar_shared_libs': False,
         'default': False,
         'description': 'a mode with optimizations and sanitizers enabled, used for finding memory errors',
         'advanced_optimizations': False,
@@ -332,6 +336,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Debug',
         'can_have_debug_info': True,
+        'build_seastar_shared_libs': False,
         'default': False,
         'description': 'a mode exclusively used for generating test coverage reports',
         'advanced_optimizations': False,
@@ -1377,7 +1382,6 @@ warnings = [
     '-Wno-sometimes-uninitialized',
     '-Wno-return-stack-address',
     '-Wno-missing-braces',
-    '-Wno-unused-lambda-capture',
     '-Wno-overflow',
     '-Wno-noexcept-type',
     '-Wno-nonnull-compare',
@@ -1389,7 +1393,6 @@ warnings = [
     '-Wno-defaulted-function-deleted',
     '-Wno-redeclared-class-member',
     '-Wno-unsupported-friend',
-    '-Wno-unused-variable',
     '-Wno-delete-non-abstract-non-virtual-dtor',
     '-Wno-braced-scalar-init',
     '-Wno-implicit-int-float-conversion',
@@ -1678,6 +1681,8 @@ def configure_seastar(build_dir, mode, mode_config):
         seastar_cmake_args += ['-DSeastar_ALLOC_FAILURE_INJECTION=ON']
     if args.seastar_debug_allocations:
         seastar_cmake_args += ['-DSeastar_DEBUG_ALLOCATIONS=ON']
+    if modes[mode]['build_seastar_shared_libs']:
+        seastar_cmake_args += ['-DBUILD_SHARED_LIBS=ON']
 
     # In LTO builds, Seastar is configured and built twice: once into intermediate
     # files used for linking Seastar into Scylla, and once into regular ELF object
@@ -1714,9 +1719,16 @@ if not ninja:
     sys.exit(1)
 
 def query_seastar_flags(pc_file, link_static_cxx=False):
-    cflags = pkg_config(pc_file, '--cflags', '--static')
-    libs = pkg_config(pc_file, '--libs', '--static')
-
+    use_shared_libs = modes[mode]['build_seastar_shared_libs']
+    if use_shared_libs:
+        opt = '--shared'
+    else:
+        opt = '--static'
+    cflags = pkg_config(pc_file, '--cflags', opt)
+    libs = pkg_config(pc_file, '--libs', opt)
+    if use_shared_libs:
+        rpath = os.path.dirname(libs.split()[0])
+        libs = f"-Wl,-rpath='{rpath}' {libs}"
     if link_static_cxx:
         libs = libs.replace('-lstdc++ ', '')
 
@@ -1972,6 +1984,7 @@ with open(buildfile, 'w') as f:
         # to an IR file (.o.lto), which is used when linking the main Scylla executable,
         # and to an ELF (.o files) file, used when linking anything else.
 
+        seastar_lib_ext = 'so' if modeval['build_seastar_shared_libs'] else 'a'
         for binary in sorted(build_artifacts):
             if binary in other:
                 continue
@@ -2016,8 +2029,8 @@ with open(buildfile, 'w') as f:
                 objs = internal_objs + external_objs
                 suffix = ""
             # We also link Scylla with `seastar.lto/libseastar.a`, and tests with regular `seastar/libseastar.a`.
-            seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.a'
-            seastar_testing_dep = f'$builddir/{mode}/seastar{suffix}/libseastar_testing.a'
+            seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.{seastar_lib_ext}'
+            seastar_testing_dep = f'$builddir/{mode}/seastar{suffix}/libseastar_testing.{seastar_lib_ext}'
             seastar_libs = f'$seastar_libs_{mode}{suffix.replace(".", "_")}'
             seastar_testing_libs = f'$seastar_testing_libs_{mode}{suffix.replace(".", "_")}'
 
@@ -2120,7 +2133,7 @@ with open(buildfile, 'w') as f:
         for obj in compiles:
             src = compiles[obj]
             for suffix in [''] + ['.lto'] * modes[mode]['has_lto']:
-                seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.a'
+                seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.{seastar_lib_ext}'
                 f.write(f'build {obj}{suffix}: cxx.{mode}{suffix} {src} || {seastar_dep} {gen_headers_dep}\n')
                 if src in modeval['per_src_extra_cxxflags']:
                     f.write('    cxxflags = {seastar_cflags} $cxxflags $cxxflags_{mode} {extra_cxxflags}\n'.format(mode=mode, extra_cxxflags=modeval["per_src_extra_cxxflags"][src], **modeval))
@@ -2169,8 +2182,8 @@ with open(buildfile, 'w') as f:
                     mode=mode, hh=hh, gen_headers_dep=gen_headers_dep))
 
         for suffix in [''] + ['.lto'] * modes[mode]['has_lto']:
-            seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.a'
-            seastar_testing_dep = f'$builddir/{mode}/seastar{suffix}/libseastar_testing.a'
+            seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.{seastar_lib_ext}'
+            seastar_testing_dep = f'$builddir/{mode}/seastar{suffix}/libseastar_testing.{seastar_lib_ext}'
             f.write('build {seastar_dep}: ninja $builddir/{mode}/seastar{suffix}/build.ninja | always\n'
                     .format(**locals()))
             f.write('  pool = submodule_pool\n')

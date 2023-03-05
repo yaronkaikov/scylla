@@ -137,7 +137,7 @@ local_file_provider::load_or_create(const key_info& info) {
         return smp::submit_to(0, [this, &i]{
             auto kp = static_pointer_cast<local_file_provider>(local_file_provider_factory::find(_ctxt, _path));
             auto f = kp->load_or_create_local(i.info);
-            return f.then([this, &i, kp](key_ptr k) {
+            return f.then([&i, kp](key_ptr k) {
                 auto& kd = k->key();
                 i.key.resize(kd.size());
                 std::copy(kd.begin(), kd.end(), i.key.begin());

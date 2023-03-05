@@ -66,7 +66,7 @@ bool authorize_against_this_response(temporary_buffer<char> resp, sstring socket
                         ar.connection.input(), ar.connection.output(), socket_path,
                         [resp = std::move(resp)] (input_stream<char>& in, output_stream<char>& out, sstring& socket_path) mutable {
                             return in.read().then(
-                                    [&in, &out, &socket_path, resp=std::move(resp)] (temporary_buffer<char>) mutable {
+                                    [&out, resp=std::move(resp)] (temporary_buffer<char>) mutable {
                                         return out.write(std::move(resp)).finally([&out] { return out.close(); });
                                     }).handle_exception(fail_test).finally([&] {
                                         return in.close().finally([&] { return remove_file(socket_path); });
