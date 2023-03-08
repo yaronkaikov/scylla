@@ -161,6 +161,7 @@ local_file_provider::load_or_create_local(const key_info& info) {
         }
         if (info == system_key_info) {
             if (_keys.size() != 1) {
+                _keys.clear();
                 return make_exception_future<key_ptr>(std::invalid_argument("System key must contain exactly one entry"));
             }
             auto k = _keys.begin()->second;
@@ -275,7 +276,10 @@ future<shared_ptr<symmetric_key>> local_system_key::get_key() {
 }
 
 future<> local_system_key::validate() const {
-    return _provider->validate();
+    // first, just validate the file provider itself
+    co_await _provider->validate();
+    // second, do an early load of the actual key to ensure file contents.
+    co_await _provider->key(system_key_info);
 }
 
 const sstring& local_system_key::name() const {
