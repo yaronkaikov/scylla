@@ -131,7 +131,15 @@ bytes calculate_md5(const bytes& b, size_t off, size_t len) {
     }
     len = std::min(len, b.size() - off);
     bytes res{bytes::initialized_later(), MD5_DIGEST_LENGTH};
+#if OPENSSL_VERSION_NUMBER >= (3<<28)
+    EVP_MD_CTX *md5 = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(md5, EVP_md5(), nullptr);
+    EVP_DigestUpdate(md5, b.data() + off, len);
+    EVP_DigestFinal_ex(md5, reinterpret_cast<uint8_t *>(res.data()), nullptr);
+    EVP_MD_CTX_free(md5);
+#else
     MD5(reinterpret_cast<const uint8_t*>(b.data() + off), len, reinterpret_cast<uint8_t *>(res.data()));
+#endif
     return res;
 }
 
