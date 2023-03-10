@@ -152,12 +152,11 @@ bytes calculate_sha256(const bytes& b, size_t off, size_t len) {
 bytes hmac_sha256(bytes_view msg, bytes_view key) {
     bytes res{bytes::initialized_later(), SHA256_DIGEST_LENGTH};
 
-    std::unique_ptr<HMAC_CTX, void (*)(HMAC_CTX*)> ctxt(HMAC_CTX_new(), &HMAC_CTX_free);
-
-    HMAC_Init_ex(ctxt.get(), key.data(), static_cast<int>(key.size()), EVP_sha256(), nullptr);
-    HMAC_Update(ctxt.get(), reinterpret_cast<const uint8_t*>(msg.data()), msg.size());
     unsigned length;
-    HMAC_Final(ctxt.get(), reinterpret_cast<uint8_t*>(res.data()), &length);
+    HMAC(EVP_sha256(),
+         key.data(), key.size(),
+         reinterpret_cast<const uint8_t*>(msg.data()), msg.size(),
+         reinterpret_cast<uint8_t*>(res.data()), &length);
     return res;
 }
 
