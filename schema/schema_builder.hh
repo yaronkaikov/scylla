@@ -246,10 +246,6 @@ public:
         return *this;
     }
 
-    bool get_in_memory() const {
-        return _raw._in_memory;
-    }
-
     class default_names {
     public:
         default_names(const schema_builder&);

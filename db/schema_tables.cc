@@ -3112,7 +3112,11 @@ schema_ptr create_table_from_mutations(const schema_ctxt& ctxt, schema_mutations
         if (!table_rs.empty()) {
             query::result_set_row table_row = table_rs.row(0);
             auto in_mem = table_row.get<bool>("in_memory");
-            builder.set_in_memory(in_mem.value_or(false));
+            auto in_mem_enabled = in_mem.value_or(false);
+            if (in_mem_enabled) {
+                slogger.warn("Support for in_memory tables has been deprecated.");
+            }
+            builder.set_in_memory(in_mem_enabled);
         }
     }
     v3_columns columns(std::move(column_defs), is_dense, is_compound);
