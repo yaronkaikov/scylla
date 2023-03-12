@@ -58,10 +58,6 @@ namespace mc {
 class writer;
 }
 
-namespace mx {
-class partition_reversing_data_source_impl;
-}
-
 namespace fs = std::filesystem;
 
 extern logging::logger sstlog;
@@ -181,9 +177,9 @@ public:
         }
     };
 
-    static component_type component_from_sstring(version_types version, sstring& s);
-    static version_types version_from_sstring(sstring& s);
-    static format_types format_from_sstring(sstring& s);
+    static component_type component_from_sstring(version_types version, const sstring& s);
+    static version_types version_from_sstring(const sstring& s);
+    static format_types format_from_sstring(const sstring& s);
     static sstring component_basename(const sstring& ks, const sstring& cf, version_types version, generation_type generation,
                                       format_types format, component_type component);
     static sstring component_basename(const sstring& ks, const sstring& cf, version_types version, generation_type generation,
@@ -522,8 +518,8 @@ private:
 
     size_t sstable_buffer_size;
 
-    static std::unordered_map<version_types, sstring, enum_hash<version_types>> _version_string;
-    static std::unordered_map<format_types, sstring, enum_hash<format_types>> _format_string;
+    static const std::unordered_map<version_types, sstring, enum_hash<version_types>> _version_string;
+    static const std::unordered_map<format_types, sstring, enum_hash<format_types>> _format_string;
 
     std::unordered_set<component_type, enum_hash<component_type>> _recognized_components;
     std::vector<sstring> _unrecognized_components;
@@ -920,14 +916,10 @@ public:
     // will then re-export as public every method it needs.
     friend class test;
 
-    friend class components_writer;
-    friend class sstable_writer;
     friend class mc::writer;
     friend class index_reader;
     friend class promoted_index;
-    friend class compaction;
     friend class sstables_manager;
-    friend class mx::partition_reversing_data_source_impl;
     template <typename DataConsumeRowsContext>
     friend std::unique_ptr<DataConsumeRowsContext>
     data_consume_rows(const schema&, shared_sstable, typename DataConsumeRowsContext::consumer&, disk_read_range, uint64_t);
