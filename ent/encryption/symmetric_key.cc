@@ -24,14 +24,24 @@
 #include "symmetric_key.hh"
 #include "utils/hash.hh"
 
-static const bool inited = [] {
-    OpenSSL_add_all_ciphers();
+namespace {
+struct openssl_env {
+    OSSL_PROVIDER* legacy_provider = nullptr;
+    OSSL_PROVIDER* default_provider = nullptr;
+    openssl_env() {
+        OpenSSL_add_all_ciphers();
 #if OPENSSL_VERSION_NUMBER >= (3<<28)
-    OSSL_PROVIDER_load(NULL, "legacy");
-    OSSL_PROVIDER_load(NULL, "default");
+        legacy_provider = OSSL_PROVIDER_load(NULL, "legacy");
+        default_provider = OSSL_PROVIDER_load(NULL, "default");
 #endif
-    return true;
-}();
+    }
+    ~openssl_env() {
+        OSSL_PROVIDER_unload(legacy_provider);
+        OSSL_PROVIDER_unload(default_provider);
+    }
+};
+static const openssl_env ossl_env;
+}
 
 std::ostream& encryption::operator<<(std::ostream& os, const key_info& info) {
     return os << info.alg << ":" << info.len;

@@ -131,7 +131,15 @@ bytes calculate_md5(const bytes& b, size_t off, size_t len) {
     }
     len = std::min(len, b.size() - off);
     bytes res{bytes::initialized_later(), MD5_DIGEST_LENGTH};
+#if OPENSSL_VERSION_NUMBER >= (3<<28)
+    EVP_MD_CTX *md5 = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(md5, EVP_md5(), nullptr);
+    EVP_DigestUpdate(md5, b.data() + off, len);
+    EVP_DigestFinal_ex(md5, reinterpret_cast<uint8_t *>(res.data()), nullptr);
+    EVP_MD_CTX_free(md5);
+#else
     MD5(reinterpret_cast<const uint8_t*>(b.data() + off), len, reinterpret_cast<uint8_t *>(res.data()));
+#endif
     return res;
 }
 
@@ -152,12 +160,11 @@ bytes calculate_sha256(const bytes& b, size_t off, size_t len) {
 bytes hmac_sha256(bytes_view msg, bytes_view key) {
     bytes res{bytes::initialized_later(), SHA256_DIGEST_LENGTH};
 
-    std::unique_ptr<HMAC_CTX, void (*)(HMAC_CTX*)> ctxt(HMAC_CTX_new(), &HMAC_CTX_free);
-
-    HMAC_Init_ex(ctxt.get(), key.data(), static_cast<int>(key.size()), EVP_sha256(), nullptr);
-    HMAC_Update(ctxt.get(), reinterpret_cast<const uint8_t*>(msg.data()), msg.size());
     unsigned length;
-    HMAC_Final(ctxt.get(), reinterpret_cast<uint8_t*>(res.data()), &length);
+    HMAC(EVP_sha256(),
+         key.data(), key.size(),
+         reinterpret_cast<const uint8_t*>(msg.data()), msg.size(),
+         reinterpret_cast<uint8_t*>(res.data()), &length);
     return res;
 }
 
