@@ -6,6 +6,7 @@ from datetime import date
 
 from sphinx_scylladb_theme.utils import multiversion_regex_builder
 from recommonmark.transform import AutoStructify
+from redirects_cli import cli as redirects_cli
 
 sys.path.insert(0, os.path.abspath(".."))
 
@@ -44,7 +45,7 @@ extensions = [
 source_suffix = [".rst", ".md"]
 
 # The master toctree document.
-master_doc = "index"
+master_doc = "overview"
 
 # General information about the project.
 project = "ScyllaDB Enterprise"
@@ -53,7 +54,7 @@ author = u"ScyllaDB Project Contributors"
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'lib', 'lib64','**/_common/*', 'README.md', 'index.md', '.git', '.github', '_utils', 'rst_include', 'venv', 'dev']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'lib', 'lib64','**/_common/*', 'README.md', 'index.md', '.git', '.github', '_utils', 'rst_include', 'venv', 'dev', 'index.rst']
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = "sphinx"
@@ -130,6 +131,14 @@ html_baseurl = BASE_URL
 # Dictionary of values to pass into the template engine’s context for all pages
 html_context = {"html_baseurl": html_baseurl}
 
+def build_finished(app, exception):
+    version_name = os.getenv("SPHINX_MULTIVERSION_NAME", "")
+    redirect_to = '/overview/index.html'
+    if version_name:
+        redirect_to = "/" + version_name +'/overview.html'
+    out_file = app.outdir +'/index.html'
+    redirects_cli.create(redirect_to=redirect_to,out_file=out_file)
+
 
 # -- Initialize Sphinx ----------------------------------------------
 def builder_inited(app):
@@ -148,3 +157,6 @@ def setup(sphinx):
         'enable_eval_rst': True,
     }, True)
     sphinx.add_transform(AutoStructify)
+
+    # Redirect index.html to overivew.html
+    sphinx.connect('build-finished', build_finished)
