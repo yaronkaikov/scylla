@@ -13,13 +13,13 @@
 #include <iosfwd>
 #include "replica/database_fwd.hh"
 #include "dht/i_partitioner.hh"
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include "encoding_stats.hh"
 #include "dirty_memory_manager.hh"
 #include "db/commitlog/replay_position.hh"
 #include "db/commitlog/rp_set.hh"
 #include "utils/extremum_tracking.hh"
-#include "mutation_cleaner.hh"
+#include "mutation/mutation_cleaner.hh"
 #include "sstables/types.hh"
 #include "utils/double-decker.hh"
 #include "readers/empty_v2.hh"
@@ -54,7 +54,7 @@ public:
     memtable_entry(schema_ptr s, dht::decorated_key key, mutation_partition p)
         : _schema(std::move(s))
         , _key(std::move(key))
-        , _pe(std::move(p))
+        , _pe(*_schema, std::move(p))
     { }
 
     memtable_entry(memtable_entry&& o) noexcept;

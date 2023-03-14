@@ -8,7 +8,7 @@
  * SPDX-License-Identifier: (ScyllaDB-Proprietary and Apache-2.0)
  */
 #include <seastar/core/metrics.hh>
-#include "types.hh"
+#include "types/types.hh"
 #include "tracing/trace_keyspace_helper.hh"
 #include "cql3/statements/batch_statement.hh"
 #include "cql3/statements/modification_statement.hh"

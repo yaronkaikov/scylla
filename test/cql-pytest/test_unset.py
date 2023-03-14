@@ -25,6 +25,11 @@ def table2(cql, test_keyspace):
     with new_test_table(cql, test_keyspace, "p int, c int, PRIMARY KEY (p, c)") as table:
         yield table
 
+@pytest.fixture(scope="module")
+def table3(cql, test_keyspace):
+    with new_test_table(cql, test_keyspace, "p int, c int, r int, PRIMARY KEY (p, c)") as table:
+        yield table
+
 # A basic test that in a prepared statement with three assignments, one
 # bound by an UNSET_VALUE is simply not done, but the other ones are.
 # Try all 2^3 combinations of a 3 column updates with each one set to either
@@ -110,6 +115,10 @@ def test_unset_list_append(cql, table1, cassandra_bug):
 
 # According to Cassandra's NEWS.txt, "an unset bind ttl is treated as
 # 'unlimited'". It shouldn't skip the write.
+# Note that the NEWS.txt is not accurate: An unset ttl isn't really treated
+# as unlimited, but rather as the default ttl set on the table. The default
+# ttl is usually unlimited, but not always. We test that case in
+# test_ttl.py::test_default_ttl_unset()
 def test_unset_ttl(cql, table1):
     p = unique_key_int()
     # First write using a normal TTL:
@@ -173,3 +182,48 @@ def test_unset_where_regular(cql, table1):
 
 # TODO: check that (according to NEWS.txt documentation): "Unset tuple field,
 # UDT field and map key are not allowed.".
+
+# Although UNSET_VALUE is designed to skip part of a SET, it is not designed
+# to skip an entire write which uses a an UNSET_VALUE in its WHERE clause -
+# this should be treated as an error, not a silent skip.
+#
+# As in test_unset_where_clustering() above (the SELECT version of this test)
+# we need to check the UNSET_VALUE on the clustering key because if we try
+# an UNSET_VALUE on the partition key, the Python driver will refuse to
+# send the request (it uses the partition key to decide which node to send
+# the request).
+def test_unset_insert_where(cql, table2):
+    p = unique_key_int()
+    stmt = cql.prepare(f'INSERT INTO {table2} (p, c) VALUES ({p}, ?)')
+    with pytest.raises(InvalidRequest, match="unset"):
+        cql.execute(stmt, [UNSET_VALUE])
+
+# Similar to test_unset_insert_where() above, just use an LWT write ("IF
+# NOT EXISTS"). Test that using an UNSET_VALUE in an LWT condtion causes
+# a clear error, not silent skip and not a crash as in issue #13001.
+def test_unset_insert_where_lwt(cql, table2):
+    p = unique_key_int()
+    stmt = cql.prepare(f'INSERT INTO {table2} (p, c) VALUES ({p}, ?) IF NOT EXISTS')
+    with pytest.raises(InvalidRequest, match="unset"):
+        cql.execute(stmt, [UNSET_VALUE])
+
+# Like test_unset_insert_where, but using UPDATE
+# Python driver doesn't allow sending an UNSET_VALUE for the partition key,
+# so only the clustering key is tested.
+def test_unset_update_where(cql, table3):
+    stmt = cql.prepare(f"UPDATE {table3} SET r = 42 WHERE p = 0 AND c = ?")
+
+    with pytest.raises(InvalidRequest, match="unset"):
+        cql.execute(stmt, [UNSET_VALUE])
+
+# Like test_unset_insert_where_lwt, but using UPDATE
+# Python driver doesn't allow sending an UNSET_VALUE for the partition key,
+# so only the clustering key is tested.
+def test_unset_update_where_lwt(cql, table3):
+    stmt = cql.prepare(f"UPDATE {table3} SET r = 42 WHERE p = 0 AND c = ? IF r = ?")
+
+    with pytest.raises(InvalidRequest, match="unset"):
+        cql.execute(stmt, [UNSET_VALUE, 2])
+
+    with pytest.raises(InvalidRequest, match="unset"):
+        cql.execute(stmt, [1, UNSET_VALUE])

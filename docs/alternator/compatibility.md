@@ -161,6 +161,10 @@ events appear in the Streams API as normal deletions - without the
 distinctive marker on deletions which are really expirations.
 See <https://github.com/scylladb/scylla/issues/5060>.
 
+<!--- REMOVE IN FUTURE VERSIONS - Remove the note below in version 5.3/2023.1 -->
+
+> **Note** This feature is experimental in versions earlier than ScyllaDB Open Source 5.2 and ScyllaDB Enterprise 2022.2.
+
 ---
 
 
@@ -186,6 +190,7 @@ experimental:
   Alternator streams also differ in some respects from DynamoDB Streams:
   * The number of separate "shards" in Alternator's streams is significantly
     larger than is typical on DynamoDB.
+    <https://github.com/scylladb/scylla/issues/13080>
   * While in DynamoDB data usually appears in the stream less than a second
     after it was written, in Alternator Streams there is currently a 10
     second delay by default.
@@ -267,7 +272,7 @@ they should be easy to detect. Here is a list of these unimplemented features:
   estimates, and also part of the information about indexes enabled on 
   the table.
   <https://github.com/scylladb/scylla/issues/5013>
-  <https://github.com/scylladb/scylla/issues/5026>
+  <https://github.com/scylladb/scylla/issues/5320>
   <https://github.com/scylladb/scylla/issues/7550>
   <https://github.com/scylladb/scylla/issues/7551>
 

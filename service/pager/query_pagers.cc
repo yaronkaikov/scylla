@@ -15,7 +15,7 @@
 #include "cql3/restrictions/statement_restrictions.hh"
 #include "log.hh"
 #include "service/storage_proxy.hh"
-#include "to_string.hh"
+#include "utils/to_string.hh"
 #include "utils/result_combinators.hh"
 #include "view_info.hh"
 #include "db/view/delete_ghost_rows_visitor.hh"
@@ -300,7 +300,7 @@ public:
     virtual ~ghost_row_deleting_query_pager() {}
 
     virtual future<result<>> fetch_page_result(cql3::selection::result_set_builder& builder, uint32_t page_size, gc_clock::time_point now, db::timeout_clock::time_point timeout) override {
-        return do_fetch_page(page_size, now, timeout).then(utils::result_wrap([this, &builder, page_size, now] (service::storage_proxy::coordinator_query_result qr) {
+        return do_fetch_page(page_size, now, timeout).then(utils::result_wrap([this, page_size, now] (service::storage_proxy::coordinator_query_result qr) {
             _last_replicas = std::move(qr.last_replicas);
             _query_read_repair_decision = qr.read_repair_decision;
             qr.query_result->ensure_counts();

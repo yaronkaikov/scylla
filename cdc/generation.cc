@@ -14,7 +14,7 @@
 #include <seastar/core/coroutine.hh>
 
 #include "keys.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "replica/database.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
@@ -106,18 +106,6 @@ stream_id::stream_id(bytes b)
 
 bool stream_id::is_set() const {
     return !_value.empty();
-}
-
-bool stream_id::operator==(const stream_id& o) const {
-    return _value == o._value;
-}
-
-bool stream_id::operator!=(const stream_id& o) const {
-    return !(*this == o);
-}
-
-bool stream_id::operator<(const stream_id& o) const {
-    return _value < o._value;
 }
 
 static int64_t bytes_to_int64(bytes_view b, size_t offset) {

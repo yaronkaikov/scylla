@@ -7,7 +7,7 @@
  */
 
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 
 #include "sstables/sstable_set_impl.hh"
 #include "sstables/shared_sstable.hh"
@@ -28,12 +28,12 @@ static sstables::sstable_set make_sstable_set(schema_ptr schema, lw_shared_ptr<s
 }
 
 SEASTAR_TEST_CASE(test_sstables_sstable_set_read_modify_write) {
-    return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
+    return test_env::do_with_async([] (test_env& env) {
         simple_schema ss;
         auto s = ss.schema();
-        fs::path tmp(tmpdir_path);
+        fs::path tmp = env.tempdir().path();
 
-        auto pk = ss.make_pkey(make_local_key(s));
+        auto pk = tests::generate_partition_key(s);
         auto mut = mutation(s, pk);
         ss.add_row(mut, ss.make_ckey(0), "val");
         int gen = 1;
@@ -53,18 +53,16 @@ SEASTAR_TEST_CASE(test_sstables_sstable_set_read_modify_write) {
         ss2->insert(sst2);
         BOOST_REQUIRE_EQUAL(ss2->all()->size(), 2);
         BOOST_REQUIRE_EQUAL(ss1->all()->size(), 1);
-
-        return make_ready_future<>();
     });
 }
 
 SEASTAR_TEST_CASE(test_time_series_sstable_set_read_modify_write) {
-    return test_setup::do_with_tmp_directory([] (test_env& env, sstring tmpdir_path) {
+    return test_env::do_with_async([] (test_env& env) {
         simple_schema ss;
         auto s = ss.schema();
-        fs::path tmp(tmpdir_path);
+        fs::path tmp = env.tempdir().path();
 
-        auto pk = ss.make_pkey(make_local_key(s));
+        auto pk = tests::generate_partition_key(s);
         auto mut = mutation(s, pk);
         ss.add_row(mut, ss.make_ckey(0), "val");
         int gen = 1;
@@ -85,7 +83,5 @@ SEASTAR_TEST_CASE(test_time_series_sstable_set_read_modify_write) {
         ss2->insert(sst2);
         BOOST_REQUIRE_EQUAL(ss2->all()->size(), 2);
         BOOST_REQUIRE_EQUAL(ss1->all()->size(), 1);
-
-        return make_ready_future<>();
     });
 }

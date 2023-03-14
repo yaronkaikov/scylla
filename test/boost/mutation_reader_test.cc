@@ -17,7 +17,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/util/closeable.hh>
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/mutation_assertions.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
@@ -33,18 +33,19 @@
 #include "test/lib/random_utils.hh"
 #include "test/lib/simple_position_reader_queue.hh"
 #include "test/lib/fragment_scatterer.hh"
+#include "test/lib/key_utils.hh"
 
 #include "dht/sharder.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "cell_locking.hh"
 #include "sstables/sstables.hh"
 #include "sstables/sstable_set_impl.hh"
 #include "replica/database.hh"
 #include "partition_slice_builder.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "service/priority_manager.hh"
 #include "utils/ranges.hh"
-#include "mutation_rebuilder.hh"
+#include "mutation/mutation_rebuilder.hh"
 
 #include <boost/range/algorithm/sort.hpp>
 #include "readers/from_mutations_v2.hh"
@@ -1099,7 +1100,7 @@ SEASTAR_TEST_CASE(test_combined_reader_slicing_with_overlapping_range_tombstones
         auto rt1 = ss.make_range_tombstone(ss.make_ckey_range(1, 10));
         auto rt2 = ss.make_range_tombstone(ss.make_ckey_range(1, 5)); // rt1 + rt2 = {[1, 5], (5, 10]}
 
-        mutation m1 = ss.new_mutation(make_local_key(s));
+        mutation m1(ss.schema(), tests::generate_partition_key(ss.schema()));
         m1.partition().apply_delete(*s, rt1);
         mutation m2 = m1;
         m2.partition().apply_delete(*s, rt2);
@@ -1370,7 +1371,7 @@ SEASTAR_TEST_CASE(test_trim_clustering_row_ranges_to) {
             BOOST_FAIL(fmt::format("Unexpected result\nexpected {}\ngot {}\ncalled from {}:{}", expected_ranges, actual_ranges, sl.file_name(), sl.line()));
         }
     };
-    const auto check_reversed = [&schema, &check] (std::vector<range> ranges, key key, std::vector<range> output_ranges, bool reversed = false,
+    const auto check_reversed = [&check] (std::vector<range> ranges, key key, std::vector<range> output_ranges, bool reversed = false,
             std::source_location sl = std::source_location::current()) {
         return check(std::move(ranges), std::move(key), std::move(output_ranges), true, sl);
     };
@@ -2060,7 +2061,6 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_destroyed_with_pending
 
         auto reader_sharder_remote_controls__ = prepare_multishard_reader_for_read_ahead_test(s, make_reader_permit(env));
         auto&& reader = reader_sharder_remote_controls__.reader;
-        auto&& sharder = reader_sharder_remote_controls__.sharder;
         auto&& remote_controls = reader_sharder_remote_controls__.remote_controls;
 
         // This will read shard 0's buffer only
@@ -2118,7 +2118,6 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_fast_forwarded_with_pe
 
         auto reader_sharder_remote_controls_pr = prepare_multishard_reader_for_read_ahead_test(s, make_reader_permit(env));
         auto&& reader = reader_sharder_remote_controls_pr.reader;
-        auto&& sharder = reader_sharder_remote_controls_pr.sharder;
         auto&& remote_controls = reader_sharder_remote_controls_pr.remote_controls;
         auto&& pr = reader_sharder_remote_controls_pr.pr;
 
@@ -2214,7 +2213,7 @@ SEASTAR_THREAD_TEST_CASE(test_multishard_combining_reader_next_partition) {
         // single fragment can fit into it at a time.
         const auto max_buffer_size = size_t{1};
 
-        auto factory = [db = &env.db(), max_buffer_size] (
+        auto factory = [db = &env.db()] (
                 schema_ptr schema,
                 reader_permit permit,
                 const dht::partition_range& range,
@@ -2979,7 +2978,7 @@ SEASTAR_THREAD_TEST_CASE(test_evictable_reader_self_validation) {
     auto last_fragment_position = position_in_partition(first_buffer.back().position());
     first_buffer.emplace_back(*s.schema(), permit, s.make_row_v2(permit, s.make_ckey(second_buffer_ck), "v"));
 
-    auto make_second_buffer = [&s, permit, &max_buffer_size, second_buffer_ck] (dht::decorated_key pkey, std::optional<int> first_ckey = {}) mutable {
+    auto make_second_buffer = [&s, permit, &max_buffer_size] (dht::decorated_key pkey, std::optional<int> first_ckey = {}) mutable {
         auto ckey = first_ckey ? *first_ckey : second_buffer_ck;
         std::deque<mutation_fragment_v2> second_buffer;
         second_buffer.emplace_back(*s.schema(), permit, partition_start{std::move(pkey), {}});
@@ -3682,10 +3681,10 @@ struct clustering_order_merger_test_generator {
     };
 
     schema_ptr _s;
-    partition_key _pk;
+    dht::decorated_key _pk;
 
-    clustering_order_merger_test_generator(std::optional<sstring> pk = std::nullopt)
-        : _s(make_schema()), _pk(partition_key::from_single_value(*_s, utf8_type->decompose(pk ? *pk : make_local_key(make_schema()))))
+    clustering_order_merger_test_generator(std::optional<dht::decorated_key> pk = std::nullopt)
+        : _s(make_schema()), _pk(pk ? *pk : tests::generate_partition_key(_s))
     {}
 
     static schema_ptr make_schema() {
@@ -3830,7 +3829,7 @@ SEASTAR_THREAD_TEST_CASE(test_clustering_order_merger_in_memory) {
 
 static future<> do_test_clustering_order_merger_sstable_set(bool reversed) {
   return sstables::test_env::do_with_async([reversed] (sstables::test_env& env) {
-    auto pkeys = make_local_keys(2, clustering_order_merger_test_generator::make_schema());
+    auto pkeys = tests::generate_partition_keys(2, clustering_order_merger_test_generator::make_schema());
     clustering_order_merger_test_generator g(pkeys[0]);
     auto query_schema = g._s;
     auto table_schema = g._s;
@@ -3846,7 +3845,7 @@ static future<> do_test_clustering_order_merger_sstable_set(bool reversed) {
         return make_flat_mutation_reader_from_mutations_v2(query_schema, env.make_reader_permit(), {std::move(mut)}, query_slice, fwd);
     };
 
-    auto pr = dht::partition_range::make_singular(dht::ring_position(dht::decorate_key(*query_schema, g._pk)));
+    auto pr = dht::partition_range::make_singular(dht::ring_position(g._pk));
     auto make_tested = [&env, query_schema, pk = g._pk, &pr, &query_slice, reversed]
             (const time_series_sstable_set& sst_set,
                 const std::unordered_set<int64_t>& included_gens, streamed_mutation::forwarding fwd) {
@@ -3857,7 +3856,7 @@ static future<> do_test_clustering_order_merger_sstable_set(bool reversed) {
                                           query_slice, seastar::default_priority_class(), nullptr, fwd);
             },
             [included_gens] (const sstable& sst) { return included_gens.contains(generation_value(sst.generation())); },
-            pk, query_schema, permit, fwd, reversed);
+            pk.key(), query_schema, permit, fwd, reversed);
         return make_clustering_combined_reader(query_schema, permit, fwd, std::move(q));
     };
 
@@ -3894,8 +3893,8 @@ static future<> do_test_clustering_order_merger_sstable_set(bool reversed) {
                 // We want to have an sstable that won't return any fragments when we query it
                 // for our partition (not even `partition_start`). For that we create an sstable
                 // with a different partition.
-                auto pk = partition_key::from_single_value(*table_schema, utf8_type->decompose(pkeys[1]));
-                assert(pk != g._pk);
+                auto pk = pkeys[1];
+                assert(!pk.equal(*g._s, g._pk));
 
                 sst_set.insert(make_sstable_containing(std::move(sst_factory), {mutation(table_schema, pk)}));
             }

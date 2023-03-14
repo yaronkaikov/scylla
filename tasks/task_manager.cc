@@ -145,7 +145,7 @@ void task_manager::task::start() {
         // Background fiber does not capture task ptr, so the task can be unregistered and destroyed independently in the foreground.
         // After the ttl expires, the task id will be used to unregister the task if that didn't happen in any other way.
         (void)with_gate(_impl->_module->async_gate(), [f = done(), module = _impl->_module, id = id()] () mutable {
-            return std::move(f).finally([module, id] {
+            return std::move(f).finally([module] {
                 return sleep_abortable(module->get_task_manager().get_task_ttl(), module->abort_source());
             }).then_wrapped([module, id] (auto f) {
                 f.ignore_ready_future();
@@ -278,10 +278,18 @@ future<task_manager::task_ptr> task_manager::module::make_task(task::task_impl_p
 
 task_manager::task_manager(config cfg, class abort_source& as) noexcept
     : _cfg(std::move(cfg))
-    , _as(as)
     , _update_task_ttl_action([this] { return update_task_ttl(); })
     , _task_ttl_observer(_cfg.task_ttl.observe(_update_task_ttl_action.make_observer()))
     , _task_ttl(_cfg.task_ttl.get())
+{
+    _abort_subscription = as.subscribe([this] () noexcept {
+        _as.request_abort();
+    });
+}
+
+task_manager::task_manager() noexcept
+    : _update_task_ttl_action([this] { return update_task_ttl(); })
+    , _task_ttl_observer(_cfg.task_ttl.observe(_update_task_ttl_action.make_observer()))
 {}
 
 task_manager::modules& task_manager::get_modules() noexcept {

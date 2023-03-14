@@ -32,6 +32,7 @@
 #include "compaction.hh"
 #include "compaction_weight_registration.hh"
 #include "compaction_backlog_manager.hh"
+#include "compaction/task_manager_module.hh"
 #include "strategy_control.hh"
 #include "backlog_controller.hh"
 #include "seastarx.hh"
@@ -40,6 +41,7 @@
 
 namespace db {
 class system_keyspace;
+class compaction_history_entry;
 }
 
 class compacting_sstable_registration;
@@ -244,6 +246,7 @@ public:
     class compaction_manager_test_task;
 
 private:
+    shared_ptr<compaction::task_manager_module> _task_manager_module;
     // compaction manager may have N fibers to allow parallel compaction per shard.
     std::list<shared_ptr<task>> _tasks;
 
@@ -378,13 +381,17 @@ private:
 
     // This constructor is suposed to only be used for testing so lets be more explicit
     // about invoking it. Ref #10146
-    compaction_manager();
+    compaction_manager(tasks::task_manager& tm);
 public:
-    compaction_manager(config cfg, abort_source& as);
+    compaction_manager(config cfg, abort_source& as, tasks::task_manager& tm);
     ~compaction_manager();
     class for_testing_tag{};
     // An inline constructor for testing
-    compaction_manager(for_testing_tag) : compaction_manager() {}
+    compaction_manager(tasks::task_manager& tm, for_testing_tag) : compaction_manager(tm) {}
+
+    compaction::task_manager_module& get_task_manager_module() noexcept {
+        return *_task_manager_module;
+    }
 
     const scheduling_group& compaction_sg() const noexcept {
         return _cfg.compaction_sched_group;
@@ -419,6 +426,9 @@ public:
     // The compaction manager is still alive after drain but it will not accept new compactions
     // unless it is moved back to enabled state.
     future<> drain();
+
+    using compaction_history_consumer = noncopyable_function<future<>(const db::compaction_history_entry&)>;
+    future<> get_compaction_history(compaction_history_consumer&& f);
 
     // Submit a table to be compacted.
     void submit(compaction::table_state& t);

@@ -18,13 +18,14 @@
 
 #include "db/view/view_update_generator.hh"
 #include "service/qos/service_level_controller.hh"
+#include "replica/database.hh"
 #include "transport/messages/result_message_base.hh"
 #include "cql3/query_options_fwd.hh"
 #include "cql3/values.hh"
 #include "cql3/prepared_statements_cache.hh"
 #include "cql3/query_processor.hh"
 #include "bytes.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "test/lib/eventually.hh"
 
 namespace replica {
@@ -37,6 +38,7 @@ class batchlog_manager;
 
 namespace db::view {
 class view_builder;
+class view_update_generator;
 }
 
 namespace auth {
@@ -170,7 +172,7 @@ public:
 
     virtual sharded<service::raft_group_registry>& get_raft_group_registry() = 0;
 
-    virtual db::system_keyspace& get_system_keyspace() = 0;
+    virtual sharded<db::system_keyspace>& get_system_keyspace() = 0;
 
     data_dictionary::database data_dictionary();
 

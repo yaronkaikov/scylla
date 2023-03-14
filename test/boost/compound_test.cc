@@ -6,14 +6,14 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/random_utils.hh"
 
 #include "compound.hh"
 #include "compound_compat.hh"
 #include "test/boost/range_assert.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "dht/murmur3_partitioner.hh"
 
 static std::vector<managed_bytes> to_bytes_vec(std::vector<sstring> values) {

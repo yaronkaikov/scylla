@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
 #include "transport/messages/result_message.hh"
@@ -37,7 +37,7 @@ SEASTAR_TEST_CASE(test_secondary_index_regular_column_query) {
             return e.execute_cql("INSERT INTO users (userid, name, email, country) VALUES (3, 'Channa Devote', 'cdevote14@marriott.com', 'Denmark');").discard_result();
         }).then([&e] {
             return e.execute_cql("SELECT email FROM users WHERE country = 'France';");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
                 { utf8_type->decompose(sstring("dcurrorw@techcrunch.com")) },
                 { utf8_type->decompose(sstring("beassebyv@house.gov")) },
@@ -60,18 +60,18 @@ SEASTAR_TEST_CASE(test_secondary_index_clustering_key_query) {
             return e.execute_cql("INSERT INTO users (userid, name, email, country) VALUES (3, 'Channa Devote', 'cdevote14@marriott.com', 'Denmark');").discard_result();
         }).then([&e] {
             return e.execute_cql("SELECT email FROM users WHERE country = 'France';");
-        }).then([&e] (auto msg) {
+        }).then([] (auto msg) {
             assert_that(msg).is_rows().with_rows({
                 { utf8_type->decompose(sstring("dcurrorw@techcrunch.com")) },
                 { utf8_type->decompose(sstring("beassebyv@house.gov")) },
             });
         }).then([&e] {
             return e.execute_cql("select country from users where country='France' and country='Denmark'"); // #7772
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().is_empty();
         }).then([&e] {
             return e.execute_cql("select country from users where country='Denmark' and country='Denmark'");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({{utf8_type->decompose(sstring("Denmark"))}});
         });
     });
@@ -1575,13 +1575,13 @@ static const std::vector<std::vector<bytes_opt>> testset_pks = {
 };
 
 static const std::vector<int64_t> testset_tokens = {
-    { -7509452495886106294 },
-    { -4069959284402364209 },
-    { -3485513579396041028 },
-    { -3248873570005575792 },
-    { -2729420104000364805 },
-    { +2705480034054113608 },
-    { +9010454139840013625 },
+    -7509452495886106294,
+    -4069959284402364209,
+    -3485513579396041028,
+    -3248873570005575792,
+    -2729420104000364805,
+    +2705480034054113608,
+    +9010454139840013625,
 };
 
 // Ref: #3423 - rows should be returned in token order,

@@ -7,21 +7,21 @@
  */
 
 #include <seastar/util/defer.hh>
-#include <seastar/testing/thread_test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <string>
 #include <boost/range/adaptor/map.hpp>
 
 #include "cdc/log.hh"
 #include "cdc/cdc_extension.hh"
 #include "db/config.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "test/lib/cql_assertions.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/exception_utils.hh"
 #include "test/lib/log.hh"
 #include "transport/messages/result_message.hh"
 
-#include "types.hh"
+#include "types/types.hh"
 #include "types/tuple.hh"
 #include "types/map.hh"
 #include "types/list.hh"

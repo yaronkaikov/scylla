@@ -43,7 +43,8 @@ sstables::shared_sstable make_sstable_containing(std::function<sstables::shared_
         }
     }
     write_memtable_to_sstable_for_test(*mt, sst).get();
-    sst->open_data().get();
+    sstable_open_config cfg { .load_first_and_last_position_metadata = true };
+    sst->open_data(cfg).get();
 
     std::set<mutation, mutation_decorated_key_less_comparator> merged;
     for (auto&& m : muts) {
@@ -98,35 +99,6 @@ shared_sstable make_sstable_easy(test_env& env, const fs::path& path, lw_shared_
     return sst;
 }
 
-std::vector<std::pair<sstring, dht::token>>
-token_generation_for_shard(unsigned tokens_to_generate, unsigned shard,
-        unsigned ignore_msb, unsigned smp_count) {
-    unsigned tokens = 0;
-    unsigned key_id = 0;
-    std::vector<std::pair<sstring, dht::token>> key_and_token_pair;
-
-    key_and_token_pair.reserve(tokens_to_generate);
-    dht::murmur3_partitioner partitioner;
-    dht::sharder sharder(smp_count, ignore_msb);
-
-    while (tokens < tokens_to_generate) {
-        sstring key = to_sstring(key_id++);
-        dht::token token = create_token_from_key(partitioner, key);
-        if (shard != sharder.shard_of(token)) {
-            continue;
-        }
-        tokens++;
-        key_and_token_pair.emplace_back(key, token);
-    }
-    assert(key_and_token_pair.size() == tokens_to_generate);
-
-    std::sort(key_and_token_pair.begin(),key_and_token_pair.end(), [] (auto& i, auto& j) {
-        return i.second < j.second;
-    });
-
-    return key_and_token_pair;
-}
-
 future<compaction_result> compact_sstables(compaction_manager& cm, sstables::compaction_descriptor descriptor, table_state& table_s, std::function<shared_sstable()> creator, compaction_sstable_replacer_fn replacer,
                                            can_purge_tombstones can_purge) {
     descriptor.creator = [creator = std::move(creator)] (shard_id dummy) mutable {
@@ -146,10 +118,6 @@ future<compaction_result> compact_sstables(compaction_manager& cm, sstables::com
     co_return ret;
 }
 
-std::vector<std::pair<sstring, dht::token>> token_generation_for_current_shard(unsigned tokens_to_generate) {
-    return token_generation_for_shard(tokens_to_generate, this_shard_id());
-}
-
 static sstring toc_filename(const sstring& dir, schema_ptr schema, unsigned int generation, sstable_version_types v) {
     return sstable::filename(dir, schema->ks_name(), schema->cf_name(), v, generation_from_value(generation),
                              sstable_format_types::big, component_type::TOC);
@@ -165,7 +133,7 @@ future<shared_sstable> test_env::reusable_sst(schema_ptr schema, sstring dir, un
 }
 
 compaction_manager_for_testing::wrapped_compaction_manager::wrapped_compaction_manager(bool enabled)
-        : cm(compaction_manager::for_testing_tag{})
+        : cm(tm, compaction_manager::for_testing_tag{})
 {
     if (enabled) {
         cm.enable();

@@ -1313,7 +1313,7 @@ private:
                 if (index_position.start <= _context->position()) {
                     return make_ready_future<>();
                 }
-                return skip_to(idx.element_kind(), index_position.start).then([this, &idx] {
+                return skip_to(idx.element_kind(), index_position.start).then([this] {
                     _sst->get_stats().on_partition_seek();
                 });
             });
@@ -1465,7 +1465,7 @@ public:
         // If _ds is not created then next_partition() has no effect because there was no partition_start emitted yet.
     }
     virtual future<> fast_forward_to(position_range cr) override {
-        forward_buffer_to(cr.start());
+        clear_buffer();
         if (!_partition_finished) {
             _end_of_stream = false;
             return advance_context(_consumer.fast_forward_to(std::move(cr)));

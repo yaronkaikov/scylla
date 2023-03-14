@@ -36,6 +36,7 @@ bool manifest_json_filter(const fs::path&, const directory_entry& entry) {
 
 sstable_directory::components_lister::components_lister(std::filesystem::path dir)
         : _lister(dir, lister::dir_entry_types::of<directory_entry_type::regular>(), &manifest_json_filter)
+        , _state(std::make_unique<scan_state>())
 {
 }
 
@@ -58,17 +59,17 @@ sstable_directory::sstable_directory(sstables_manager& manager,
     , _sstable_dir(std::move(sstable_dir))
     , _io_priority(std::move(io_prio))
     , _error_handler_gen(error_handler_gen)
+    , _lister(_manager.get_components_lister(_sstable_dir))
     , _unshared_remote_sstables(smp::count)
 {}
 
-void
-sstable_directory::handle_component(scan_state& state, sstables::entry_descriptor desc, fs::path filename) {
+void sstable_directory::components_lister::handle(sstables::entry_descriptor desc, fs::path filename) {
     if ((generation_value(desc.generation) % smp::count) != this_shard_id()) {
         return;
     }
 
     dirlog.trace("for SSTable directory, scanning {}", filename);
-    state.generations_found.emplace(desc.generation, filename);
+    _state->generations_found.emplace(desc.generation, filename);
 
     switch (desc.component) {
     case component_type::TemporaryStatistics:
@@ -76,13 +77,13 @@ sstable_directory::handle_component(scan_state& state, sstables::entry_descripto
         // for instance on mutate_level. We should delete it - so we mark it for deletion
         // here, but just the component. The old statistics file should still be there
         // and we'll go with it.
-        _files_for_removal.insert(filename.native());
+        _state->files_for_removal.insert(filename.native());
         break;
     case component_type::TOC:
-        state.descriptors.emplace(desc.generation, std::move(desc));
+        _state->descriptors.emplace(desc.generation, std::move(desc));
         break;
     case component_type::TemporaryTOC:
-        state.temp_toc_found.push_back(std::move(desc));
+        _state->temp_toc_found.push_back(std::move(desc));
         break;
     default:
         // Do nothing, and will validate when trying to load the file.
@@ -165,10 +166,12 @@ sstable_directory::highest_version_seen() const {
     return _max_version_seen;
 }
 
-future<>
-sstable_directory::process_sstable_dir(process_flags flags) {
+future<> sstable_directory::process_sstable_dir(process_flags flags) {
     dirlog.debug("Start processing directory {} for SSTables", _sstable_dir);
+    return _lister->process(*this, _sstable_dir, flags);
+}
 
+future<> sstable_directory::components_lister::process(sstable_directory& directory, fs::path location, process_flags flags) {
     // It seems wasteful that each shard is repeating this scan, and to some extent it is.
     // However, we still want to open the files and especially call process_dir() in a distributed
     // fashion not to overload any shard. Also in the common case the SSTables will all be
@@ -181,25 +184,22 @@ sstable_directory::process_sstable_dir(process_flags flags) {
     // - If all shards scan in parallel, they can start loading sooner. That is faster than having
     //   a separate step to fetch all files, followed by another step to distribute and process.
 
-    scan_state state;
-
-    auto sstable_dir_lister = _manager.get_components_lister(_sstable_dir);
     std::exception_ptr ex;
     try {
         while (true) {
-            sstring name = co_await sstable_dir_lister.get();
+            sstring name = co_await get();
             if (name == "") {
                 break;
             }
-            auto comps = sstables::entry_descriptor::make_descriptor(_sstable_dir.native(), name);
-            handle_component(state, std::move(comps), _sstable_dir / name);
+            auto comps = sstables::entry_descriptor::make_descriptor(location.native(), name);
+            handle(std::move(comps), location / name);
         }
     } catch (...) {
         ex = std::current_exception();
     }
-    co_await sstable_dir_lister.close();
+    co_await close();
     if (ex) {
-        dirlog.debug("Could not process sstable directory {}: {}", _sstable_dir, ex);
+        dirlog.debug("Could not process sstable directory {}: {}", location, ex);
         // FIXME: waiting for https://github.com/scylladb/seastar/pull/1090
         // co_await coroutine::return_exception(std::move(ex));
         std::rethrow_exception(std::move(ex));
@@ -208,51 +208,54 @@ sstable_directory::process_sstable_dir(process_flags flags) {
     // Always okay to delete files with a temporary TOC. We want to do it before we process
     // the generations seen: it's okay to reuse those generations since the files will have
     // been deleted anyway.
-    for (auto& desc: state.temp_toc_found) {
-        auto range = state.generations_found.equal_range(desc.generation);
+    for (auto& desc: _state->temp_toc_found) {
+        auto range = _state->generations_found.equal_range(desc.generation);
         for (auto it = range.first; it != range.second; ++it) {
             auto& path = it->second;
             dirlog.trace("Scheduling to remove file {}, from an SSTable with a Temporary TOC", path.native());
-            _files_for_removal.insert(path.native());
+            _state->files_for_removal.insert(path.native());
         }
-        state.generations_found.erase(range.first, range.second);
-        state.descriptors.erase(desc.generation);
+        _state->generations_found.erase(range.first, range.second);
+        _state->descriptors.erase(desc.generation);
     }
 
-    _max_generation_seen =  boost::accumulate(state.generations_found | boost::adaptors::map_keys, generation_from_value(0), [] (generation_type a, generation_type b) {
+    directory._max_generation_seen =  boost::accumulate(_state->generations_found | boost::adaptors::map_keys, generation_from_value(0), [] (generation_type a, generation_type b) {
         return std::max<generation_type>(a, b);
     });
 
     dirlog.debug("After {} scanned, seen generation {}. {} descriptors found, {} different files found ",
-            _sstable_dir, _max_generation_seen, state.descriptors.size(), state.generations_found.size());
+            location, directory._max_generation_seen, _state->descriptors.size(), _state->generations_found.size());
 
     // _descriptors is everything with a TOC. So after we remove this, what's left is
     // SSTables for which a TOC was not found.
-    co_await parallel_for_each_restricted(state.descriptors, [this, flags, &state] (std::tuple<generation_type, sstables::entry_descriptor>&& t) {
+    co_await directory.parallel_for_each_restricted(_state->descriptors, [this, flags, &directory] (std::tuple<generation_type, sstables::entry_descriptor>&& t) {
         auto& desc = std::get<1>(t);
-        state.generations_found.erase(desc.generation);
+        _state->generations_found.erase(desc.generation);
         // This will try to pre-load this file and throw an exception if it is invalid
-        return process_descriptor(std::move(desc), flags);
+        return directory.process_descriptor(std::move(desc), flags);
     });
 
     // For files missing TOC, it depends on where this is coming from.
     // If scylla was supposed to have generated this SSTable, this is not okay and
     // we refuse to proceed. If this coming from, say, an import, then we just delete,
     // log and proceed.
-    for (auto& path : state.generations_found | boost::adaptors::map_values) {
+    for (auto& path : _state->generations_found | boost::adaptors::map_values) {
         if (flags.throw_on_missing_toc) {
-            throw sstables::malformed_sstable_exception(format("At directory: {}: no TOC found for SSTable {}!. Refusing to boot", _sstable_dir.native(), path.native()));
+            throw sstables::malformed_sstable_exception(format("At directory: {}: no TOC found for SSTable {}!. Refusing to boot", location.native(), path.native()));
         } else {
-            dirlog.info("Found incomplete SSTable {} at directory {}. Removing", path.native(), _sstable_dir.native());
-            _files_for_removal.insert(path.native());
+            dirlog.info("Found incomplete SSTable {} at directory {}. Removing", path.native(), location.native());
+            _state->files_for_removal.insert(path.native());
         }
     }
 }
 
-future<>
-sstable_directory::commit_directory_changes() {
+future<> sstable_directory::commit_directory_changes() {
+    return _lister->commit().finally([x = std::move(_lister)] {});
+}
+
+future<> sstable_directory::components_lister::commit() {
     // Remove all files scheduled for removal
-    return parallel_for_each(std::exchange(_files_for_removal, {}), [] (sstring path) {
+    return parallel_for_each(std::exchange(_state->files_for_removal, {}), [] (sstring path) {
         dirlog.info("Removing file {}", path);
         return remove_file(std::move(path));
     });
@@ -272,11 +275,16 @@ sstable_directory::move_foreign_sstables(sharded<sstable_directory>& source_dire
     });
 }
 
+future<shared_sstable> sstable_directory::load_foreign_sstable(foreign_sstable_open_info& info) {
+    auto sst = _manager.make_sstable(_schema, _sstable_dir.native(), info.generation, info.version, info.format, gc_clock::now(), _error_handler_gen);
+    co_await sst->load(std::move(info));
+    co_return sst;
+}
+
 future<>
 sstable_directory::load_foreign_sstables(sstable_info_vector info_vec) {
     return parallel_for_each_restricted(info_vec, [this] (sstables::foreign_sstable_open_info& info) {
-        auto sst = _manager.make_sstable(_schema, _sstable_dir.native(), info.generation, info.version, info.format, gc_clock::now(), _error_handler_gen);
-        return sst->load(std::move(info)).then([sst, this] {
+        return load_foreign_sstable(info).then([this] (auto sst) {
             _unshared_local_sstables.push_back(sst);
             return make_ready_future<>();
         });
@@ -284,28 +292,33 @@ sstable_directory::load_foreign_sstables(sstable_info_vector info_vec) {
 }
 
 future<>
-sstable_directory::remove_input_sstables_from_resharding(std::vector<sstables::shared_sstable> sstlist) {
-    dirlog.debug("Removing {} resharded SSTables", sstlist.size());
+sstable_directory::remove_sstables(std::vector<sstables::shared_sstable> sstlist) {
+    dirlog.debug("Removing {} SSTables", sstlist.size());
     return parallel_for_each(std::move(sstlist), [] (const sstables::shared_sstable& sst) {
-        dirlog.trace("Removing resharded SSTable {}", sst->get_filename());
+        dirlog.trace("Removing SSTable {}", sst->get_filename());
         return sst->unlink().then([sst] {});
     });
 }
 
 future<>
-sstable_directory::collect_output_sstables_from_resharding(std::vector<sstables::shared_sstable> resharded_sstables) {
-    dirlog.debug("Collecting {} resharded SSTables", resharded_sstables.size());
-    return parallel_for_each(std::move(resharded_sstables), [this] (sstables::shared_sstable sst) {
+sstable_directory::collect_output_unshared_sstables(std::vector<sstables::shared_sstable> resharded_sstables, can_be_remote remote_ok) {
+    dirlog.debug("Collecting {} output SSTables (remote={})", resharded_sstables.size(), remote_ok);
+    return parallel_for_each(std::move(resharded_sstables), [this, remote_ok] (sstables::shared_sstable sst) {
         auto shards = sst->get_shards_for_this_sstable();
         assert(shards.size() == 1);
         auto shard = shards[0];
 
         if (shard == this_shard_id()) {
-            dirlog.trace("Collected resharded SSTable {} already local", sst->get_filename());
+            dirlog.trace("Collected output SSTable {} already local", sst->get_filename());
             _unshared_local_sstables.push_back(std::move(sst));
             return make_ready_future<>();
         }
-        dirlog.trace("Collected resharded SSTable {} is remote. Storing it", sst->get_filename());
+
+        if (!remote_ok) {
+            return make_exception_future<>(std::runtime_error("Unexpected remote sstable"));
+        }
+
+        dirlog.trace("Collected output SSTable {} is remote. Storing it", sst->get_filename());
         return sst->get_open_info().then([this, shard, sst] (sstables::foreign_sstable_open_info info) {
             _unshared_remote_sstables[shard].push_back(std::move(info));
             return make_ready_future<>();
@@ -314,11 +327,11 @@ sstable_directory::collect_output_sstables_from_resharding(std::vector<sstables:
 }
 
 future<>
-sstable_directory::remove_input_sstables_from_reshaping(std::vector<sstables::shared_sstable> sstlist) {
+sstable_directory::remove_unshared_sstables(std::vector<sstables::shared_sstable> sstlist) {
     // When removing input sstables from reshaping: Those SSTables used to be in the unshared local
     // list. So not only do we have to remove them, we also have to update the list. Because we're
     // dealing with a vector it's easier to just reconstruct the list.
-    dirlog.debug("Removing {} reshaped SSTables", sstlist.size());
+    dirlog.debug("Removing {} unshared SSTables", sstlist.size());
     return do_with(std::move(sstlist), std::unordered_set<sstables::shared_sstable>(),
             [this] (std::vector<sstables::shared_sstable>& sstlist, std::unordered_set<sstables::shared_sstable>& exclude) {
 
@@ -336,115 +349,12 @@ sstable_directory::remove_input_sstables_from_reshaping(std::vector<sstables::sh
 
         // Do this last for exception safety. If there is an exception on unlink we
         // want to at least leave the SSTable unshared list in a sane state.
-        return parallel_for_each(std::move(sstlist), [] (sstables::shared_sstable sst) {
-            return sst->unlink();
-        }).then([] {
+        return remove_sstables(std::move(sstlist)).then([] {
             dirlog.debug("Finished removing all SSTables");
         });
     });
 }
 
-
-future<>
-sstable_directory::collect_output_sstables_from_reshaping(std::vector<sstables::shared_sstable> reshaped_sstables) {
-    dirlog.debug("Collecting {} reshaped SSTables", reshaped_sstables.size());
-    return parallel_for_each(std::move(reshaped_sstables), [this] (sstables::shared_sstable sst) {
-        _unshared_local_sstables.push_back(std::move(sst));
-        return make_ready_future<>();
-    });
-}
-
-future<uint64_t> sstable_directory::reshape(compaction_manager& cm, replica::table& table, sstables::compaction_sstable_creator_fn creator,
-                                            sstables::reshape_mode mode, sstable_filter_func_t sstable_filter)
-{
-    return do_with(uint64_t(0), std::move(sstable_filter), [this, &cm, &table, creator = std::move(creator), mode] (uint64_t& reshaped_size, sstable_filter_func_t& filter) mutable {
-        return repeat([this, &cm, &table, creator = std::move(creator), &reshaped_size, mode, &filter] () mutable {
-            auto reshape_candidates = boost::copy_range<std::vector<shared_sstable>>(_unshared_local_sstables
-                    | boost::adaptors::filtered([this, &filter] (const auto& sst) {
-                return filter(sst);
-            }));
-            auto desc = table.get_compaction_strategy().get_reshaping_job(std::move(reshape_candidates), table.schema(), _io_priority, mode);
-            if (desc.sstables.empty()) {
-                return make_ready_future<stop_iteration>(stop_iteration::yes);
-            }
-
-            if (!reshaped_size) {
-                dirlog.info("Table {}.{} with compaction strategy {} found SSTables that need reshape. Starting reshape process", table.schema()->ks_name(), table.schema()->cf_name(), table.get_compaction_strategy().name());
-            }
-
-            std::vector<sstables::shared_sstable> sstlist;
-            for (auto& sst : desc.sstables) {
-                reshaped_size += sst->data_size();
-                sstlist.push_back(sst);
-            }
-
-            desc.creator = creator;
-
-            return cm.run_custom_job(table.as_table_state(), compaction_type::Reshape, "Reshape compaction", [this, &table, sstlist = std::move(sstlist), desc = std::move(desc)] (sstables::compaction_data& info) mutable {
-                return sstables::compact_sstables(std::move(desc), info, table.as_table_state()).then([this, sstlist = std::move(sstlist)] (sstables::compaction_result result) mutable {
-                    return remove_input_sstables_from_reshaping(std::move(sstlist)).then([this, new_sstables = std::move(result.new_sstables)] () mutable {
-                        return collect_output_sstables_from_reshaping(std::move(new_sstables));
-                    });
-                });
-            }).then_wrapped([&table] (future<> f) {
-                try {
-                    f.get();
-                } catch (sstables::compaction_stopped_exception& e) {
-                    dirlog.info("Table {}.{} with compaction strategy {} had reshape successfully aborted.", table.schema()->ks_name(), table.schema()->cf_name(), table.get_compaction_strategy().name());
-                    return make_ready_future<stop_iteration>(stop_iteration::yes);
-                } catch (...) {
-                    dirlog.info("Reshape failed for Table {}.{} with compaction strategy {} due to {}", table.schema()->ks_name(), table.schema()->cf_name(), table.get_compaction_strategy().name(), std::current_exception());
-                    return make_ready_future<stop_iteration>(stop_iteration::yes);
-                }
-                return make_ready_future<stop_iteration>(stop_iteration::no);
-            });
-        }).then([&reshaped_size] {
-            return make_ready_future<uint64_t>(reshaped_size);
-        });
-    });
-}
-
-future<>
-sstable_directory::reshard(sstable_info_vector shared_info, compaction_manager& cm, replica::table& table,
-                           unsigned max_sstables_per_job, sstables::compaction_sstable_creator_fn creator)
-{
-    // Resharding doesn't like empty sstable sets, so bail early. There is nothing
-    // to reshard in this shard.
-    if (shared_info.empty()) {
-        co_return;
-    }
-
-    // We want to reshard many SSTables at a time for efficiency. However if we have to many we may
-    // be risking OOM.
-    auto num_jobs = (shared_info.size() + max_sstables_per_job - 1) / max_sstables_per_job;
-    auto sstables_per_job = shared_info.size() / num_jobs;
-
-    std::vector<std::vector<sstables::shared_sstable>> buckets(1);
-    co_await coroutine::parallel_for_each(shared_info, [this, sstables_per_job, num_jobs, &buckets] (sstables::foreign_sstable_open_info& info) -> future<> {
-        auto sst = _manager.make_sstable(_schema, _sstable_dir.native(), info.generation, info.version, info.format, gc_clock::now(), _error_handler_gen);
-        co_await sst->load(std::move(info));
-        // Last bucket gets leftover SSTables
-        if ((buckets.back().size() >= sstables_per_job) && (buckets.size() < num_jobs)) {
-            buckets.emplace_back();
-        }
-        buckets.back().push_back(std::move(sst));
-    });
-    // There is a semaphore inside the compaction manager in run_resharding_jobs. So we
-    // parallel_for_each so the statistics about pending jobs are updated to reflect all
-    // jobs. But only one will run in parallel at a time
-    co_await coroutine::parallel_for_each(buckets, [this, &cm, &table, creator = std::move(creator)] (std::vector<sstables::shared_sstable>& sstlist) mutable {
-        return cm.run_custom_job(table.as_table_state(), compaction_type::Reshard, "Reshard compaction", [this, &cm, &table, creator, &sstlist] (sstables::compaction_data& info) -> future<> {
-            sstables::compaction_descriptor desc(sstlist, _io_priority);
-            desc.options = sstables::compaction_type_options::make_reshard();
-            desc.creator = std::move(creator);
-
-            auto result = co_await sstables::compact_sstables(std::move(desc), info, table.as_table_state());
-            // input sstables are moved, to guarantee their resources are released once we're done
-            // resharding them.
-            co_await when_all_succeed(collect_output_sstables_from_resharding(std::move(result.new_sstables)), remove_input_sstables_from_resharding(std::move(sstlist))).discard_result();
-        });
-    });
-}
 
 future<>
 sstable_directory::do_for_each_sstable(std::function<future<>(sstables::shared_sstable)> func) {
@@ -456,7 +366,7 @@ future<>
 sstable_directory::parallel_for_each_restricted(Container&& C, Func&& func) {
     return do_with(std::move(C), std::move(func), [this] (Container& c, Func& func) mutable {
       return max_concurrent_for_each(c, _manager.dir_semaphore()._concurrency, [this, &func] (auto& el) mutable {
-        return with_semaphore(_manager.dir_semaphore()._sem, 1, [this, &func,  el = std::move(el)] () mutable {
+        return with_semaphore(_manager.dir_semaphore()._sem, 1, [&func,  el = std::move(el)] () mutable {
             return func(el);
         });
       });

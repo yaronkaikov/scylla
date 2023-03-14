@@ -557,7 +557,7 @@ future<kmip_host::impl::kmip_cmd> kmip_host::impl::do_cmd(kmip_cmd cmd_in, Func 
                 auto host = cp->host();
                 auto res = do_cmd(cmd, std::move(cp), f);
                 kmip_log.trace("{}: request {}", *this, fmt::ptr(KMIP_CMD_get_request(cmd)));
-                return res.then([this, retry, cmd, host = std::move(host)](int res) {
+                return res.then([this, retry, host = std::move(host)](int res) {
                     if (res == KMIP_ERROR_IO) {
                         kmip_log.debug("{}: request error {}", *this, kmip_errorc.message(res));
                         if (retry) {
@@ -628,7 +628,7 @@ future<kmip_host::impl::con_ptr> kmip_host::impl::get_connection(const sstring& 
 future<kmip_host::impl::con_ptr> kmip_host::impl::get_connection(KMIP_CMD* cmd) {
     userdata u{ KMIP_CMD_get_userdata(cmd) };
     if (u.host != nullptr) {
-        return get_connection(u.host).then([this, cmd](con_ptr cp) {
+        return get_connection(u.host).then([](con_ptr cp) {
             return cp;
         });
     }
@@ -636,12 +636,12 @@ future<kmip_host::impl::con_ptr> kmip_host::impl::get_connection(KMIP_CMD* cmd) 
     using con_ptr = ::shared_ptr<kmip_host::impl::connection>;
     using con_opt = std::optional<con_ptr>;
 
-    return repeat_until_value([this, cmd, i = size_t(0)]() mutable {
+    return repeat_until_value([this, i = size_t(0)]() mutable {
         if (i++ == _options.hosts.size()) {
             throw std::runtime_error("Could not connect to any server");
         }
         auto& host = _options.hosts[_index % _options.hosts.size()];
-        return get_connection(host).then([this, cmd](con_ptr cp) {
+        return get_connection(host).then([](con_ptr cp) {
             return con_opt(std::move(cp));
         }).handle_exception([this, host](auto) {
             ++_index;
@@ -665,7 +665,7 @@ future<> kmip_host::impl::clear_connections(const sstring& host) {
 
 future<> kmip_host::impl::connect() {
     return do_for_each(_options.hosts, [this](const sstring& host) {
-        return get_connection(host).then([this, &host](auto cp) {
+        return get_connection(host).then([this](auto cp) {
             release(nullptr, cp);
         });
     });

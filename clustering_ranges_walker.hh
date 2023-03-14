@@ -10,10 +10,10 @@
 
 #pragma once
 
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "query-request.hh"
-#include "mutation_fragment.hh"
-#include "mutation_fragment_v2.hh"
+#include "mutation/mutation_fragment.hh"
+#include "mutation/mutation_fragment_v2.hh"
 
 // Utility for in-order checking of overlap with position ranges.
 class clustering_ranges_walker {

@@ -291,7 +291,7 @@ future<std::optional<service_level_options>> service_level_controller::find_serv
                 return std::nullopt;
             }
         });
-    }, std::optional<service_level_options>{}, [this] (std::optional<service_level_options> first, std::optional<service_level_options> second) -> std::optional<service_level_options> {
+    }, std::optional<service_level_options>{}, [] (std::optional<service_level_options> first, std::optional<service_level_options> second) -> std::optional<service_level_options> {
         if (!second) {
             return first;
         } else if (!first) {
@@ -601,7 +601,6 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                 false /*marked_for_deletion*/, is_static /*is_static*/}, std::move(name), [this] (service_level& sl, sstring& name) {
             return make_ready_future().then([this, &sl, &name] () mutable {
                 if (!_global_controller_db->deleted_scheduling_groups.empty()) {
-                    scheduling_group sg;
                     auto&& it = std::find_if(_global_controller_db->deleted_scheduling_groups.begin()
                             ,   _global_controller_db->deleted_scheduling_groups.end()
                             , [sg_name_to_find = format(deleted_scheduling_group_name_pattern, name)] (const scheduling_group& sg) {
@@ -650,7 +649,7 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                     }
                     return container().invoke_on_all([pc = sl.pc, shares] (service_level_controller& service) {
                         return pc.update_shares(shares);
-                    }).then([pc = sl.pc, &sl, &name] () mutable{
+                    }).then([pc = sl.pc, &name] () mutable{
                         return do_with(io_priority_class{pc}, [&name] (io_priority_class& pc) {
                             return pc.rename(format(scheduling_group_name_pattern, name));
                         });

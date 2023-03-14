@@ -99,7 +99,7 @@ future<size_t> mirror_file_impl::read_dma(uint64_t pos, void* buffer, size_t len
         return f.then([this, pos, len , buffer, &pc] (size_t secondary_size) {
             auto b = allocate_aligned_buffer<uint8_t>(len, _primary.memory_dma_alignment());
             auto p = b.get();
-            return get_file_impl(_primary)->read_dma(pos, p, len, pc).then([this, secondary_size, buffer, b = std::move(b)] (size_t primary_size) {
+            return get_file_impl(_primary)->read_dma(pos, p, len, pc).then([secondary_size, buffer, b = std::move(b)] (size_t primary_size) {
                 if (primary_size != secondary_size) {
                     throw std::runtime_error(fmt::format("inconsistency between on disk and memory file sizes ({} != {})", primary_size, secondary_size));
                 }
@@ -124,7 +124,7 @@ future<size_t> mirror_file_impl::read_dma(uint64_t pos, std::vector<iovec> iov, 
                 vb[i] = allocate_aligned_buffer<uint8_t>(iov[i].iov_len, _primary.memory_dma_alignment());
                 iov2[i].iov_base = vb[i].get();
             }
-            return get_file_impl(_primary)->read_dma(pos, std::move(iov2), pc).then([this, secondary_size, iov = std::move(iov), vb = std::move(vb)] (size_t primary_size) {
+            return get_file_impl(_primary)->read_dma(pos, std::move(iov2), pc).then([secondary_size, iov = std::move(iov), vb = std::move(vb)] (size_t primary_size) {
                 if (primary_size != secondary_size) {
                     throw std::runtime_error(fmt::format("inconsistency between on disk and memory file sizes ({} != {})", primary_size, secondary_size));
                 }
@@ -194,7 +194,7 @@ future<temporary_buffer<uint8_t>> mirror_file_impl::dma_read_bulk(uint64_t offse
     auto f = get_file_impl(_secondary)->dma_read_bulk(offset, range_size, pc);
     if (_check_integrity) {
         return f.then([this, offset, range_size, &pc] (temporary_buffer<uint8_t> sb) {
-            return get_file_impl(_primary)->dma_read_bulk(offset, range_size, pc).then([this, sb = std::move(sb), range_size, offset] (temporary_buffer<uint8_t> pb) mutable {
+            return get_file_impl(_primary)->dma_read_bulk(offset, range_size, pc).then([sb = std::move(sb)] (temporary_buffer<uint8_t> pb) mutable {
                 if (sb.size() > pb.size()) { // bulk interface allows reading more than requested size, but memory file always exact
                     throw std::runtime_error(fmt::format("inconsistency between on disk and memory file sizes ({} < {})", pb.size(), sb.size()));
                 }

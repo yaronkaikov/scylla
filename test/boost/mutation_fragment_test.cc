@@ -9,20 +9,20 @@
 
 #include <seastar/core/thread.hh>
 #include <seastar/testing/on_internal_error.hh>
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
 #include <seastar/util/closeable.hh>
 
 #include "test/lib/mutation_source_test.hh"
-#include "mutation_fragment.hh"
-#include "frozen_mutation.hh"
+#include "mutation/mutation_fragment.hh"
+#include "mutation/frozen_mutation.hh"
 #include "test/lib/test_services.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "test/boost/total_order_check.hh"
 #include "schema_upgrader.hh"
 #include "readers/combined.hh"
 #include "replica/memtable.hh"
-#include "mutation_rebuilder.hh"
+#include "mutation/mutation_rebuilder.hh"
 
 #include "test/lib/mutation_assertions.hh"
 #include "test/lib/reader_concurrency_semaphore.hh"
@@ -612,7 +612,6 @@ SEASTAR_THREAD_TEST_CASE(test_mutation_fragment_stream_validator_mixed_api_usage
     const auto dkeys = ss.make_pkeys(3);
     const auto& dk_ = dkeys[0];
     const auto& dk0 = dkeys[1];
-    const auto& dk1 = dkeys[2];
     const auto ck0 = ss.make_ckey(0);
     const auto ck1 = ss.make_ckey(1);
     const auto ck2 = ss.make_ckey(2);

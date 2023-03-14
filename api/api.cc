@@ -35,6 +35,7 @@
 logging::logger apilog("api");
 
 namespace api {
+using namespace seastar::httpd;
 
 static std::unique_ptr<reply> exception_reply(std::exception_ptr eptr) {
     try {
@@ -165,9 +166,15 @@ future<> set_server_gossip(http_context& ctx, sharded<gms::gossiper>& g) {
                 });
 }
 
-future<> set_server_load_sstable(http_context& ctx) {
+future<> set_server_load_sstable(http_context& ctx, sharded<db::system_keyspace>& sys_ks) {
     return register_api(ctx, "column_family",
-                "The column family API", set_column_family);
+                "The column family API", [&sys_ks] (http_context& ctx, routes& r) {
+                    set_column_family(ctx, r, sys_ks);
+                });
+}
+
+future<> unset_server_load_sstable(http_context& ctx) {
+    return ctx.http_server.set_routes([&ctx] (routes& r) { unset_column_family(ctx, r); });
 }
 
 future<> set_server_messaging_service(http_context& ctx, sharded<netw::messaging_service>& ms) {
@@ -253,25 +260,25 @@ future<> set_server_done(http_context& ctx) {
     });
 }
 
-future<> set_server_task_manager(http_context& ctx) {
+future<> set_server_task_manager(http_context& ctx, lw_shared_ptr<db::config> cfg) {
     auto rb = std::make_shared < api_registry_builder > (ctx.api_doc);
 
-    return ctx.http_server.set_routes([rb, &ctx](routes& r) {
+    return ctx.http_server.set_routes([rb, &ctx, &cfg = *cfg](routes& r) {
         rb->register_function(r, "task_manager",
                 "The task manager API");
-        set_task_manager(ctx, r);
+        set_task_manager(ctx, r, cfg);
     });
 }
 
 #ifndef SCYLLA_BUILD_MODE_RELEASE
 
-future<> set_server_task_manager_test(http_context& ctx, lw_shared_ptr<db::config> cfg) {
+future<> set_server_task_manager_test(http_context& ctx) {
     auto rb = std::make_shared < api_registry_builder > (ctx.api_doc);
 
-    return ctx.http_server.set_routes([rb, &ctx, &cfg = *cfg](routes& r) mutable {
+    return ctx.http_server.set_routes([rb, &ctx](routes& r) mutable {
         rb->register_function(r, "task_manager_test",
                 "The task manager test API");
-        set_task_manager_test(ctx, r, cfg);
+        set_task_manager_test(ctx, r);
     });
 }
 

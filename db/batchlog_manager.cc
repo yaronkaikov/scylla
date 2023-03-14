@@ -20,7 +20,7 @@
 #include <boost/range/adaptor/sliced.hpp>
 
 #include "batchlog_manager.hh"
-#include "canonical_mutation.hh"
+#include "mutation/canonical_mutation.hh"
 #include "service/storage_proxy.hh"
 #include "system_keyspace.hh"
 #include "utils/rate_limiter.hh"
@@ -29,7 +29,7 @@
 #include "unimplemented.hh"
 #include "gms/failure_detector.hh"
 #include "gms/gossiper.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "idl/frozen_schema.dist.hh"
 #include "idl/frozen_schema.dist.impl.hh"
 #include "db/schema_tables.hh"
@@ -43,8 +43,9 @@ static logging::logger blogger("batchlog_manager");
 const uint32_t db::batchlog_manager::replay_interval;
 const uint32_t db::batchlog_manager::page_size;
 
-db::batchlog_manager::batchlog_manager(cql3::query_processor& qp, batchlog_manager_config config)
+db::batchlog_manager::batchlog_manager(cql3::query_processor& qp, db::system_keyspace& sys_ks, batchlog_manager_config config)
         : _qp(qp)
+        , _sys_ks(sys_ks)
         , _write_request_timeout(std::chrono::duration_cast<db_clock::duration>(config.write_request_timeout))
         , _replay_rate(config.replay_rate)
         , _started(make_ready_future<>())
@@ -190,7 +191,7 @@ future<> db::batchlog_manager::replay_all_failed_batches() {
         auto size = data.size();
 
         return map_reduce(*fms, [this, written_at] (canonical_mutation& fm) {
-            return system_keyspace::get_truncated_at(fm.column_family_id()).then([written_at, &fm] (db_clock::time_point t) ->
+            return _sys_ks.get_truncated_at(fm.column_family_id()).then([written_at, &fm] (db_clock::time_point t) ->
                     std::optional<std::reference_wrapper<canonical_mutation>> {
                 if (written_at > t) {
                     return { std::ref(fm) };
@@ -206,11 +207,11 @@ future<> db::batchlog_manager::replay_all_failed_batches() {
                 mutations.emplace_back(fm.value().get().to_mutation(s));
             }
             return mutations;
-        }).then([this, id, limiter, written_at, size, fms] (std::vector<mutation> mutations) {
+        }).then([this, limiter, written_at, size, fms] (std::vector<mutation> mutations) {
             if (mutations.empty()) {
                 return make_ready_future<>();
             }
-            const auto ttl = [this, &mutations, written_at]() -> clock_type {
+            const auto ttl = [written_at]() -> clock_type {
                 /*
                  * Calculate ttl for the mutations' hints (and reduce ttl by the time the mutations spent in the batchlog).
                  * This ensures that deletes aren't "undone" by an old batch replay.
@@ -232,7 +233,7 @@ future<> db::batchlog_manager::replay_all_failed_batches() {
             // Our normal write path does not add much redundancy to the dispatch, and rate is handled after send
             // in both cases.
             // FIXME: verify that the above is reasonably true.
-            return limiter->reserve(size).then([this, mutations = std::move(mutations), id] {
+            return limiter->reserve(size).then([this, mutations = std::move(mutations)] {
                 _stats.write_attempts += mutations.size();
                 // #1222 - change cl level to ALL, emulating origins behaviour of sending/hinting
                 // to all natural end points.
@@ -292,7 +293,7 @@ future<> db::batchlog_manager::replay_all_failed_batches() {
                     });
                 });
             });
-        }).then([this] {
+        }).then([] {
         // TODO FIXME : cleanup()
 #if 0
             ColumnFamilyStore cfs = Keyspace.open(SystemKeyspace.NAME).getColumnFamilyStore(SystemKeyspace.BATCHLOG);
@@ -305,7 +306,7 @@ future<> db::batchlog_manager::replay_all_failed_batches() {
 
 #endif
 
-        }).then([this] {
+        }).then([] {
             blogger.debug("Finished replayAllFailedBatches");
         });
     });

@@ -162,17 +162,24 @@ import ssl
 # next to the location of this script, but this can be overridden by setting
 # a SCYLLA environment variable:
 source_path = os.path.realpath(os.path.join(__file__, '../../..'))
+scylla = None
 def find_scylla():
-    scyllas = glob.glob(os.path.join(source_path, 'build/*/scylla'))
-    if not scyllas:
-        print("Can't find a Scylla executable in {}.\nPlease build Scylla or set SCYLLA to the path of a Scylla executable.".format(source_path))
+    global scylla
+    global source_path
+    if scylla:
+        return scylla
+    if os.getenv('SCYLLA'):
+        scylla = os.path.abspath(os.getenv('SCYLLA'))
+    else:
+        scyllas = glob.glob(os.path.join(source_path, 'build/*/scylla'))
+        if not scyllas:
+            print("Can't find a Scylla executable in {}.\nPlease build Scylla or set SCYLLA to the path of a Scylla executable.".format(source_path))
+            exit(1)
+        scylla = max(scyllas, key=os.path.getmtime)
+    if not os.access(scylla, os.X_OK):
+        print("Cannot execute '{}'.\nPlease set SCYLLA to the path of a Scylla executable.".format(scylla))
         exit(1)
-    return max(scyllas, key=os.path.getmtime)
-
-scylla = os.path.abspath(os.getenv('SCYLLA') or find_scylla())
-if not os.access(scylla, os.X_OK):
-    print("Cannot execute '{}'.\nPlease set SCYLLA to the path of a Scylla executable.".format(scylla))
-    exit(1)
+    return scylla
 
 def run_scylla_cmd(pid, dir):
     ip = pid_to_ip(pid)
@@ -203,7 +210,7 @@ def run_scylla_cmd(pid, dir):
         '--smp', '2',
         '-m', '1G',
         '--overprovisioned',
-        '--max-networking-io-control-blocks', '100',
+        '--max-networking-io-control-blocks', '1000',
         '--unsafe-bypass-fsync', '1',
         '--kernel-page-cache', '1',
         '--commitlog-use-o-dsync', '0',
@@ -359,7 +366,7 @@ def run_pytest(pytest_dir, additional_parameters):
         run_pytest_pids = set()
         os.chdir(pytest_dir)
         os.setsid()
-        os.execvp(os.path.join(source_path, 'test/pytest'), ['pytest',
+        os.execvp('pytest', ['pytest',
             '-o', 'junit_family=xunit2'] + additional_parameters)
         exit(1)
     # parent:

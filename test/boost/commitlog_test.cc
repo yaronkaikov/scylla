@@ -17,7 +17,7 @@
 #include <set>
 #include <deque>
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/do_with.hh>
@@ -42,6 +42,7 @@
 #include "test/lib/data_model.hh"
 #include "test/lib/sstable_utils.hh"
 #include "test/lib/mutation_source_test.hh"
+#include "test/lib/key_utils.hh"
 
 using namespace db;
 
@@ -378,7 +379,7 @@ SEASTAR_TEST_CASE(test_commitlog_reader){
                         sstring tmp = "hej bubba cow";
                         return log.add_mutation(uuid, tmp.size(), db::commitlog::force_sync::no, [tmp](db::commitlog::output& dst) {
                                     dst.write(tmp.data(), tmp.size());
-                                }).then([&log, set, count](auto h) {
+                                }).then([set, count](auto h) {
                                     BOOST_CHECK_NE(db::replay_position(), h.rp());
                                     set->put(std::move(h));
                                     if (set->size() == 1) {
@@ -444,7 +445,7 @@ SEASTAR_TEST_CASE(test_commitlog_entry_corruption){
                         sstring tmp = "hej bubba cow";
                         return log.add_mutation(uuid, tmp.size(), db::commitlog::force_sync::no, [tmp](db::commitlog::output& dst) {
                                     dst.write(tmp.data(), tmp.size());
-                                }).then([&log, rps](rp_handle h) {
+                                }).then([rps](rp_handle h) {
                                     BOOST_CHECK_NE(h.rp(), db::replay_position());
                                     rps->push_back(h.release());
                                 });
@@ -454,7 +455,7 @@ SEASTAR_TEST_CASE(test_commitlog_entry_corruption){
                         auto segments = log.get_active_segment_names();
                         BOOST_REQUIRE(!segments.empty());
                         auto seg = segments[0];
-                        return corrupt_segment(seg, rps->at(1).pos + 4, 0x451234ab).then([seg, rps, &log] {
+                        return corrupt_segment(seg, rps->at(1).pos + 4, 0x451234ab).then([seg, rps] {
                             return db::commitlog::read_log_file(seg, db::commitlog::descriptor::FILENAME_PREFIX, service::get_local_commitlog_priority(), [rps](db::commitlog::buffer_and_replay_position buf_rp) {
                                 auto&& [buf, rp] = buf_rp;
                                 BOOST_CHECK_EQUAL(rp, rps->at(0));
@@ -484,7 +485,7 @@ SEASTAR_TEST_CASE(test_commitlog_chunk_corruption){
                         sstring tmp = "hej bubba cow";
                         return log.add_mutation(uuid, tmp.size(), db::commitlog::force_sync::no, [tmp](db::commitlog::output& dst) {
                                     dst.write(tmp.data(), tmp.size());
-                                }).then([&log, rps](rp_handle h) {
+                                }).then([rps](rp_handle h) {
                                     BOOST_CHECK_NE(h.rp(), db::replay_position());
                                     rps->push_back(h.release());
                                 });
@@ -494,7 +495,7 @@ SEASTAR_TEST_CASE(test_commitlog_chunk_corruption){
                         auto segments = log.get_active_segment_names();
                         BOOST_REQUIRE(!segments.empty());
                         auto seg = segments[0];
-                        return corrupt_segment(seg, rps->at(0).pos - 4, 0x451234ab).then([seg, rps, &log] {
+                        return corrupt_segment(seg, rps->at(0).pos - 4, 0x451234ab).then([seg, rps] {
                             return db::commitlog::read_log_file(seg, db::commitlog::descriptor::FILENAME_PREFIX, service::get_local_commitlog_priority(), [rps](db::commitlog::buffer_and_replay_position buf_rp) {
                                 BOOST_FAIL("Should not reach");
                                 return make_ready_future<>();
@@ -523,7 +524,7 @@ SEASTAR_TEST_CASE(test_commitlog_reader_produce_exception){
                         sstring tmp = "hej bubba cow";
                         return log.add_mutation(uuid, tmp.size(), db::commitlog::force_sync::no, [tmp](db::commitlog::output& dst) {
                                     dst.write(tmp.data(), tmp.size());
-                                }).then([&log, rps](rp_handle h) {
+                                }).then([rps](rp_handle h) {
                                     BOOST_CHECK_NE(h.rp(), db::replay_position());
                                     rps->push_back(h.release());
                                 });
@@ -615,8 +616,8 @@ SEASTAR_TEST_CASE(test_commitlog_replay_invalid_key){
         auto s = table.schema();
         auto memtables = table.active_memtables();
 
-        auto add_entry = [&db, &cl, s] (bytes key) mutable {
-            auto md = tests::data_model::mutation_description({ key });
+        auto add_entry = [&cl, s] (const partition_key& key) mutable {
+            auto md = tests::data_model::mutation_description(key.explode());
             md.add_clustered_cell({}, "v", to_bytes("val"));
             auto m = md.build(s);
 
@@ -626,17 +627,17 @@ SEASTAR_TEST_CASE(test_commitlog_replay_invalid_key){
             return m.shard_of();
         };
 
-        const auto shard = add_entry(bytes{});
-        auto pk1_raw = make_key_for_shard(shard, s);
+        const auto shard = add_entry(partition_key::make_empty());
+        auto dk = tests::generate_partition_key(s, shard);
 
-        add_entry(to_bytes(pk1_raw));
+        add_entry(std::move(dk.key()));
 
         BOOST_REQUIRE(std::ranges::all_of(memtables, std::mem_fn(&replica::memtable::empty)));
 
         {
             auto paths = cl.get_active_segment_names();
             BOOST_REQUIRE(!paths.empty());
-            auto rp = db::commitlog_replayer::create_replayer(env.db()).get0();
+            auto rp = db::commitlog_replayer::create_replayer(env.db(), env.get_system_keyspace()).get0();
             rp.recover(paths, db::commitlog::descriptor::FILENAME_PREFIX).get();
         }
 
@@ -850,7 +851,6 @@ SEASTAR_TEST_CASE(test_commitlog_shutdown_during_wait) {
 
     rp_set rps;
     std::deque<rp_set> queue;
-    size_t n = 0;
 
     // uncomment for verbosity
     //logging::logger_registry().set_logger_level("commitlog", logging::log_level::debug);
@@ -1049,3 +1049,45 @@ SEASTAR_TEST_CASE(test_commitlog_exceptions_in_allocate_ex) {
 SEASTAR_TEST_CASE(test_commitlog_exceptions_in_allocate_ex_deleted_file_no_recycle) {
     co_await do_test_exception_in_allocate_ex(true);
 }
+
+using namespace std::string_literals;
+
+BOOST_AUTO_TEST_CASE(test_commitlog_segment_descriptor) {
+    for (auto& prefix : { "tuta"s, "ninja"s, "Commitlog"s, "Schemalog"s, "bamboo"s }) {
+        // create a descriptor without given filename
+        commitlog::descriptor d(db::replay_position(), prefix + commitlog::descriptor::SEPARATOR);
+
+        for (auto& add : { ""s, "Recycled-"s }) {
+            auto filename = "/some/path/we/dont/open/"s + add + std::string(d.filename());
+
+            // ensure we only allow same prefix
+            for (auto& wrong_prefix : { "fisk"s, "notter"s, "blazer"s }) {
+                try {
+                    commitlog::descriptor d2(filename, wrong_prefix + commitlog::descriptor::SEPARATOR);
+                } catch (std::domain_error&) {
+                    // ok
+                    continue;
+                }
+                BOOST_FAIL("Should not reach");
+            }
+
+            commitlog::descriptor d3(filename, prefix + commitlog::descriptor::SEPARATOR);
+
+            try {
+                // check we require id
+                commitlog::descriptor d3("/tmp/" + add + prefix + commitlog::descriptor::SEPARATOR + ".log", prefix);
+                BOOST_FAIL("Should not reach");
+            } catch (std::domain_error&) {
+                // ok
+            } 
+            try {
+                // check we require ver
+                commitlog::descriptor d3("/tmp/" + add + prefix + commitlog::descriptor::SEPARATOR + "12.log", prefix);
+                BOOST_FAIL("Should not reach");
+            } catch (std::domain_error&) {
+                // ok
+            } 
+        }
+    }
+}
+

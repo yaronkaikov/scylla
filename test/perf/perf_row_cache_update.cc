@@ -17,7 +17,7 @@
 #include "utils/UUID_gen.hh"
 #include "row_cache.hh"
 #include "log.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "readers/combined.hh"
 #include "readers/mutation_fragment_v1_stream.hh"
 #include "replica/memtable.hh"
@@ -268,7 +268,7 @@ namespace perf {
 
 int scylla_row_cache_update_main(int argc, char** argv) {
     app_template app;
-    return app.run(argc, argv, [&app] {
+    return app.run(argc, argv, [] {
         return seastar::async([&] {
             engine().at_exit([] {
                 cancelled = true;

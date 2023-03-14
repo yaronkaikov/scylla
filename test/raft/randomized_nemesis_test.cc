@@ -32,7 +32,7 @@
 #include "test/raft/generator.hh"
 #include "test/raft/helpers.hh"
 
-#include "to_string.hh"
+#include "utils/to_string.hh"
 
 using namespace seastar;
 using namespace std::chrono_literals;
@@ -1704,7 +1704,6 @@ public:
             ._server = nullptr,
         });
         assert(inserted);
-        auto& n = it->second;
 
         return id;
     }

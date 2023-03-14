@@ -22,11 +22,11 @@
 
 #include "clustering_bounds_comparator.hh"
 #include "dht/i_partitioner.hh"
-#include "mutation_fragment.hh"
+#include "mutation/mutation_fragment.hh"
 #include "partition_range_compat.hh"
 #include "range.hh"
 #include "sstables/sstables.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "readers/forwardable_v2.hh"
 
 class enormous_table_reader final : public flat_mutation_reader_v2::impl {
@@ -54,7 +54,7 @@ public:
                 return clustering_key::from_single_value(*_schema, std::move(ck_data));
             };
 
-            auto ck_to_int = [this] (const clustering_key& ck) -> int64_t {
+            auto ck_to_int = [] (const clustering_key& ck) -> int64_t {
                 auto exploded = ck.explode();
                 assert(exploded.size() == 1);
                 return value_cast<int64_t>(long_type->deserialize(exploded[0]));

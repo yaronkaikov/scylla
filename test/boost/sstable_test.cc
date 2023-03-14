@@ -19,8 +19,8 @@
 #include "sstables/key.hh"
 #include "test/lib/sstable_utils.hh"
 #include "test/lib/reader_concurrency_semaphore.hh"
-#include <seastar/testing/test_case.hh>
-#include "schema.hh"
+#include "test/lib/scylla_test_case.hh"
+#include "schema/schema.hh"
 #include "compress.hh"
 #include "replica/database.hh"
 #include <memory>
@@ -41,7 +41,7 @@ bytes as_bytes(const sstring& s) {
 
 future<> test_using_working_sst(schema_ptr s, sstring dir, int64_t gen) {
     return test_env::do_with([s = std::move(s), dir = std::move(dir), gen] (test_env& env) {
-        return env.working_sst(std::move(s), std::move(dir), gen);
+        return env.reusable_sst(std::move(s), std::move(dir), gen).discard_result();
     });
 }
 
@@ -304,7 +304,7 @@ SEASTAR_TEST_CASE(check_toc_func) {
 }
 
 SEASTAR_TEST_CASE(uncompressed_random_access_read) {
-    return test_using_reusable_sst(uncompressed_schema(), uncompressed_dir(), 1, [this] (auto& env, auto sstp) {
+    return test_using_reusable_sst(uncompressed_schema(), uncompressed_dir(), 1, [] (auto& env, auto sstp) {
         // note: it's important to pass on a shared copy of sstp to prevent its
         // destruction until the continuation finishes reading!
         return sstables::test(sstp).data_read(env.make_reader_permit(), 97, 6).then([sstp] (temporary_buffer<char> buf) {
@@ -316,7 +316,7 @@ SEASTAR_TEST_CASE(uncompressed_random_access_read) {
 
 SEASTAR_TEST_CASE(compressed_random_access_read) {
     auto s = make_schema_for_compressed_sstable();
-    return test_using_reusable_sst(std::move(s), "test/resource/sstables/compressed", 1, [this] (auto& env, auto sstp) {
+    return test_using_reusable_sst(std::move(s), "test/resource/sstables/compressed", 1, [] (auto& env, auto sstp) {
         return sstables::test(sstp).data_read(env.make_reader_permit(), 97, 6).then([sstp] (temporary_buffer<char> buf) {
             BOOST_REQUIRE(sstring(buf.get(), buf.size()) == "gustaf");
             return make_ready_future<>();
@@ -482,22 +482,24 @@ test_sstable_exists(sstring dir, unsigned long generation, bool exists) {
 }
 
 SEASTAR_TEST_CASE(statistics_rewrite) {
-    return test_setup::do_with_cloned_tmp_directory(uncompressed_dir(), [] (test_env& env, sstring uncompressed_dir, sstring generation_dir) {
-        return env.reusable_sst(uncompressed_schema(), uncompressed_dir, 1).then([generation_dir] (auto sstp) {
-            return test::create_links(*sstp, generation_dir).then([sstp] {});
-        }).then([generation_dir] {
-            return test_sstable_exists(generation_dir, 1, true);
-        }).then([&env, generation_dir] {
-            return env.reusable_sst(uncompressed_schema(), generation_dir, 1).then([] (auto sstp) {
-                // mutate_sstable_level results in statistics rewrite
-                return sstp->mutate_sstable_level(10).then([sstp] {});
-            });
-        }).then([&env, generation_dir] {
-            return env.reusable_sst(uncompressed_schema(), generation_dir, 1).then([] (auto sstp) {
-                BOOST_REQUIRE(sstp->get_sstable_level() == 10);
-                return make_ready_future<>();
-            });
-        });
+    return test_env::do_with_async([] (test_env& env) {
+        auto uncompressed_dir_copy = env.tempdir().path();
+        for (const auto& entry : std::filesystem::directory_iterator(uncompressed_dir().c_str())) {
+            std::filesystem::copy(entry.path(), uncompressed_dir_copy / entry.path().filename());
+        }
+        auto generation_dir = (uncompressed_dir_copy / sstables::staging_dir).native();
+        std::filesystem::create_directories(generation_dir);
+
+        auto sstp = env.reusable_sst(uncompressed_schema(), uncompressed_dir_copy.native(), 1).get0();
+        test::create_links(*sstp, generation_dir).get();
+        test_sstable_exists(generation_dir, 1, true).get();
+
+        sstp = env.reusable_sst(uncompressed_schema(), generation_dir, 1).get0();
+        // mutate_sstable_level results in statistics rewrite
+        sstp->mutate_sstable_level(10).get();
+
+        sstp = env.reusable_sst(uncompressed_schema(), generation_dir, 1).get0();
+        BOOST_REQUIRE(sstp->get_sstable_level() == 10);
     });
 }
 

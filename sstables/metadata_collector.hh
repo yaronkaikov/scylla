@@ -10,13 +10,13 @@
 
 #pragma once
 
-#include "types.hh"
+#include "sstables/types.hh"
 #include "utils/extremum_tracking.hh"
 #include "utils/murmur_hash.hh"
 #include "hyperloglog.hh"
 #include "db/commitlog/replay_position.hh"
 #include "clustering_bounds_comparator.hh"
-#include "position_in_partition.hh"
+#include "mutation/position_in_partition.hh"
 #include "db/cache_tracker.hh"
 #include "locator/host_id.hh"
 

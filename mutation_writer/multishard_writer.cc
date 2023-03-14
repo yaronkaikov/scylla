@@ -7,8 +7,8 @@
  */
 
 #include "mutation_writer/multishard_writer.hh"
-#include "mutation_fragment_v2.hh"
-#include "schema_registry.hh"
+#include "mutation/mutation_fragment_v2.hh"
+#include "schema/schema_registry.hh"
 #include "reader_concurrency_semaphore.hh"
 #include "readers/foreign.hh"
 #include "readers/queue.hh"

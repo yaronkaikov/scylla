@@ -14,7 +14,7 @@
 #include "rapidjson/writer.h"
 #include "concrete_types.hh"
 #include "cql3/type_json.hh"
-#include "position_in_partition.hh"
+#include "mutation/position_in_partition.hh"
 
 static logging::logger slogger("alternator-serialization");
 
@@ -265,7 +265,6 @@ position_in_partition pos_from_json(const rjson::value& item, schema_ptr schema)
     if (bool(region_item) != bool(weight_item)) {
         throw api_error::validation("Malformed value object: region and weight has to be either both missing or both present");
     }
-    partition_region region;
     bound_weight weight;
     if (region_item) {
         auto region_view = rjson::to_string_view(get_typed_value(*region_item, "S", scylla_paging_region, "key region"));

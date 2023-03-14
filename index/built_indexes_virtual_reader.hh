@@ -9,9 +9,9 @@
 #include "replica/database.hh"
 #include "db/system_keyspace.hh"
 #include "readers/flat_mutation_reader_v2.hh"
-#include "mutation_fragment_v2.hh"
+#include "mutation/mutation_fragment_v2.hh"
 #include "query-request.hh"
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include "secondary_index_manager.hh"
 #include "tracing/tracing.hh"
 #include "view_info.hh"
@@ -175,7 +175,7 @@ class built_indexes_virtual_reader {
         }
 
         virtual future<> fast_forward_to(position_range range) override {
-            forward_buffer_to(range.start());
+            clear_buffer();
             _end_of_stream = false;
             // range contains index names (e.g., xyz) but the underlying table
             // contains view names (e.g., xyz_index) so we need to add the

@@ -47,7 +47,8 @@ struct test_env_config {
 
 class test_env {
     struct impl {
-        db::config db_config;
+        tmpdir dir;
+        std::unique_ptr<db::config> db_config;
         directory_semaphore dir_sem;
         cache_tracker cache_tracker;
         gms::feature_service feature_service;
@@ -85,7 +86,8 @@ public:
     future<shared_sstable> reusable_sst(schema_ptr schema, sstring dir, unsigned long generation,
             sstable::version_types version, sstable::format_types f = sstable::format_types::big) {
         auto sst = make_sstable(std::move(schema), dir, generation, version, f);
-        return sst->load().then([sst = std::move(sst)] {
+        sstable_open_config cfg { .load_first_and_last_position_metadata = true };
+        return sst->load(default_priority_class(), cfg).then([sst = std::move(sst)] {
             return make_ready_future<shared_sstable>(std::move(sst));
         });
     }
@@ -95,7 +97,8 @@ public:
 
     test_env_sstables_manager& manager() { return _impl->mgr; }
     reader_concurrency_semaphore& semaphore() { return _impl->semaphore; }
-    db::config& db_config() { return _impl->db_config; }
+    db::config& db_config() { return *_impl->db_config; }
+    tmpdir& tempdir() noexcept { return _impl->dir; }
 
     reader_permit make_reader_permit(const schema* const s, const char* n, db::timeout_clock::time_point timeout) {
         return _impl->semaphore.make_tracking_only_permit(s, n, timeout);
@@ -106,10 +109,6 @@ public:
 
     replica::table::config make_table_config() {
         return replica::table::config{.compaction_concurrency_semaphore = &_impl->semaphore};
-    }
-
-    future<> working_sst(schema_ptr schema, sstring dir, unsigned long generation) {
-        return reusable_sst(std::move(schema), dir, generation).then([] (auto ptr) { return make_ready_future<>(); });
     }
 
     template <typename Func>

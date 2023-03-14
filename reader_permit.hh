@@ -12,7 +12,7 @@
 #include "seastarx.hh"
 
 #include "db/timeout_clock.hh"
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include "query_class_config.hh"
 
 namespace seastar {
@@ -276,7 +276,12 @@ public:
 
     T* allocate(size_t n) {
         auto p = _alloc.allocate(n);
-        _permit.consume(reader_resources::with_memory(n * sizeof(T)));
+        try {
+            _permit.consume(reader_resources::with_memory(n * sizeof(T)));
+        } catch (...) {
+            _alloc.deallocate(p, n);
+            throw;
+        }
         return p;
     }
     void deallocate(T* p, size_t n) {

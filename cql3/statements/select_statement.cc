@@ -456,7 +456,7 @@ select_statement::do_execute(query_processor& qp,
     }
 
     return p->fetch_page_result(page_size, now, timeout).then(wrap_result_to_error_message(
-            [this, p = std::move(p), &options, now](std::unique_ptr<cql3::result_set>&& rs) {
+            [this, p = std::move(p)](std::unique_ptr<cql3::result_set>&& rs) {
                 if (!p->is_exhausted()) {
                     rs->get_metadata().set_paging_state(p->state());
                 }
@@ -1267,7 +1267,7 @@ indexed_table_select_statement::read_posting_list(query_processor& qp,
     int32_t page_size = options.get_page_size();
     if (page_size <= 0 || !service::pager::query_pagers::may_need_paging(*_view_schema, page_size, *cmd, partition_ranges)) {
         return qp.proxy().query_result(_view_schema, cmd, std::move(partition_ranges), options.get_consistency(), {timeout, state.get_permit(), state.get_client_state(), state.get_trace_state()})
-        .then(utils::result_wrap([this, now, &options, selection = std::move(selection), partition_slice = std::move(partition_slice)] (service::storage_proxy::coordinator_query_result qr)
+        .then(utils::result_wrap([this, now, selection = std::move(selection), partition_slice = std::move(partition_slice)] (service::storage_proxy::coordinator_query_result qr)
                 -> coordinator_result<::shared_ptr<cql_transport::messages::result_message::rows>> {
             cql3::selection::result_set_builder builder(*selection, now);
             query::result_view::consume(*qr.query_result,
@@ -1279,7 +1279,7 @@ indexed_table_select_statement::read_posting_list(query_processor& qp,
 
     auto p = service::pager::query_pagers::pager(qp.proxy(), _view_schema, selection,
             state, options, cmd, std::move(partition_ranges), nullptr);
-    return p->fetch_page_result(options.get_page_size(), now, timeout).then(utils::result_wrap([p = std::move(p), &options, limit, now] (std::unique_ptr<cql3::result_set> rs)
+    return p->fetch_page_result(options.get_page_size(), now, timeout).then(utils::result_wrap([p = std::move(p)] (std::unique_ptr<cql3::result_set> rs)
             -> coordinator_result<::shared_ptr<cql_transport::messages::result_message::rows>> {
         rs->get_metadata().set_paging_state(p->state());
         return ::make_shared<cql_transport::messages::result_message::rows>(result(std::move(rs)));
@@ -1297,7 +1297,7 @@ indexed_table_select_statement::find_index_partition_ranges(query_processor& qp,
     auto now = gc_clock::now();
     auto timeout = db::timeout_clock::now() + get_timeout(state.get_client_state(), options);
     return read_posting_list(qp, options, get_limit(options), state, now, timeout, false).then(utils::result_wrap(
-            [this, now, &options] (::shared_ptr<cql_transport::messages::result_message::rows> rows) {
+            [this, &options] (::shared_ptr<cql_transport::messages::result_message::rows> rows) {
         auto rs = cql3::untyped_result_set(rows);
         dht::partition_range_vector partition_ranges;
         partition_ranges.reserve(rs.size());
@@ -1344,7 +1344,7 @@ indexed_table_select_statement::find_index_clustering_rows(query_processor& qp, 
     auto now = gc_clock::now();
     auto timeout = db::timeout_clock::now() + get_timeout(state.get_client_state(), options);
     return read_posting_list(qp, options, get_limit(options), state, now, timeout, true).then(utils::result_wrap(
-            [this, now, &options] (::shared_ptr<cql_transport::messages::result_message::rows> rows) {
+            [this, &options] (::shared_ptr<cql_transport::messages::result_message::rows> rows) {
 
         auto rs = cql3::untyped_result_set(rows);
         std::vector<primary_key> primary_keys;

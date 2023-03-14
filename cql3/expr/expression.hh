@@ -249,12 +249,18 @@ enum class comparison_order : char {
     clustering, ///< Table's clustering order. (a,b)>(1,1) means any row past (1,1) in storage.
 };
 
+enum class null_handling_style {
+    sql,           // evaluate(NULL = NULL) -> NULL, evaluate(NULL < x) -> NULL
+    lwt_nulls,     // evaluate(NULL = NULL) -> TRUE, evaluate(NULL < x) -> exception
+};
+
 /// Operator restriction: LHS op RHS.
 struct binary_operator {
     expression lhs;
     oper_t op;
     expression rhs;
     comparison_order order;
+    null_handling_style null_handling = null_handling_style::sql;
 
     binary_operator(expression lhs, oper_t op, expression rhs, comparison_order order = comparison_order::cql);
 
@@ -489,6 +495,9 @@ struct evaluation_inputs {
 std::vector<managed_bytes_opt> get_non_pk_values(const cql3::selection::selection& selection, const query::result_row_view& static_row,
                                          const query::result_row_view* row);
 
+/// Helper for accessing a column value from evaluation_inputs
+managed_bytes_opt extract_column_value(const column_definition* cdef, const evaluation_inputs& inputs);
+
 /// True iff restr evaluates to true, given these inputs
 extern bool is_satisfied_by(
         const expression& restr, const evaluation_inputs& inputs);
@@ -687,12 +696,18 @@ extern expression replace_token(const expression&, const column_definition*);
 extern expression search_and_replace(const expression& e,
         const noncopyable_function<std::optional<expression> (const expression& candidate)>& replace_candidate);
 
+// Adjust an expression for rows that were fetched using query::partition_slice::options::collections_as_maps
+expression adjust_for_collection_as_maps(const expression& e);
+
 extern expression prepare_expression(const expression& expr, data_dictionary::database db, const sstring& keyspace, const schema* schema_opt, lw_shared_ptr<column_specification> receiver);
 std::optional<expression> try_prepare_expression(const expression& expr, data_dictionary::database db, const sstring& keyspace, const schema* schema_opt, lw_shared_ptr<column_specification> receiver);
 
 // Prepares a binary operator received from the parser.
 // Does some basic type checks but no advanced validation.
 extern binary_operator prepare_binary_operator(binary_operator binop, data_dictionary::database db, const schema& table_schema);
+
+// Pre-compile any constant LIKE patterns and return equivalent expression
+expression optimize_like(const expression& e);
 
 
 /**
@@ -813,18 +828,38 @@ bool has_only_eq_binops(const expression&);
 
 } // namespace cql3
 
+/// Custom formatter for an expression. Use {:user} for user-oriented
+/// output, {:debug} for debug-oriented output. Debug is the default.
+///
 /// Required for fmt::join() to work on expression.
 template <>
-struct fmt::formatter<cql3::expr::expression> {
+class fmt::formatter<cql3::expr::expression> {
+    bool _debug = true;
+private:
+    constexpr static bool try_match_and_advance(format_parse_context& ctx, std::string_view s) {
+        auto [ctx_end, s_end] = std::ranges::mismatch(ctx, s);
+        if (s_end == s.end()) {
+            ctx.advance_to(ctx_end);
+            return true;
+        }
+        return false;
+    }
+public:
     constexpr auto parse(format_parse_context& ctx) {
-        return ctx.end();
+        using namespace std::string_view_literals;
+        if (try_match_and_advance(ctx, "debug"sv)) {
+            _debug = true;
+        } else if (try_match_and_advance(ctx, "user"sv)) {
+            _debug = false;
+        }
+        return ctx.begin();
     }
 
     template <typename FormatContext>
-    auto format(const cql3::expr::expression& expr, FormatContext& ctx) {
+    auto format(const cql3::expr::expression& expr, FormatContext& ctx) const {
         std::ostringstream os;
-        os << expr;
-        return format_to(ctx.out(), "{}", os.str());
+        os << cql3::expr::expression::printer{.expr_to_print = expr, .debug_mode = _debug};
+        return fmt::format_to(ctx.out(), "{}", os.str());
     }
 };
 
@@ -836,24 +871,14 @@ struct fmt::formatter<cql3::expr::expression::printer> {
     }
 
     template <typename FormatContext>
-    auto format(const cql3::expr::expression::printer& pr, FormatContext& ctx) {
+    auto format(const cql3::expr::expression::printer& pr, FormatContext& ctx) const {
         std::ostringstream os;
         os << pr;
-        return format_to(ctx.out(), "{}", os.str());
+        return fmt::format_to(ctx.out(), "{}", os.str());
     }
 };
 
-/// Required for fmt::join() to work on column_value.
-template <>
-struct fmt::formatter<cql3::expr::column_value> {
-    constexpr auto parse(format_parse_context& ctx) {
-        return ctx.end();
-    }
-
-    template <typename FormatContext>
-    auto format(const cql3::expr::column_value& col, FormatContext& ctx) {
-        std::ostringstream os;
-        os << col;
-        return format_to(ctx.out(), "{}", os.str());
-    }
+/// Required for fmt::join() to work on ExpressionElement, and for {:user}/{:debug} to work on ExpressionElement.
+template <cql3::expr::ExpressionElement E>
+struct fmt::formatter<E> : public fmt::formatter<cql3::expr::expression> {
 };

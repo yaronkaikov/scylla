@@ -34,13 +34,6 @@ inline future<> write_memtable_to_sstable_for_test(replica::memtable& mt, sstabl
 shared_sstable make_sstable(sstables::test_env& env, schema_ptr s, sstring dir, std::vector<mutation> mutations,
         sstable_writer_config cfg, sstables::sstable::version_types version, gc_clock::time_point query_time = gc_clock::now());
 
-std::vector<std::pair<sstring, dht::token>>
-token_generation_for_shard(unsigned tokens_to_generate, unsigned shard,
-        unsigned ignore_msb = 0, unsigned smp_count = smp::count);
-
-std::vector<std::pair<sstring, dht::token>>
-token_generation_for_current_shard(unsigned tokens_to_generate);
-
 namespace sstables {
 
 using sstable_ptr = shared_sstable;
@@ -168,7 +161,7 @@ public:
     }
 
     // Used to create synthetic sstables for testing leveled compaction strategy.
-    void set_values_for_leveled_strategy(uint64_t fake_data_size, uint32_t sstable_level, int64_t max_timestamp, sstring first_key, sstring last_key) {
+    void set_values_for_leveled_strategy(uint64_t fake_data_size, uint32_t sstable_level, int64_t max_timestamp, const partition_key& first_key, const partition_key& last_key) {
         _sst->_data_file_size = fake_data_size;
         _sst->_bytes_on_disk = fake_data_size;
         // Create a synthetic stats metadata
@@ -177,21 +170,21 @@ public:
         stats.max_timestamp = max_timestamp;
         stats.sstable_level = sstable_level;
         _sst->_components->statistics.contents[metadata_type::Stats] = std::make_unique<stats_metadata>(std::move(stats));
-        _sst->_components->summary.first_key.value = bytes(reinterpret_cast<const signed char*>(first_key.c_str()), first_key.size());
-        _sst->_components->summary.last_key.value = bytes(reinterpret_cast<const signed char*>(last_key.c_str()), last_key.size());
+        _sst->_components->summary.first_key.value = sstables::key::from_partition_key(*_sst->_schema, first_key).get_bytes();
+        _sst->_components->summary.last_key.value = sstables::key::from_partition_key(*_sst->_schema, last_key).get_bytes();
         _sst->set_first_and_last_keys();
         _sst->_run_identifier = run_id::create_random_id();
         _sst->_shards.push_back(this_shard_id());
     }
 
-    void set_values(sstring first_key, sstring last_key, stats_metadata stats, uint64_t data_file_size = 1) {
+    void set_values(const partition_key& first_key, const partition_key& last_key, stats_metadata stats, uint64_t data_file_size = 1) {
         _sst->_data_file_size = data_file_size;
         _sst->_bytes_on_disk = data_file_size;
         // scylla component must be present for a sstable to be considered fully expired.
         _sst->_recognized_components.insert(component_type::Scylla);
         _sst->_components->statistics.contents[metadata_type::Stats] = std::make_unique<stats_metadata>(std::move(stats));
-        _sst->_components->summary.first_key.value = bytes(reinterpret_cast<const signed char*>(first_key.c_str()), first_key.size());
-        _sst->_components->summary.last_key.value = bytes(reinterpret_cast<const signed char*>(last_key.c_str()), last_key.size());
+        _sst->_components->summary.first_key.value = sstables::key::from_partition_key(*_sst->_schema, first_key).get_bytes();
+        _sst->_components->summary.last_key.value = sstables::key::from_partition_key(*_sst->_schema, last_key).get_bytes();
         _sst->set_first_and_last_keys();
         _sst->_components->statistics.contents[metadata_type::Compaction] = std::make_unique<compaction_metadata>();
         _sst->_run_identifier = run_id::create_random_id();
@@ -221,6 +214,11 @@ public:
         return sst._storage.create_links(sst, dir);
     }
 
+    future<> move_to_new_dir(sstring new_dir, generation_type new_generation) {
+        co_await _sst->_storage.move(*_sst, std::move(new_dir), new_generation, nullptr);
+        _sst->_generation = std::move(new_generation);
+    }
+
     static fs::path filename(const sstable& sst, component_type c) {
         return fs::path(sst.filename(c));
     }
@@ -237,91 +235,12 @@ future<> for_each_sstable_version(AsyncAction action) {
     return seastar::do_for_each(all_sstable_versions, std::move(action));
 }
 
-class test_setup {
-    file _f;
-    std::function<future<> (directory_entry de)> _walker;
-    sstring _path;
-    future<> _listing_done;
-
-    static sstring& path() {
-        static sstring _p = "test/resource/sstables/tests-temporary";
-        return _p;
-    };
-
-public:
-    test_setup(file f, sstring path)
-            : _f(std::move(f))
-            , _path(path)
-            , _listing_done(_f.list_directory([this] (directory_entry de) { return _remove(de); }).done()) {
-    }
-    ~test_setup() {
-        // FIXME: discarded future.
-        (void)_f.close().finally([save = _f] {});
-    }
-protected:
-    future<> _create_directory(sstring name) {
-        return make_directory(name);
-    }
-
-    future<> _remove(directory_entry de) {
-        sstring t = _path + "/" + de.name;
-        return file_type(t).then([t] (std::optional<directory_entry_type> det) {
-            auto f = make_ready_future<>();
-
-            if (!det) {
-                throw std::runtime_error("Can't determine file type\n");
-            } else if (det == directory_entry_type::directory) {
-                f = empty_test_dir(t);
-            }
-            return f.then([t] {
-                return remove_file(t);
-            });
-        });
-    }
-    future<> done() { return std::move(_listing_done); }
-
-    static future<> empty_test_dir(sstring p = path()) {
-        return open_directory(p).then([p] (file f) {
-            auto l = make_lw_shared<test_setup>(std::move(f), p);
-            return l->done().then([l] { });
-        });
-    }
-public:
-    static future<> create_empty_test_dir(sstring p = path()) {
-        return make_directory(p).then_wrapped([p] (future<> f) {
-            try {
-                f.get();
-            // it's fine if the directory exists, just shut down the exceptional future message
-            } catch (std::exception& e) {}
-            return empty_test_dir(p);
-        });
-    }
-
-    static future<> do_with_tmp_directory(std::function<future<> (test_env&, sstring tmpdir_path)>&& fut) {
-        return test_env::do_with_async([fut = std::move(fut)] (test_env& env) {
-            auto tmp = tmpdir();
-            fut(env, tmp.path().string()).get();
-        });
-    }
-
-    static future<> do_with_cloned_tmp_directory(sstring src, std::function<future<> (test_env&, sstring srcdir_path, sstring destdir_path)>&& fut) {
-        return test_env::do_with_async([fut = std::move(fut), src = std::move(src)] (test_env& env) {
-            auto src_dir = tmpdir();
-            for (const auto& entry : std::filesystem::directory_iterator(src.c_str())) {
-                std::filesystem::copy(entry.path(), src_dir.path() / entry.path().filename());
-            }
-            auto dest_path = src_dir.path() / sstables::staging_dir;
-            std::filesystem::create_directories(dest_path);
-            fut(env, src_dir.path().string(), dest_path.string()).get();
-        });
-    }
-};
-
 } // namespace sstables
 
 // Must be used in a seastar thread
 class compaction_manager_for_testing {
     struct wrapped_compaction_manager {
+        tasks::task_manager tm;
         compaction_manager cm;
         explicit wrapped_compaction_manager(bool enabled);
         // Must run in a seastar thread

@@ -25,8 +25,8 @@
 #include <memory>
 #include <seastar/core/seastar.hh>
 
-#include "schema.hh"
-#include "schema_builder.hh"
+#include "schema/schema.hh"
+#include "schema/schema_builder.hh"
 #include "row_cache.hh"
 #include "replica/database.hh"
 #include "cell_locking.hh"
@@ -43,13 +43,16 @@ struct table_for_tests {
         replica::cf_stats cf_stats{0};
         replica::column_family::config cfg;
         cell_locker_stats cl_stats;
-        compaction_manager cm{compaction_manager::for_testing_tag{}};
+        tasks::task_manager tm;
+        compaction_manager cm{tm, compaction_manager::for_testing_tag{}};
         lw_shared_ptr<replica::column_family> cf;
         std::unique_ptr<table_state> table_s;
         data();
         ~data();
     };
     lw_shared_ptr<data> _data;
+
+    static schema_ptr make_default_schema();
 
     explicit table_for_tests(sstables::sstables_manager& sstables_manager);
 
@@ -74,6 +77,3 @@ struct table_for_tests {
         return stop().finally([cf = *this] {});
     }
 };
-
-dht::token create_token_from_key(const dht::i_partitioner&, sstring key);
-range<dht::token> create_token_range_from_keys(const dht::sharder& sharder, const dht::i_partitioner&, sstring start_key, sstring end_key);

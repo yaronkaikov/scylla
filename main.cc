@@ -402,7 +402,7 @@ static auto defer_verbose_shutdown(const char* what, Func&& func) {
                 // System error codes we consider "environmental",
                 // i.e. not scylla's fault, therefore there is no point in
                 // aborting and dumping core.
-                for (int i : {EIO, EACCES, ENOSPC}) {
+                for (int i : {EIO, EACCES, EDQUOT, ENOSPC}) {
                     if (e.code() == std::error_code(i, std::system_category())) {
                         do_abort = false;
                         break;
@@ -478,7 +478,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     // We need to have the entire app config to run the app, but we need to
     // run the app to read the config file with UDF specific options so that
     // we know whether we need to reserve additional memory for UDFs.
-    app_cfg.reserve_additional_memory = db::config::wasm_udf_reserved_memory;
+    app_cfg.reserve_additional_memory_per_shard = db::config::wasm_udf_reserved_memory;
     app_template app(std::move(app_cfg));
 
     auto ext = std::make_shared<db::extensions>();
@@ -1000,7 +1000,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             service_memory_limiter.start(memory::stats().total_memory()).get();
-            auto stop_mem_limiter = defer_verbose_shutdown("service_memory_limiter", [&service_memory_limiter] {
+            auto stop_mem_limiter = defer_verbose_shutdown("service_memory_limiter", [] {
                 // Uncomment this once services release all the memory on stop
                 // service_memory_limiter.stop().get();
             });
@@ -1052,8 +1052,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     .throughput_mb_per_sec = cfg->compaction_throughput_mb_per_sec,
                 };
             });
-            cm.start(std::move(get_cm_cfg), std::ref(stop_signal.as_sharded_abort_source())).get();
-            auto stop_cm = deferred_stop(cm);
+            cm.start(std::move(get_cm_cfg), std::ref(stop_signal.as_sharded_abort_source()), std::ref(task_manager)).get();
+            auto stop_cm = defer_verbose_shutdown("compaction_manager", [&cm] {
+               cm.stop().get();
+            });
 
             supervisor::notify("starting database");
             debug::the_database = &db;
@@ -1163,14 +1165,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     qp.set_wasm_instance_cache(&wasm_instance_cache.local());
                 }).get();
             }
-            supervisor::notify("initializing batchlog manager");
-            db::batchlog_manager_config bm_cfg;
-            bm_cfg.write_request_timeout = cfg->write_request_timeout_in_ms() * 1ms;
-            bm_cfg.replay_rate = cfg->batchlog_replay_throttle_in_kb() * 1000;
-            bm_cfg.delay = std::chrono::milliseconds(cfg->ring_delay_ms());
-
-            bm.start(std::ref(qp), bm_cfg).get();
-
             sstables::init_metrics().get();
 
             // FIXME -- this sys_ks start should really be up above, where its instance
@@ -1179,6 +1173,14 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 return sys_ks.start(snitch.local());
             }).get();
             cfg->host_id = sys_ks.local().load_local_host_id().get0();
+
+            supervisor::notify("initializing batchlog manager");
+            db::batchlog_manager_config bm_cfg;
+            bm_cfg.write_request_timeout = cfg->write_request_timeout_in_ms() * 1ms;
+            bm_cfg.replay_rate = cfg->batchlog_replay_throttle_in_kb() * 1000;
+            bm_cfg.delay = std::chrono::milliseconds(cfg->ring_delay_ms());
+
+            bm.start(std::ref(qp), std::ref(sys_ks), bm_cfg).get();
 
             if (raft_gr.local().is_enabled()) {
                 auto my_raft_id = raft::server_id{cfg->host_id.uuid()};
@@ -1257,7 +1259,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 auto paths = sch_cl->get_segments_to_replay().get();
                 if (!paths.empty()) {
                     supervisor::notify("replaying schema commit log");
-                    auto rp = db::commitlog_replayer::create_replayer(db).get0();
+                    auto rp = db::commitlog_replayer::create_replayer(db, sys_ks).get0();
                     rp.recover(paths, db::schema_tables::COMMITLOG_FILENAME_PREFIX).get();
                     supervisor::notify("replaying schema commit log - flushing memtables");
                     db.invoke_on_all([] (replica::database& db) {
@@ -1283,7 +1285,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 auto paths = cl->get_segments_to_replay().get();
                 if (!paths.empty()) {
                     supervisor::notify("replaying commit log");
-                    auto rp = db::commitlog_replayer::create_replayer(db).get0();
+                    auto rp = db::commitlog_replayer::create_replayer(db, sys_ks).get0();
                     rp.recover(paths, db::commitlog::descriptor::FILENAME_PREFIX).get();
                     supervisor::notify("replaying commit log - flushing memtables");
                     db.invoke_on_all([] (replica::database& db) {
@@ -1313,7 +1315,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // group that was effectively used in the bulk of it (compaction). Soon it will become
             // streaming
 
-            db.invoke_on_all([&proxy] (replica::database& db) {
+            db.invoke_on_all([] (replica::database& db) {
                 for (auto& x : db.get_column_families()) {
                     replica::column_family& cf = *(x.second);
                     cf.trigger_compaction();
@@ -1325,7 +1327,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 api::unset_server_snitch(ctx).get();
             });
             api::set_server_storage_proxy(ctx, ss).get();
-            api::set_server_load_sstable(ctx).get();
+            api::set_server_load_sstable(ctx, sys_ks).get();
+            auto stop_cf_api = defer_verbose_shutdown("column family API", [&ctx] {
+                api::unset_server_load_sstable(ctx).get();
+            });
             static seastar::sharded<memory_threshold_guard> mtg;
             mtg.start(cfg->large_memory_allocation_warning_threshold()).get();
             supervisor::notify("initializing migration manager RPC verbs");
@@ -1431,9 +1436,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 api::unset_server_repair(ctx).get();
             });
 
-            api::set_server_task_manager(ctx).get();
+            api::set_server_task_manager(ctx, cfg).get();
 #ifndef SCYLLA_BUILD_MODE_RELEASE
-            api::set_server_task_manager_test(ctx, cfg).get();
+            api::set_server_task_manager_test(ctx).get();
 #endif
             supervisor::notify("starting sstables loader");
             sst_loader.start(std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(messaging)).get();
@@ -1606,7 +1611,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             static sharded<db::view::view_builder> view_builder;
             if (cfg->view_building()) {
                 supervisor::notify("starting the view builder");
-                view_builder.start(std::ref(db), std::ref(sys_dist_ks), std::ref(mm_notifier)).get();
+                view_builder.start(std::ref(db), std::ref(sys_ks), std::ref(sys_dist_ks), std::ref(mm_notifier)).get();
                 view_builder.invoke_on_all([&mm] (db::view::view_builder& vb) { 
                     return vb.start(mm.local());
                 }).get();
@@ -1762,26 +1767,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
   }
 }
 
-using main_func_type = std::function<int(int, char**)>;
-static main_func_type lookup_main_func(std::string_view name) {
-    std::pair<std::string_view, main_func_type> funcs[] = {
-        {"server", scylla_main},
-        {"types", tools::scylla_types_main},
-        {"sstable", tools::scylla_sstable_main},
-        {"perf-fast-forward", perf::scylla_fast_forward_main},
-        {"perf-row-cache-update", perf::scylla_row_cache_update_main},
-        {"perf-simple-query", perf::scylla_simple_query_main},
-        {"perf-sstable", perf::scylla_sstable_main},
-    };
-    auto found = std::ranges::find_if(funcs, [name] (auto& name_and_func) {
-        return name_and_func.first == name;
-    });
-    if (found == std::end(funcs)) {
-        return {};
-    }
-    return found->second;
-}
-
 int main(int ac, char** av) {
     // early check to avoid triggering
     if (!cpu_sanity()) {
@@ -1793,16 +1778,34 @@ int main(int ac, char** av) {
         exec_name = av[1];
     }
 
-    std::function<int(int, char**)> main_func;
+    using main_func_type = std::function<int(int, char**)>;
+    struct tool {
+        std::string_view name;
+        main_func_type func;
+        std::string_view desc;
+    };
+    const tool tools[] = {
+        {"server", scylla_main, "the scylladb server"},
+        {"types", tools::scylla_types_main, "a command-line tool to examine values belonging to scylla types"},
+        {"sstable", tools::scylla_sstable_main, "a multifunctional command-line tool to examine the content of sstables"},
+        {"perf-fast-forward", perf::scylla_fast_forward_main, "run performance tests by fast forwarding the reader on this server"},
+        {"perf-row-cache-update", perf::scylla_row_cache_update_main, "run performance tests by updating row cache on this server"},
+        {"perf-simple-query", perf::scylla_simple_query_main, "run performance tests by sending simple queries to this server"},
+        {"perf-sstable", perf::scylla_sstable_main, "run performance tests by exercising sstable related operations on this server"},
+    };
+
+    main_func_type main_func;
     if (exec_name.empty() || exec_name[0] == '-') {
         main_func = scylla_main;
-    } else {
-        main_func = lookup_main_func(exec_name);
+    } else if (auto tool = std::ranges::find_if(tools, [exec_name] (auto& tool) {
+                               return tool.name == exec_name;
+                           });
+               tool != std::ranges::end(tools)) {
+        main_func = tool->func;
         // shift args to consume the recognized tool name
         std::shift_left(av + 1, av + ac, 1);
         --ac;
-    }
-    if (!main_func) {
+    } else {
         fmt::print("error: unrecognized first argument: expected it to be \"server\", a regular command-line argument or a valid tool name (see `scylla --list-tools`), but got {}\n", exec_name);
         return 1;
     }
@@ -1833,10 +1836,9 @@ int main(int ac, char** av) {
         return 0;
     }
     if (preinit_vm["list-tools"].as<bool>()) {
-        fmt::print(
-                "types - a command-line tool to examine values belonging to scylla types\n"
-                "sstable - a multifunctional command-line tool to examine the content of sstables\n"
-        );
+        for (auto& tool : tools) {
+            fmt::print("{} - {}\n", tool.name, tool.desc);
+        }
         return 0;
     }
 

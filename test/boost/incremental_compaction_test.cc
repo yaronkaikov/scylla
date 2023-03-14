@@ -16,7 +16,7 @@
 #include <seastar/testing/thread_test_case.hh>
 #include "sstables/sstables.hh"
 #include "compaction/incremental_compaction_strategy.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "replica/database.hh"
 #include "compaction/compaction_manager.hh"
 #include "sstable_test.hh"
@@ -24,6 +24,7 @@
 #include "test/lib/tmpdir.hh"
 #include "cell_locking.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
+#include "test/lib/key_utils.hh"
 #include "service/storage_proxy.hh"
 #include "test/lib/sstable_run_based_compaction_strategy_for_tests.hh"
 #include "dht/i_partitioner.hh"
@@ -80,14 +81,14 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             return compact_sstables(cm, std::move(desc), cf.as_table_state(), sst_gen, replacer).get0().new_sstables;
         };
         auto make_insert = [&] (auto p) {
-            auto key = partition_key::from_exploded(*s, {to_bytes(p.first)});
+            auto key = p.key();
             mutation m(s, key);
             m.set_clustered_cell(clustering_key::make_empty(), bytes("value"), data_value(int32_t(1)), 1 /* ts */);
-            BOOST_REQUIRE(m.decorated_key().token() == p.second);
+            BOOST_REQUIRE(m.decorated_key().token() == p.token());
             return m;
         };
 
-        auto tokens = token_generation_for_current_shard(16);
+        auto tokens = tests::generate_partition_keys(16, s, local_shard_only::yes, tests::key_size{8, 8});
         std::unordered_set<shared_sstable> sstables;
         std::vector<utils::observer<sstable&>> observers;
         sstables::sstable_run_based_compaction_strategy_for_tests cs;
@@ -231,7 +232,8 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
         shared_sstable make_sstable_with_size(size_t sstable_data_size) {
             static thread_local unsigned gen = 0;
             auto sst = _env.make_sstable(_cf->schema(), "", gen++, sstable_version_types::md, big);
-            sstables::test(sst).set_values("z", "a", stats_metadata{}, sstable_data_size);
+            auto keys = tests::generate_partition_keys(2, _cf->schema(), local_shard_only::yes);
+            sstables::test(sst).set_values(keys[0].key(), keys[1].key(), stats_metadata{}, sstable_data_size);
             return sst;
         }
 
@@ -399,11 +401,10 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
         builder.set_compaction_strategy_options(std::move(opts));
         auto s = builder.build();
 
-        auto tokens = token_generation_for_shard(disjoint_sstable_count, this_shard_id(), db::default_murmur3_partitioner_ignore_msb_bits, smp::count);
+        auto tokens = tests::generate_partition_keys(disjoint_sstable_count, s, local_shard_only::yes);
 
         auto make_row = [&](unsigned token_idx) {
-            auto key_str = tokens[token_idx].first;
-            auto key = partition_key::from_exploded(*s, {to_bytes(key_str)});
+            auto key = tokens[token_idx].key();
 
             mutation m(s, key);
             auto value = 1;

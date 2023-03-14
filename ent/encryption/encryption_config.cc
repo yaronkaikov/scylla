@@ -70,7 +70,22 @@ Hosts are tried in the order they appear here. Add them in the same sequence the
 KMIP requests will fail over/retry 'max_command_retries' times (default 3)
 
 )foo")
-		  
+		  , kms_hosts(this, "kms_hosts", value_status::Used, { },
+                                R"foo(KMS host(s). 
+
+The unique name of kms host that can be referenced in table schema.
+
+host.yourdomain.com={ endpoint=<http(s)://host[:port]>, aws_access_key_id=<AWS access id>, aws_secret_access_key=<AWS secret key>, aws_region=<AWS region>, master_key=<alias or id>, keyfile=/path/to/keyfile, truststore=/path/to/truststore.pem, key_cache_millis=<cache ms>, timeout=<timeout ms> }:...
+
+Actual connection can be either an explicit endpoint (<host>:<port>), or selected automatic via aws_region.
+
+Authentication can be explicit with aws_access_key_id and aws_secret_access_key. Either secret or both can be ommitted
+in which case the provider will try to read them from AWS credentials in ~/.aws/credentials
+
+master_key is an AWS KMS key id or alias from which all keys used for actual encryption of scylla data will be derived.
+This key must be pre-created with access policy allowing the above AWS id Encrypt, Decrypt and GenerateDataKey operations.
+
+)foo")
 // END entry definitions
 {}
 

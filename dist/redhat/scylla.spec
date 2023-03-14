@@ -201,7 +201,7 @@ License:        Proprietary
 URL:            http://www.scylladb.com/
 Requires:       kmod
 # tuned overwrites our sysctl settings
-Obsoletes:	tuned
+Obsoletes:      tuned >= 2.11.0
 Obsoletes:      scylla-enterprise-kernel-conf < 2.2
 
 %description kernel-conf

@@ -13,12 +13,12 @@
 #include <seastar/core/sleep.hh>
 #include "alternator/executor.hh"
 #include "log.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "data_dictionary/keyspace_metadata.hh"
 #include "exceptions/exceptions.hh"
 #include "timestamp.hh"
 #include "types/map.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "query-request.hh"
 #include "query-result-reader.hh"
 #include "cql3/selection/selection.hh"
@@ -41,7 +41,7 @@
 #include <boost/algorithm/cxx11/any_of.hpp>
 #include "collection_mutation.hh"
 #include "db/query_context.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "db/tags/extension.hh"
 #include "db/tags/utils.hh"
 #include "alternator/rmw_operation.hh"
@@ -51,10 +51,12 @@
 #include <unordered_set>
 #include "service/storage_proxy.hh"
 #include "gms/gossiper.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "utils/error_injection.hh"
 #include "db/schema_tables.hh"
 #include "utils/rjson.hh"
+
+using namespace std::chrono_literals;
 
 logging::logger elogger("alternator-executor");
 
@@ -1543,7 +1545,7 @@ future<executor::request_return_type> rmw_operation::execute(service::storage_pr
             // This is the old, unsafe, read before write which does first
             // a read, then a write. TODO: remove this mode entirely.
             return get_previous_item(proxy, client_state, schema(), _pk, _ck, permit, stats).then(
-                    [this, &client_state, &proxy, trace_state, permit = std::move(permit)] (std::unique_ptr<rjson::value> previous_item) mutable {
+                    [this, &proxy, trace_state, permit = std::move(permit)] (std::unique_ptr<rjson::value> previous_item) mutable {
                 std::optional<mutation> m = apply(std::move(previous_item), api::new_timestamp());
                 if (!m) {
                     return make_ready_future<executor::request_return_type>(api_error::conditional_check_failed("Failed condition."));

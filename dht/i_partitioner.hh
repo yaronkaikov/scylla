@@ -12,7 +12,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/util/optimized_optional.hh>
-#include "types.hh"
+#include "types/types.hh"
 #include "keys.hh"
 #include "utils/managed_bytes.hh"
 #include <memory>
@@ -653,6 +653,9 @@ std::unique_ptr<dht::i_partitioner> make_partitioner(sstring name);
 // the result of subtracting all ranges from ranges_to_subtract.
 // ranges_to_subtract must be sorted and deoverlapped.
 future<dht::partition_range_vector> subtract_ranges(const schema& schema, const dht::partition_range_vector& ranges, dht::partition_range_vector ranges_to_subtract);
+
+// Returns a token_range vector split based on the given number of most-significant bits
+dht::token_range_vector split_token_range_msb(unsigned most_significant_bits);
 
 } // dht
 

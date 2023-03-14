@@ -1,12 +1,12 @@
 #include <chrono>
 #include <cstdint>
 #include <seastar/core/coroutine.hh>
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
 
-#include "mutation.hh"
+#include "mutation/mutation.hh"
 #include "service/storage_proxy.hh"
 
 SEASTAR_TEST_CASE(test_internal_operation_filtering) {

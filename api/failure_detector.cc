@@ -11,7 +11,9 @@
 #include "gms/failure_detector.hh"
 #include "gms/application_state.hh"
 #include "gms/gossiper.hh"
+
 namespace api {
+using namespace seastar::httpd;
 
 namespace fd = httpd::failure_detector_json;
 
@@ -62,7 +64,9 @@ void set_failure_detector(http_context& ctx, routes& r, gms::gossiper& g) {
     });
 
     fd::set_phi_convict_threshold.set(r, [](std::unique_ptr<request> req) {
-        double phi = atof(req->get_query_param("phi").c_str());
+        // TBD
+        unimplemented();
+        std::ignore = atof(req->get_query_param("phi").c_str());
         return make_ready_future<json::json_return_type>("");
     });
 

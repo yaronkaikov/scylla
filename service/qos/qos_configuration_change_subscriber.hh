@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <seastar/core/io_priority_class.hh>
+
 #include "qos_common.hh"
 
 

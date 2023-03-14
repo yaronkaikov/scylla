@@ -7,13 +7,13 @@
  */
 
 #include <string_view>
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/net/inet_address.hh>
 #include "utils/UUID_gen.hh"
 #include <boost/asio/ip/address_v4.hpp>
 #include <seastar/net/ip.hh>
 #include <boost/multiprecision/cpp_int.hpp>
-#include "types.hh"
+#include "types/types.hh"
 #include "types/tuple.hh"
 #include "compound.hh"
 #include "db/marshal/type_parser.hh"

@@ -13,8 +13,8 @@
 #include <vector>
 #include "cql3/assignment_testable.hh"
 #include "query-request.hh"
-#include "types.hh"
-#include "schema_fwd.hh"
+#include "types/types.hh"
+#include "schema/schema_fwd.hh"
 #include "counters.hh"
 
 namespace cql3 {

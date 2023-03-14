@@ -19,7 +19,7 @@
 #include "readers/multishard.hh"
 #include "readers/mutation_source.hh"
 #include "readers/queue.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 
 extern logger mrlog;
 
@@ -158,7 +158,7 @@ future<> foreign_reader::fast_forward_to(const dht::partition_range& pr) {
 }
 
 future<> foreign_reader::fast_forward_to(position_range pr) {
-    forward_buffer_to(pr.start());
+    clear_buffer();
     _end_of_stream = false;
     return forward_operation([reader = _reader.get(), pr = std::move(pr)] () {
         return reader->fast_forward_to(std::move(pr));

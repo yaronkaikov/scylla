@@ -12,12 +12,12 @@
 #include "repair/repair_task.hh"
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
-#include "mutation_fragment.hh"
+#include "mutation/mutation_fragment.hh"
 #include "mutation_writer/multishard_writer.hh"
 #include "dht/i_partitioner.hh"
 #include "dht/sharder.hh"
-#include "to_string.hh"
-#include "xx_hasher.hh"
+#include "utils/to_string.hh"
+#include "utils/xx_hasher.hh"
 #include "utils/UUID.hh"
 #include "utils/hash.hh"
 #include "service/priority_manager.hh"
@@ -36,7 +36,7 @@
 #include "gms/i_endpoint_state_change_subscriber.hh"
 #include "gms/gossiper.hh"
 #include "repair/row_level.hh"
-#include "mutation_source_metadata.hh"
+#include "mutation/mutation_source_metadata.hh"
 #include "utils/stall_free.hh"
 #include "service/migration_manager.hh"
 #include "streaming/consumer.hh"
@@ -55,7 +55,7 @@
 #include "repair/decorated_key_with_hash.hh"
 #include "repair/row.hh"
 #include "repair/writer.hh"
-#include "xx_hasher.hh"
+#include "utils/xx_hasher.hh"
 
 extern logging::logger rlogger;
 
@@ -998,7 +998,7 @@ private:
                 return repeat([this, &sharder, &partitions_sum] () mutable {
                     auto shard_range = sharder.next();
                     if (shard_range) {
-                        return do_estimate_partitions_on_all_shards().then([this, &partitions_sum] (uint64_t partitions) mutable {
+                        return do_estimate_partitions_on_all_shards().then([&partitions_sum] (uint64_t partitions) mutable {
                             partitions_sum += partitions;
                             return make_ready_future<stop_iteration>(stop_iteration::no);
                         });
@@ -1177,7 +1177,7 @@ private:
             // contains rows within (_last_sync_boundary,
             // _current_sync_boundary], _row_buf contains rows wthin
             // (_current_sync_boundary, ...]
-            return repeat([this, &it, sz] () {
+            return repeat([this, &it] () {
                 if (it == _row_buf.rend()) {
                     return make_ready_future<stop_iteration>(stop_iteration::yes);
                 }
@@ -1228,7 +1228,7 @@ private:
     future<std::list<repair_row>>
     copy_rows_from_working_row_buf() {
         return do_with(std::list<repair_row>(), [this] (std::list<repair_row>& rows) {
-            return do_for_each(_working_row_buf, [this, &rows] (const repair_row& r) {
+            return do_for_each(_working_row_buf, [&rows] (const repair_row& r) {
                 rows.push_back(r);
             }).then([&rows] {
                 return std::move(rows);
@@ -1240,7 +1240,7 @@ private:
     copy_rows_from_working_row_buf_within_set_diff(repair_hash_set set_diff) {
         return do_with(std::list<repair_row>(), std::move(set_diff),
                 [this] (std::list<repair_row>& rows, repair_hash_set& set_diff) {
-            return do_for_each(_working_row_buf, [this, &set_diff, &rows] (const repair_row& r) {
+            return do_for_each(_working_row_buf, [&set_diff, &rows] (const repair_row& r) {
                 if (set_diff.contains(r.hash())) {
                     rows.push_back(r);
                 }
@@ -1686,7 +1686,7 @@ private:
             needs_all_rows_t needs_all_rows,
             rpc::sink<repair_hash_with_cmd>& sink,
             gms::inet_address remote_node) {
-        return do_with(std::move(set_diff), [needs_all_rows, remote_node, &sink] (repair_hash_set& set_diff) mutable {
+        return do_with(std::move(set_diff), [needs_all_rows, &sink] (repair_hash_set& set_diff) mutable {
             if (inject_rpc_stream_error) {
                 return make_exception_future<>(std::runtime_error("get_row_diff: Inject sender error in sink loop"));
             }
@@ -1805,7 +1805,7 @@ private:
             repair_rows_on_wire rows,
             rpc::sink<repair_row_on_wire_with_cmd>& sink,
             gms::inet_address remote_node) {
-        return do_with(std::move(rows), [&sink, remote_node] (repair_rows_on_wire& rows) mutable {
+        return do_with(std::move(rows), [&sink] (repair_rows_on_wire& rows) mutable {
             return do_for_each(rows, [&sink] (repair_row_on_wire& row) mutable {
                 rlogger.trace("put_row_diff: send row");
                 return sink(repair_row_on_wire_with_cmd{repair_stream_cmd::row_data, std::move(row)});
@@ -2578,7 +2578,7 @@ private:
             // are identical, there is no need to transfer each and every
             // row hashes to the repair master.
             master.all_nodes()[idx].state = repair_state::get_combined_row_hash_started;
-            return master.get_combined_row_hash(_common_sync_boundary, master.all_nodes()[idx].node).then([&, this, idx] (get_combined_row_hash_response resp) {
+            return master.get_combined_row_hash(_common_sync_boundary, master.all_nodes()[idx].node).then([&, idx] (get_combined_row_hash_response resp) {
                 master.all_nodes()[idx].state = repair_state::get_combined_row_hash_finished;
                 rlogger.debug("Calling master.get_combined_row_hash for node {}, got combined_hash={}", master.all_nodes()[idx].node, resp);
                 combined_hashes[idx]= std::move(resp);
@@ -2724,7 +2724,7 @@ private:
         size_t repaired_replicas = _all_live_peer_nodes.size() + 1;
         if (_shard_task.total_rf != repaired_replicas){
             rlogger.debug("repair[{}]: Skipped to update system.repair_history total_rf={}, repaired_replicas={}, local={}, peers={}",
-                    _shard_task.id.uuid(), _shard_task.total_rf, repaired_replicas, utils::fb_utilities::get_broadcast_address(), _all_live_peer_nodes);
+                    _shard_task.global_repair_id.uuid(), _shard_task.total_rf, repaired_replicas, utils::fb_utilities::get_broadcast_address(), _all_live_peer_nodes);
             co_return;
         }
         // Update repair_history table only if both hints and batchlog have been flushed.
@@ -2732,12 +2732,12 @@ private:
             co_return;
         }
         repair_service& rs = _shard_task.rs;
-        std::optional<gc_clock::time_point> repair_time_opt = co_await rs.update_history(_shard_task.id.uuid(), _table_id, _range, _start_time);
+        std::optional<gc_clock::time_point> repair_time_opt = co_await rs.update_history(_shard_task.global_repair_id.uuid(), _table_id, _range, _start_time);
         if (!repair_time_opt) {
             co_return;
         }
         auto repair_time = repair_time_opt.value();
-        repair_update_system_table_request req{_shard_task.id.uuid(), _table_id, _shard_task.get_keyspace(), _cf_name, _range, repair_time};
+        repair_update_system_table_request req{_shard_task.global_repair_id.uuid(), _table_id, _shard_task.get_keyspace(), _cf_name, _range, repair_time};
         auto all_nodes = _all_live_peer_nodes;
         all_nodes.push_back(utils::fb_utilities::get_broadcast_address());
         co_await coroutine::parallel_for_each(all_nodes, [this, req] (gms::inet_address node) -> future<> {
@@ -2745,9 +2745,9 @@ private:
                 auto& ms = _shard_task.messaging.local();
                 repair_update_system_table_response resp = co_await ser::partition_checksum_rpc_verbs::send_repair_update_system_table(&ms, netw::messaging_service::msg_addr(node), req);
                 (void)resp;  // nothing to do with the response yet
-                rlogger.debug("repair[{}]: Finished to update system.repair_history table of node {}", _shard_task.id.uuid(), node);
+                rlogger.debug("repair[{}]: Finished to update system.repair_history table of node {}", _shard_task.global_repair_id.uuid(), node);
             } catch (...) {
-                rlogger.warn("repair[{}]: Failed to update system.repair_history table of node {}: {}", _shard_task.id.uuid(), node, std::current_exception());
+                rlogger.warn("repair[{}]: Failed to update system.repair_history table of node {}: {}", _shard_task.global_repair_id.uuid(), node, std::current_exception());
             }
         });
         co_return;
@@ -2774,10 +2774,10 @@ public:
             auto wanted = (_all_live_peer_nodes.size() + 1) * repair_module::max_repair_memory_per_range;
             wanted = std::min(max, wanted);
             rlogger.trace("repair[{}]: Started to get memory budget, wanted={}, available={}, max_repair_memory={}",
-                    _shard_task.id.uuid(), wanted, mem_sem.current(), max);
+                    _shard_task.global_repair_id.uuid(), wanted, mem_sem.current(), max);
             auto mem_permit = seastar::get_units(mem_sem, wanted).get0();
             rlogger.trace("repair[{}]: Finished to get memory budget, wanted={}, available={}, max_repair_memory={}",
-                    _shard_task.id.uuid(), wanted, mem_sem.current(), max);
+                    _shard_task.global_repair_id.uuid(), wanted, mem_sem.current(), max);
 
             auto permit = _shard_task.db.local().obtain_reader_permit(_cf, "repair-meta", db::no_timeout).get0();
 
@@ -2849,11 +2849,11 @@ public:
             } catch (replica::no_such_column_family& e) {
                 table_dropped = true;
                 rlogger.warn("repair[{}]: shard={}, keyspace={}, cf={}, range={}, got error in row level repair: {}",
-                        _shard_task.id.uuid(), this_shard_id(), _shard_task.get_keyspace(), _cf_name, _range, e);
+                        _shard_task.global_repair_id.uuid(), this_shard_id(), _shard_task.get_keyspace(), _cf_name, _range, e);
                 _failed = true;
             } catch (std::exception& e) {
                 rlogger.warn("repair[{}]: shard={}, keyspace={}, cf={}, range={}, got error in row level repair: {}",
-                        _shard_task.id.uuid(), this_shard_id(), _shard_task.get_keyspace(), _cf_name, _range, e);
+                        _shard_task.global_repair_id.uuid(), this_shard_id(), _shard_task.get_keyspace(), _cf_name, _range, e);
                 // In case the repair process fail, we need to call repair_row_level_stop to clean up repair followers
                 _failed = true;
             }
@@ -3097,12 +3097,10 @@ repair_service::insert_repair_meta(
             max_row_buf_size,
             seed,
             master_node_shard_config,
-            schema_version,
             reason] (schema_ptr s) {
         auto& db = get_db();
         auto& cf = db.local().find_column_family(s->id());
         return db.local().obtain_reader_permit(cf, "repair-meta", db::no_timeout).then([s = std::move(s),
-                &db,
                 &cf,
                 this,
                 from,
@@ -3112,7 +3110,6 @@ repair_service::insert_repair_meta(
                 max_row_buf_size,
                 seed,
                 master_node_shard_config,
-                schema_version,
                 reason] (reader_permit permit) mutable {
         node_repair_meta_id id{from, repair_meta_id};
         auto rm = make_shared<repair_meta>(*this,

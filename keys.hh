@@ -9,12 +9,12 @@
 #pragma once
 
 #include "bytes.hh"
-#include "types.hh"
+#include "types/types.hh"
 #include "compound_compat.hh"
 #include "utils/managed_bytes.hh"
-#include "hashing.hh"
+#include "utils/hashing.hh"
 #include "replica/database_fwd.hh"
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include <compare>
 
 //

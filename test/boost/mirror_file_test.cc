@@ -153,7 +153,6 @@ SEASTAR_THREAD_TEST_CASE(test_mirror_file_dma_read_iov) {
     auto fpath = tmp.path() / name.c_str();
     auto size = file_size(fpath.native()).get0();
     auto mirrored = make_in_memory_mirror_file(primary, fpath.native(), true /* check_integrity */).get0();
-    auto aligned_size = align_up(size, mirrored.disk_read_dma_alignment());
 
     std::vector<std::unique_ptr<char_type[], free_deleter>> bufs;
     std::vector<iovec> iovs;

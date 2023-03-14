@@ -41,7 +41,7 @@
 #include "auth/common.hh"
 #include "db/config.hh"
 #include "db/batchlog_manager.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "test/lib/tmpdir.hh"
 #include "db/query_context.hh"
 #include "test/lib/test_services.hh"
@@ -49,6 +49,7 @@
 #include "unit_test_service_levels_accessor.hh"
 #include "db/view/view_builder.hh"
 #include "db/view/node_view_update_backlog.hh"
+#include "db/view/view_update_generator.hh"
 #include "replica/distributed_loader.hh"
 // TODO: remove (#293)
 #include "message/messaging_service.hh"
@@ -430,8 +431,8 @@ public:
         return _group0_registry;
     }
 
-    virtual db::system_keyspace& get_system_keyspace() override {
-        return _sys_ks.local();
+    virtual sharded<db::system_keyspace>& get_system_keyspace() override {
+        return _sys_ks;
     }
 
     virtual future<> refresh_client_state() override {
@@ -489,6 +490,7 @@ public:
             // FIXME: handle signals (SIGINT, SIGTERM) - request aborts
             auto stop_abort_sources = defer([&] { abort_sources.stop().get(); });
             sharded<compaction_manager> cm;
+            sharded<tasks::task_manager> task_manager;
             sharded<replica::database> db;
             debug::the_database = &db;
             auto reset_db_ptr = defer([] {
@@ -684,6 +686,16 @@ public:
             dbcfg.gossip_scheduling_group = scheduling_groups.gossip_scheduling_group;
             dbcfg.sstables_format = sstables::from_string(cfg->sstable_format());
 
+            auto get_tm_cfg = sharded_parameter([&] {
+                return tasks::task_manager::config {
+                    .task_ttl = cfg->task_ttl_seconds,
+                };
+            });
+            task_manager.start(std::move(get_tm_cfg), std::ref(abort_sources)).get();
+            auto stop_task_manager = defer([&task_manager] {
+                task_manager.stop().get();
+            });
+
             // get_cm_cfg is called on each shard when starting a sharded<compaction_manager>
             // we need the getter since updateable_value is not shard-safe (#7316)
             auto get_cm_cfg = sharded_parameter([&] {
@@ -695,7 +707,7 @@ public:
                     .throughput_mb_per_sec = cfg->compaction_throughput_mb_per_sec,
                 };
             });
-            cm.start(std::move(get_cm_cfg), std::ref(abort_sources)).get();
+            cm.start(std::move(get_cm_cfg), std::ref(abort_sources), std::ref(task_manager)).get();
             auto stop_cm = deferred_stop(cm);
 
             db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata), std::ref(cm), std::ref(sst_dir_semaphore), utils::cross_shard_barrier()).get();
@@ -760,7 +772,7 @@ public:
             bmcfg.replay_rate = 100000000;
             bmcfg.write_request_timeout = 2s;
             distributed<db::batchlog_manager> bm;
-            bm.start(std::ref(qp), bmcfg).get();
+            bm.start(std::ref(qp), std::ref(sys_ks), bmcfg).get();
             auto stop_bm = defer([&bm] {
                 bm.stop().get();
             });
@@ -897,7 +909,7 @@ public:
             });
 
             sharded<db::view::view_builder> view_builder;
-            view_builder.start(std::ref(db), std::ref(sys_dist_ks), std::ref(mm_notif)).get();
+            view_builder.start(std::ref(db), std::ref(sys_ks), std::ref(sys_dist_ks), std::ref(mm_notif)).get();
             view_builder.invoke_on_all([&mm] (db::view::view_builder& vb) {
                 return vb.start(mm.local());
             }).get();

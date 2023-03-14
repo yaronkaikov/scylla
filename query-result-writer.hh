@@ -8,12 +8,12 @@
 
 #pragma once
 
-#include "types.hh"
-#include "atomic_cell.hh"
+#include "types/types.hh"
+#include "mutation/atomic_cell.hh"
 #include "query-request.hh"
 #include "query-result.hh"
-#include "digest_algorithm.hh"
-#include "digester.hh"
+#include "utils/digest_algorithm.hh"
+#include "utils/digester.hh"
 #include "full_position.hh"
 #include "idl/query.dist.hh"
 #include "idl/query.dist.impl.hh"

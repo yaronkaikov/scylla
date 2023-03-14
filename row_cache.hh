@@ -15,13 +15,13 @@
 #include <seastar/core/memory.hh>
 #include <seastar/util/noncopyable_function.hh>
 
-#include "mutation_partition.hh"
+#include "mutation/mutation_partition.hh"
 #include "utils/phased_barrier.hh"
 #include "utils/histogram.hh"
-#include "partition_version.hh"
+#include "mutation/partition_version.hh"
 #include "tracing/trace_state.hh"
 #include <seastar/core/metrics_registration.hh>
-#include "mutation_cleaner.hh"
+#include "mutation/mutation_cleaner.hh"
 #include "utils/double-decker.hh"
 #include "db/cache_tracker.hh"
 #include "readers/empty_v2.hh"
@@ -356,7 +356,6 @@ public:
     row_cache(schema_ptr, snapshot_source, cache_tracker&, is_continuous = is_continuous::no);
     row_cache(row_cache&&) = default;
     row_cache(const row_cache&) = delete;
-    row_cache& operator=(row_cache&&) = default;
 public:
     // Implements mutation_source for this cache, see mutation_reader.hh
     // User needs to ensure that the row_cache object stays alive
@@ -492,7 +491,7 @@ public:
     template<typename Func>
     void run_in_update_section_with_allocator(Func &&func) {
         return _cache._update_section(_cache._tracker.region(), [this, &func]() {
-            return with_allocator(_cache._tracker.region().allocator(), [this, &func]() mutable {
+            return with_allocator(_cache._tracker.region().allocator(), [&func]() mutable {
                 return func();
             });
         });

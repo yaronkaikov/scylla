@@ -20,7 +20,7 @@
 #include "cql3/assignment_testable.hh"
 #include "cql3/cql3_type.hh"
 #include "cql3/column_identifier.hh"
-#include "to_string.hh"
+#include "utils/to_string.hh"
 #include "log.hh"
 #include <unordered_map>
 
@@ -71,7 +71,8 @@ public:
     static void add_function(shared_ptr<function>);
     static void replace_function(shared_ptr<function>);
     static void remove_function(const function_name& name, const std::vector<data_type>& arg_types);
-    static std::optional<function_name> used_by_user_aggregate(const function_name& name);
+    static std::optional<function_name> used_by_user_aggregate(shared_ptr<user_function>);
+    static std::optional<function_name> used_by_user_function(const ut_name& user_type);
 private:
     template <typename F>
     static void with_udf_iter(const function_name& name, const std::vector<data_type>& arg_types, F&& f);

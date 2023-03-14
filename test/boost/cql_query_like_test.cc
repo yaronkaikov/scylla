@@ -14,7 +14,7 @@
 #include <boost/multiprecision/cpp_int.hpp>
 #include <source_location>
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
@@ -25,7 +25,7 @@
 #include "types/list.hh"
 #include "types/set.hh"
 #include "test/lib/exception_utils.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "cql3/query_options.hh"
 
 using namespace std::literals::chrono_literals;

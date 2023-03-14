@@ -16,7 +16,7 @@
 
 #include "reader_concurrency_semaphore.hh"
 #include "utils/exceptions.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "utils/human_readable.hh"
 
 logger rcslog("reader_concurrency_semaphore");
@@ -796,6 +796,13 @@ reader_concurrency_semaphore::~reader_concurrency_semaphore() {
 reader_concurrency_semaphore::inactive_read_handle reader_concurrency_semaphore::register_inactive_read(flat_mutation_reader_v2 reader) noexcept {
     auto& permit_impl = *reader.permit()._impl;
     permit_impl.on_register_as_inactive();
+    if (_blessed_permit == &permit_impl) {
+        _blessed_permit = nullptr;
+        // No need to call maybe_admit_waiters() here.
+        // If there are waiters, the reader is going to be evicted below,
+        // triggering a call to maybe_admit_waiters() as its resources are
+        // released.
+    }
     // Implies _inactive_reads.empty(), we don't queue new readers before
     // evicting all inactive reads.
     // Checking the _wait_list covers the count resources only, so check memory
@@ -871,10 +878,7 @@ bool reader_concurrency_semaphore::try_evict_one_inactive_read(evict_reason reas
 
 void reader_concurrency_semaphore::clear_inactive_reads() {
     while (!_inactive_reads.empty()) {
-        auto& ir = _inactive_reads.front();
-        close_reader(std::move(ir.reader));
-        // Destroying the read unlinks it too.
-        std::unique_ptr<inactive_read> _(&*_inactive_reads.begin());
+        evict(_inactive_reads.front(), evict_reason::manual);
     }
 }
 
@@ -1319,7 +1323,7 @@ public:
 
     virtual future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc) override {
         return _permit.request_memory(range_size).then([this, offset, range_size, &pc] (reader_permit::resource_units units) {
-            return get_file_impl(_tracked_file)->dma_read_bulk(offset, range_size, pc).then([this, units = std::move(units)] (temporary_buffer<uint8_t> buf) mutable {
+            return get_file_impl(_tracked_file)->dma_read_bulk(offset, range_size, pc).then([units = std::move(units)] (temporary_buffer<uint8_t> buf) mutable {
                 return make_ready_future<temporary_buffer<uint8_t>>(make_tracked_temporary_buffer(std::move(buf), std::move(units)));
             });
         });

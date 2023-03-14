@@ -15,17 +15,19 @@
 #include <seastar/util/closeable.hh>
 
 #include <seastar/testing/test_case.hh>
+#include <seastar/testing/thread_test_case.hh>
 #include "test/lib/mutation_assertions.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
 #include "test/lib/mutation_source_test.hh"
+#include "test/lib/key_utils.hh"
 
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "test/lib/simple_schema.hh"
 #include "row_cache.hh"
 #include <seastar/core/thread.hh>
 #include "replica/memtable.hh"
 #include "partition_slice_builder.hh"
-#include "mutation_rebuilder.hh"
+#include "mutation/mutation_rebuilder.hh"
 #include "service/migration_manager.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/memtable_snapshot_source.hh"
@@ -2603,7 +2605,7 @@ SEASTAR_TEST_CASE(test_exception_safety_of_reads) {
                 BOOST_REQUIRE(got_opt);
                 BOOST_REQUIRE(!read_mutation_from_flat_mutation_reader(rd).get0());
 
-                assert_that(*got_opt).is_equal_to(mut, ranges);
+                assert_that(*got_opt).is_equal_to_compacted(mut, ranges);
                 assert_that(cache.make_reader(s, semaphore.make_permit(), query::full_partition_range, slice))
                     .produces(mut, ranges);
             });
@@ -3436,7 +3438,7 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
                             slice, actual, ::join(",\n", possible_versions)));
                     }
                 }
-            }).finally([&, id] {
+            }).finally([&] {
                 done = true;
             });
         });
@@ -3951,6 +3953,100 @@ SEASTAR_TEST_CASE(test_scans_erase_dummies) {
     });
 }
 
+SEASTAR_TEST_CASE(test_range_tombstone_adjacent_with_population_bound) {
+    return seastar::async([] {
+        simple_schema s;
+        tests::reader_concurrency_semaphore_wrapper semaphore;
+
+        auto pkey = s.make_pkey("pk");
+
+        mutation m1(s.schema(), pkey);
+        auto k1 = s.make_ckey(7);
+        s.add_row(m1, k1, "v1");
+
+        memtable_snapshot_source underlying(s.schema());
+        underlying.apply(m1);
+
+        cache_tracker tracker;
+        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+
+        auto pr = dht::partition_range::make_singular(pkey);
+
+        // Force k1 into cache without dummy entries before k1.
+        // Needed for later range population to end at k1.
+        {
+            auto slice = partition_slice_builder(*s.schema())
+                    .with_range(query::clustering_range::make_singular(k1))
+                    .build();
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr, slice))
+                    .has_monotonic_positions();
+        }
+
+        auto r1 = *position_range_to_clustering_range(position_range(
+                position_in_partition::before_all_clustered_rows(), position_in_partition::before_key(k1)), *s.schema());
+        s.delete_range(m1, r1);
+
+        auto mt2 = make_lw_shared<replica::memtable>(s.schema());
+        mt2->apply(m1);
+        cache.update(row_cache::external_updater([&] {
+            underlying.apply(m1);
+        }), *mt2).get();
+
+        {
+            auto slice = partition_slice_builder(*s.schema()).build();
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr, slice))
+                    .produces(m1)
+                    .produces_end_of_stream();
+        }
+
+        // full scan
+        assert_that(cache.make_reader(s.schema(), semaphore.make_permit()))
+            .produces(m1)
+            .produces_end_of_stream();
+    });
+}
+
+SEASTAR_TEST_CASE(test_single_row_query_with_range_tombstone_is_cached) {
+    return seastar::async([] {
+        simple_schema s;
+        tests::reader_concurrency_semaphore_wrapper semaphore;
+
+        auto pkey = s.make_pkey("pk");
+
+        mutation m1(s.schema(), pkey);
+        s.delete_range(m1, query::full_clustering_range);
+        auto k1 = s.make_ckey(7);
+        s.add_row(m1, k1, "v1");
+
+        memtable_snapshot_source underlying(s.schema());
+        underlying.apply(m1);
+
+        cache_tracker tracker;
+        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+
+        auto pr = dht::partition_range::make_singular(pkey);
+
+        {
+            auto slice = partition_slice_builder(*s.schema())
+                    .with_range(query::clustering_range::make_singular(k1))
+                    .build();
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr, slice))
+                    .produces(m1, slice.row_ranges(*s.schema(), pkey.key()));
+        }
+
+        auto misses_before = tracker.get_stats().row_misses;
+
+        {
+            auto slice = partition_slice_builder(*s.schema())
+                    .with_range(query::clustering_range::make_singular(k1))
+                    .build();
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr, slice))
+                    .produces(m1, slice.row_ranges(*s.schema(), pkey.key()));
+        }
+
+        BOOST_REQUIRE_EQUAL(misses_before, tracker.get_stats().row_misses);
+    });
+}
 
 // Tests the following scenario:
 //
@@ -4171,6 +4267,56 @@ SEASTAR_TEST_CASE(test_eviction_of_upper_bound_of_population_range) {
     });
 }
 
+// Checks that merging rows from different partition versions preserves the LRU link of the entry
+// from the newer version. We need this in case we're merging two last dummy entries where the older
+// dummy is already unlinked from the LRU. We need to preserve the fact that the last dummy in the
+// newer version is still linked, which may be the last entry which is still holding the partition
+// entry. Otherwise, we may end up with the partition entry not having any entries linked in the LRU,
+// and we'll end up with an unevictable empty partition entry.
+// If we preserve the LRU link from the newer version, we'll be able to evict the partition entry
+// due to the "older versions are evicted first" rule.
+SEASTAR_TEST_CASE(test_partition_entry_evicted_with_dummy_rows_unlinked_in_oldest_mvcc_version) {
+    return seastar::async([] {
+        simple_schema s;
+        tests::reader_concurrency_semaphore_wrapper semaphore;
+        memtable_snapshot_source underlying(s.schema());
+
+        auto pkey = s.make_pkey("pk");
+
+        mutation m1(s.schema(), pkey);
+        m1.partition().apply(s.new_tombstone());
+        underlying.apply(m1);
+
+        cache_tracker tracker;
+        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+
+        auto pr = dht::partition_range::make_singular(pkey);
+
+        {
+            auto rd1 = cache.make_reader(s.schema(), semaphore.make_permit(), pr);
+            auto close_rd = deferred_close(rd1);
+            rd1.set_max_buffer_size(1);
+            rd1.fill_buffer().get();
+
+            mutation m2(s.schema(), pkey);
+            m2.partition().apply(s.new_tombstone());
+            apply(cache, underlying, m2);
+
+            BOOST_REQUIRE_EQUAL(tracker.get_stats().partitions, 1);
+            BOOST_REQUIRE_EQUAL(tracker.get_stats().rows, 2); // 2 dummy rows, one in each version.
+
+            tracker.evict_from_lru_shallow();
+        }
+
+        cache.evict();
+
+        tracker.cleaner().drain().get();
+        tracker.memtable_cleaner().drain().get();
+
+        BOOST_REQUIRE_EQUAL(tracker.get_stats().partitions, 0);
+    });
+}
+
 SEASTAR_TEST_CASE(test_reading_of_nonfull_keys) {
         return seastar::async([] {
             schema_ptr s = schema_builder("ks", "cf")
@@ -4236,11 +4382,7 @@ SEASTAR_TEST_CASE(test_populating_cache_with_expired_and_nonexpired_tombstones) 
         replica::table& t = env.local_db().find_column_family(ks_name, table_name);
         schema_ptr s = t.schema();
 
-        int32_t pk = 0;
-        dht::decorated_key dk(dht::token(), partition_key::make_empty());
-        do {
-            dk = dht::decorate_key(*s, partition_key::from_single_value(*s, serialized(++pk)));
-        } while (dht::shard_of(*s, dk.token()) != this_shard_id());
+        dht::decorated_key dk = tests::generate_partition_key(s);
 
         auto ck1 = clustering_key::from_deeply_exploded(*s, {1});
         auto ck1_prefix = clustering_key_prefix::from_deeply_exploded(*s, {1});
@@ -4269,10 +4411,48 @@ SEASTAR_TEST_CASE(test_populating_cache_with_expired_and_nonexpired_tombstones) 
         cache_entry& entry = t.get_row_cache().lookup(dk);
         auto& cp = entry.partition().version()->partition();
 
-        BOOST_REQUIRE_EQUAL(cp.tombstone_for_row(*s, ck1), row_tombstone(tombstone(1, dt_noexp))); // non-expired tombstone is in cache
+        BOOST_REQUIRE_EQUAL(cp.clustered_row(*s, ck1).deleted_at(), row_tombstone(tombstone(1, dt_noexp))); // non-expired tombstone is in cache
         BOOST_REQUIRE(cp.find_row(*s, ck2) == nullptr); // expired tombstone isn't in cache
 
         const auto rows = cp.non_dummy_rows();
         BOOST_REQUIRE(std::distance(rows.begin(), rows.end()) == 1); // cache contains non-expired row only
     });
+}
+
+SEASTAR_THREAD_TEST_CASE(test_population_of_subrange_of_expired_partition) {
+        simple_schema s;
+        tests::reader_concurrency_semaphore_wrapper semaphore;
+
+        auto pkey = s.make_pkey("pk");
+        auto pr = dht::partition_range::make_singular(pkey);
+
+        mutation m1(s.schema(), pkey);
+        s.delete_range(m1, s.make_ckey_range(5, 10));
+        auto k1 = s.make_ckey(7);
+        s.add_row(m1, k1, "v1");
+
+        memtable_snapshot_source underlying(s.schema());
+        underlying.apply(m1);
+
+        cache_tracker tracker;
+        row_cache cache(s.schema(), snapshot_source([&] { return underlying(); }), tracker);
+
+        {
+            auto slice = partition_slice_builder(*s.schema())
+                    .with_range(s.make_ckey_range(5, 10)) // Should cover all tombstones so that the reader produces m1.
+                    .build();
+            assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr, slice))
+                    .has_monotonic_positions();
+        }
+
+        BOOST_REQUIRE(tracker.get_stats().rows > 0);
+
+        // Simulate compaction removing the partition.
+        // Shouldn't affect what's already in cache.
+        underlying.clear();
+        cache.refresh_snapshot();
+
+        assert_that(cache.make_reader(s.schema(), semaphore.make_permit(), pr))
+        .produces(m1)
+        .produces_end_of_stream();
 }

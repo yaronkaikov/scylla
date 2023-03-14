@@ -6,13 +6,13 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 
 #include <seastar/core/thread.hh>
 
 #include "cell_locking.hh"
-#include "mutation.hh"
-#include "schema_builder.hh"
+#include "mutation/mutation.hh"
+#include "schema/schema_builder.hh"
 
 using namespace std::literals::chrono_literals;
 

@@ -170,20 +170,15 @@ int main(int ac, char ** av) {
 
     return app.run_deprecated(ac, av, [&app, &sl_controller, &auth_service] {
         auto config = app.configuration();
-        uint16_t api_port = config["api-port"].as<uint16_t>();
         bool stay_alive = config["stay-alive"].as<bool>();
-        if (config.contains("server")) {
-            api_port++;
-        }
         const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
         utils::fb_utilities::set_broadcast_address(listen);
         seastar::sharded<netw::messaging_service> messaging;
-        scheduling_group default_scheduling_group = create_scheduling_group("sl_default_sg", 1.0).get();
         return create_scheduling_group("sl_default_sg", 1.0).then([&sl_controller, &auth_service] (scheduling_group default_scheduling_group){
             return sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, default_scheduling_group);
         }).then([listen, &messaging, &sl_controller] {
             return messaging.start(std::ref(sl_controller), listen);
-        }).then([config, api_port, stay_alive, listen, &messaging] () {
+        }).then([config, stay_alive, &messaging] () {
             auto testers = new distributed<tester>;
             return testers->start(std::ref(messaging)).then([testers]{
                 auto port = testers->local().port();
@@ -200,11 +195,11 @@ int main(int ac, char ** av) {
                 t->set_server_cpuid(cpuid);
                 fmt::print("=============TEST START===========\n");
                 fmt::print("Sending to server ....\n");
-                return t->test_gossip_digest().then([testers, t] {
+                return t->test_gossip_digest().then([t] {
                     return t->test_gossip_shutdown();
-                }).then([testers, t] {
+                }).then([t] {
                     return t->test_echo();
-                }).then([testers, t, stay_alive, &messaging] {
+                }).then([testers, stay_alive, &messaging] {
                     if (stay_alive) {
                         return make_ready_future<>();
                     }

@@ -9,8 +9,8 @@
 #include <seastar/util/lazy.hh>
 
 #include "readers/flat_mutation_reader_v2.hh"
-#include "mutation_rebuilder.hh"
-#include "mutation_fragment_stream_validator.hh"
+#include "mutation/mutation_rebuilder.hh"
+#include "mutation/mutation_fragment_stream_validator.hh"
 #include "schema_upgrader.hh"
 
 logging::logger mrlog("mutation_reader");
@@ -355,7 +355,7 @@ static size_t compute_buffer_size(const schema& s, const flat_mutation_reader_v2
 {
     return boost::accumulate(
         buffer
-        | boost::adaptors::transformed([&s] (const mutation_fragment_v2& mf) {
+        | boost::adaptors::transformed([] (const mutation_fragment_v2& mf) {
             return mf.memory_usage();
         }), size_t(0)
     );
@@ -383,11 +383,6 @@ flat_mutation_reader_v2::~flat_mutation_reader_v2() {
         on_internal_error_noexcept(mrlog, format("{} [{}]: permit {}: was not closed before destruction", typeid(*ip).name(), fmt::ptr(ip), ip->_permit.description()));
         abort();
     }
-}
-
-void flat_mutation_reader_v2::impl::forward_buffer_to(const position_in_partition& pos) {
-    clear_buffer();
-    _buffer_size = compute_buffer_size(*_schema, _buffer);
 }
 
 void flat_mutation_reader_v2::impl::clear_buffer_to_next_partition() {

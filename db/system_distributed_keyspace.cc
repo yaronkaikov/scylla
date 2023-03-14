@@ -13,9 +13,9 @@
 #include "db/consistency_level_type.hh"
 #include "db/system_keyspace.hh"
 #include "db/config.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "timeout_config.hh"
-#include "types.hh"
+#include "types/types.hh"
 #include "types/tuple.hh"
 #include "types/set.hh"
 #include "cdc/generation.hh"
@@ -272,10 +272,6 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
         co_return;
     }
 
-    static auto ignore_existing = [] (seastar::noncopyable_function<future<>()> func) {
-        return futurize_invoke(std::move(func)).handle_exception_type([] (exceptions::already_exists_exception& ignored) { });
-    };
-
     // FIXME: fix this code to `announce` once
 
     if (!_sp.get_db().local().has_keyspace(NAME)) {
@@ -389,7 +385,7 @@ future<std::unordered_map<locator::host_id, sstring>> system_distributed_keyspac
             db::consistency_level::ONE,
             internal_distributed_query_state(),
             { std::move(ks_name), std::move(view_name) },
-            cql3::query_processor::cache_internal::no).then([this] (::shared_ptr<cql3::untyped_result_set> cql_result) {
+            cql3::query_processor::cache_internal::no).then([] (::shared_ptr<cql3::untyped_result_set> cql_result) {
         return boost::copy_range<std::unordered_map<locator::host_id, sstring>>(*cql_result
                 | boost::adaptors::transformed([] (const cql3::untyped_result_set::row& row) {
                     auto host_id = locator::host_id(row.get_as<utils::UUID>("host_id"));

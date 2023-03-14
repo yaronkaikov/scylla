@@ -8,11 +8,11 @@
 
 
 #include <boost/test/unit_test.hpp>
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 
 #include "test/lib/cql_test_env.hh"
 #include "transport/messages/result_message.hh"
-#include "types.hh"
+#include "types/types.hh"
 
 static lw_shared_ptr<service::pager::paging_state> extract_paging_state(::shared_ptr<cql_transport::messages::result_message> res) {
     auto rows = dynamic_pointer_cast<cql_transport::messages::result_message::rows>(res);

@@ -7,7 +7,7 @@
  */
 
 #include "multishard_mutation_query.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "db/config.hh"
 #include "partition_slice_builder.hh"
 #include "serializer_impl.hh"
@@ -21,7 +21,7 @@
 #include "test/lib/test_utils.hh"
 #include "test/lib/random_utils.hh"
 
-#include <seastar/testing/thread_test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 
 #include <source_location>
 

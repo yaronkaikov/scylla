@@ -12,7 +12,7 @@
 #include <seastar/core/future-util.hh>
 #include <seastar/core/sleep.hh>
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
 
@@ -142,7 +142,7 @@ SEASTAR_TEST_CASE(paxos_grace_seconds_extension) {
             return e.execute_prepared(prep_id, {cql3::raw_value::make_value(int32_type->decompose(1))});
         }).discard_result().then([&e] {
             return e.execute_cql("SELECT row_key, TTL(promise) FROM system.paxos")
-                .then([&e] (::shared_ptr<cql_transport::messages::result_message> msg) {
+                .then([] (::shared_ptr<cql_transport::messages::result_message> msg) {
                     assert_that(msg)
                         .is_rows()
                         .with_size(1);

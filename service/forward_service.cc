@@ -25,8 +25,8 @@
 #include "query-request.hh"
 #include "query_ranges_to_vnodes.hh"
 #include "replica/database.hh"
-#include "schema.hh"
-#include "schema_registry.hh"
+#include "schema/schema.hh"
+#include "schema/schema_registry.hh"
 #include "seastar/core/do_with.hh"
 #include "seastar/core/future.hh"
 #include "seastar/core/on_internal_error.hh"
@@ -34,6 +34,7 @@
 #include "service/pager/query_pagers.hh"
 #include "tracing/trace_state.hh"
 #include "tracing/tracing.hh"
+#include "types/types.hh"
 #include "utils/fb_utilities.hh"
 #include "service/storage_proxy.hh"
 
@@ -119,6 +120,16 @@ void forward_aggregates::merge(query::forward_result &result, query::forward_res
 }
 
 void forward_aggregates::finalize(query::forward_result &result) {
+    if (result.query_results.empty()) {
+        // An empty result means that we didn't send the aggregation request
+        // to any node. I.e., it was a query that matched no partition, such
+        // as "WHERE p IN ()". We need to build a fake result with the result
+        // of empty aggregation.
+        for (size_t i = 0; i < _aggrs.size(); i++) {
+            result.query_results.push_back(_aggrs[i]->compute());
+        }
+        return;
+    }
     if (result.query_results.size() != _aggrs.size()) {
         on_internal_error(
             flogger,
@@ -141,7 +152,12 @@ static std::vector<::shared_ptr<db::functions::aggregate_function>> get_function
     std::vector<::shared_ptr<db::functions::aggregate_function>> aggrs;
 
     auto name_as_type = [&] (const sstring& name) -> data_type {
-        return schema->get_column_definition(to_bytes(name))->type->underlying_type();
+        auto t = schema->get_column_definition(to_bytes(name))->type->underlying_type();
+
+        if (t->is_counter()) {
+            return long_type;
+        }
+        return t;
     };
 
     for (size_t i = 0; i < request.reduction_types.size(); i++) {

@@ -36,6 +36,7 @@
 #include <seastar/core/metrics.hh>
 #include <seastar/net/byteorder.hh>
 #include <seastar/util/lazy.hh>
+#include <seastar/util/short_streams.hh>
 #include <seastar/core/execution_stage.hh>
 #include "utils/result_try.hh"
 #include "utils/result_combinators.hh"
@@ -105,6 +106,29 @@ sstring to_string(const event::topology_change::change_type t) {
     throw std::invalid_argument("unknown change type");
 }
 
+sstring to_string(cql_binary_opcode op) {
+    switch(op) {
+    case cql_binary_opcode::ERROR:          return "ERROR";
+    case cql_binary_opcode::STARTUP:        return "STARTUP";
+    case cql_binary_opcode::READY:          return "READY";
+    case cql_binary_opcode::AUTHENTICATE:   return "AUTHENTICATE";
+    case cql_binary_opcode::CREDENTIALS:    return "CREDENTIALS";
+    case cql_binary_opcode::OPTIONS:        return "OPTIONS";
+    case cql_binary_opcode::SUPPORTED:      return "SUPPORTED";
+    case cql_binary_opcode::QUERY:          return "QUERY";
+    case cql_binary_opcode::RESULT:         return "RESULT";
+    case cql_binary_opcode::PREPARE:        return "PREPARE";
+    case cql_binary_opcode::EXECUTE:        return "EXECUTE";
+    case cql_binary_opcode::REGISTER:       return "REGISTER";
+    case cql_binary_opcode::EVENT:          return "EVENT";
+    case cql_binary_opcode::BATCH:          return "BATCH";
+    case cql_binary_opcode::AUTH_CHALLENGE: return "AUTH_CHALLENGE";
+    case cql_binary_opcode::AUTH_RESPONSE:  return "AUTH_RESPONSE";
+    case cql_binary_opcode::AUTH_SUCCESS:   return "AUTH_SUCCESS";
+    case cql_binary_opcode::OPCODES_COUNT:  return "OPCODES_COUNT";
+    }
+}
+
 sstring to_string(const event::status_change::status_type t) {
     using type = event::status_change::status_type;
     switch (t) {
@@ -157,6 +181,7 @@ cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& au
     , _max_concurrent_requests(db_cfg.max_concurrent_requests_per_shard)
     , _memory_available(ml.get_semaphore())
     , _notifier(std::make_unique<event_notifier>(*this))
+    , _stats(static_cast<uint8_t>(cql_binary_opcode::OPCODES_COUNT))
     , _auth_service(auth_service)
     , _sl_controller(sl_controller)
     , _gossiper(g)
@@ -164,30 +189,6 @@ cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& au
     namespace sm = seastar::metrics;
 
     auto ls = {
-        sm::make_counter("startups", _stats.startups,
-                        sm::description("Counts the total number of received CQL STARTUP messages.")),
-
-        sm::make_counter("auth_responses", _stats.auth_responses,
-                        sm::description("Counts the total number of received CQL AUTH messages.")),
-        
-        sm::make_counter("options_requests", _stats.options_requests,
-                        sm::description("Counts the total number of received CQL OPTIONS messages.")),
-
-        sm::make_counter("query_requests", _stats.query_requests,
-                        sm::description("Counts the total number of received CQL QUERY messages.")),
-
-        sm::make_counter("prepare_requests", _stats.prepare_requests,
-                        sm::description("Counts the total number of received CQL PREPARE messages.")),
-
-        sm::make_counter("execute_requests", _stats.execute_requests,
-                        sm::description("Counts the total number of received CQL EXECUTE messages.")),
-
-        sm::make_counter("batch_requests", _stats.batch_requests,
-                        sm::description("Counts the total number of received CQL BATCH messages.")),
-
-        sm::make_counter("register_requests", _stats.register_requests,
-                        sm::description("Counts the total number of received CQL REGISTER messages.")),
-
         sm::make_counter("cql-connections", _stats.connects,
                         sm::description("Counts a number of client connections.")),
 
@@ -220,6 +221,28 @@ cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& au
     std::vector<sm::metric_definition> transport_metrics;
     for (auto& m : ls) {
         transport_metrics.emplace_back(std::move(m));
+    }
+
+    for (uint8_t i = 0; i < static_cast<uint8_t>(cql_binary_opcode::OPCODES_COUNT); ++i) {
+        cql_binary_opcode opcode = cql_binary_opcode{i};
+
+        transport_metrics.emplace_back(
+            sm::make_counter("cql_requests_count", [this, opcode] { return _stats.get_cql_opcode_stats(opcode).count; },
+                         sm::description("Counts the total number of CQL messages of a specific kind."),
+                         {{"kind", to_string(opcode)}})
+        );
+
+        transport_metrics.emplace_back(
+            sm::make_counter("cql_request_bytes", [this, opcode] { return _stats.get_cql_opcode_stats(opcode).request_size; },
+                         sm::description("Counts the total number of received bytes in CQL messages of a specific kind."),
+                         {{"kind", to_string(opcode)}})
+        );
+
+        transport_metrics.emplace_back(
+            sm::make_counter("cql_response_bytes", [this, opcode] { return _stats.get_cql_opcode_stats(opcode).response_size; },
+                         sm::description("Counts the total number of sent response bytes for CQL requests of a specific kind."),
+                         {{"kind", to_string(opcode)}})
+        );
     }
 
     sm::label cql_error_label("type");
@@ -359,7 +382,10 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         }
     }
 
+    request_kind_stats& cql_stats = _server._stats.get_cql_opcode_stats(cqlop);
     tracing::set_request_size(trace_state, fbuf.bytes_left());
+    cql_stats.request_size += fbuf.bytes_left();
+    ++cql_stats.count;
 
     auto linearization_buffer = std::make_unique<bytes_ostream>();
     auto linearization_buffer_ptr = linearization_buffer.get();
@@ -404,7 +430,7 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         case cql_binary_opcode::REGISTER:      return wrap_in_foreign(process_register(stream, std::move(in), client_state, trace_state));
         default:                               throw exceptions::protocol_exception(format("Unknown opcode {:d}", int(cqlop)));
         }
-    }).then_wrapped([this, cqlop, stream, &client_state, linearization_buffer = std::move(linearization_buffer), trace_state] (future<result_with_foreign_response_ptr> f) {
+    }).then_wrapped([this, cqlop, &cql_stats, stream, &client_state, linearization_buffer = std::move(linearization_buffer), trace_state] (future<result_with_foreign_response_ptr> f) {
         auto stop_trace = defer([&] {
             tracing::stop_foreground(trace_state);
         });
@@ -445,35 +471,56 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
             }
 
             tracing::set_response_size(trace_state, response->size());
+            cql_stats.response_size += response->size();
             return response;
         },  utils::result_catch<exceptions::unavailable_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in unavailable_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_unavailable_error(stream, ex.code(), ex.what(), ex.consistency, ex.required, ex.alive, trace_state);
         }), utils::result_catch<exceptions::read_timeout_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in read_timeout_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_read_timeout_error(stream, ex.code(), ex.what(), ex.consistency, ex.received, ex.block_for, ex.data_present, trace_state);
         }), utils::result_catch<exceptions::read_failure_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in read_failure_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_read_failure_error(stream, ex.code(), ex.what(), ex.consistency, ex.received, ex.failures, ex.block_for, ex.data_present, trace_state);
         }), utils::result_catch<exceptions::mutation_write_timeout_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in mutation_write_timeout_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_mutation_write_timeout_error(stream, ex.code(), ex.what(), ex.consistency, ex.received, ex.block_for, ex.type, trace_state);
         }), utils::result_catch<exceptions::mutation_write_failure_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in mutation_write_failure_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_mutation_write_failure_error(stream, ex.code(), ex.what(), ex.consistency, ex.received, ex.failures, ex.block_for, ex.type, trace_state);
         }), utils::result_catch<exceptions::already_exists_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in already_exists_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_already_exists_error(stream, ex.code(), ex.what(), ex.ks_name, ex.cf_name, trace_state);
         }), utils::result_catch<exceptions::prepared_query_not_found_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in unprepared_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_unprepared_error(stream, ex.code(), ex.what(), ex.id, trace_state);
         }), utils::result_catch<exceptions::function_execution_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in function_failure_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_function_failure_error(stream, ex.code(), ex.what(), ex.ks_name, ex.func_name, ex.args, trace_state);
         }), utils::result_catch<exceptions::rate_limit_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in rate_limit_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_rate_limit_error(stream, ex.code(), ex.what(), ex.op_type, ex.rejected_by_coordinator, trace_state, client_state);
         }), utils::result_catch<exceptions::cassandra_exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in cassandra_error, stream {}, code {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.code(), ex.what());
             // Note: the CQL protocol specifies that many types of errors have
             // mandatory parameters. These cassandra_exception subclasses MUST
             // be handled above. This default "cassandra_exception" case is
@@ -484,6 +531,8 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
             try { ++_server._stats.errors[ex.code()]; } catch(...) {}
             return make_error(stream, ex.code(), ex.what(), trace_state);
         }), utils::result_catch<std::exception>([&] (const auto& ex) {
+            clogger.debug("{}: request resulted in error, stream {}, message [{}]",
+                _client_state.get_remote_address(), stream, ex.what());
             try { ++_server._stats.errors[exceptions::exception_code::SERVER_ERROR]; } catch(...) {}
             sstring msg = ex.what();
             try {
@@ -495,6 +544,8 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
             }
             return make_error(stream, exceptions::exception_code::SERVER_ERROR, msg, trace_state);
         }), utils::result_catch_dots([&] () {
+            clogger.debug("{}: request resulted in unknown error, stream {}",
+                _client_state.get_remote_address(), stream);
             try { ++_server._stats.errors[exceptions::exception_code::SERVER_ERROR]; } catch(...) {}
             return make_error(stream, exceptions::exception_code::SERVER_ERROR, "unknown error", trace_state);
         })));
@@ -552,12 +603,15 @@ void cql_server::connection::handle_error(future<>&& f) {
     try {
         f.get();
     } catch (const exceptions::cassandra_exception& ex) {
+        clogger.debug("{}: connection error, code {}, message [{}]", _client_state.get_remote_address(), ex.code(), ex.what());
         try { ++_server._stats.errors[ex.code()]; } catch(...) {}
         write_response(make_error(0, ex.code(), ex.what(), tracing::trace_state_ptr()));
     } catch (std::exception& ex) {
+        clogger.debug("{}: connection error, message [{}]", _client_state.get_remote_address(), ex.what());
         try { ++_server._stats.errors[exceptions::exception_code::SERVER_ERROR]; } catch(...) {}
         write_response(make_error(0, exceptions::exception_code::SERVER_ERROR, ex.what(), tracing::trace_state_ptr()));
     } catch (...) {
+        clogger.debug("{}: connection error, unknown error", _client_state.get_remote_address());
         try { ++_server._stats.errors[exceptions::exception_code::SERVER_ERROR]; } catch(...) {}
         write_response(make_error(0, exceptions::exception_code::SERVER_ERROR, "unknown error", tracing::trace_state_ptr()));
     }
@@ -577,8 +631,10 @@ future<> cql_server::connection::process_request() {
         if (allow_shedding && _shed_incoming_requests) {
             ++_server._stats.requests_shed;
             return _read_buf.skip(f.length).then([this, stream = f.stream] {
+                const char* message = "request shed due to coordinator overload";
+                clogger.debug("{}: {}, stream {}", _client_state.get_remote_address(), message);
                 write_response(make_error(stream, exceptions::exception_code::OVERLOADED,
-                        "request shed due to coordinator overload", tracing::trace_state_ptr()));
+                    message, tracing::trace_state_ptr()));
                 return make_ready_future<>();
             });
         }
@@ -596,20 +652,24 @@ future<> cql_server::connection::process_request() {
         auto stream = f.stream;
         auto mem_estimate = f.length * 2 + 8000; // Allow for extra copies and bookkeeping
         if (mem_estimate > _server._max_request_size) {
-            write_response(make_error(stream, exceptions::exception_code::INVALID,
-                    format("request size too large (frame size {:d}; estimate {:d}; allowed {:d}", f.length, mem_estimate, _server._max_request_size),
-                    tracing::trace_state_ptr()));
-            return std::exchange(_ready_to_respond, make_ready_future<>()).then([this] {
-                return _read_buf.close();
-            });
+            const auto message = format("request size too large (frame size {:d}; estimate {:d}; allowed {:d})",
+                f.length, mem_estimate, _server._max_request_size);
+            clogger.debug("{}: {}, request dropped", _client_state.get_remote_address(), message);
+            write_response(make_error(stream, exceptions::exception_code::INVALID, message, tracing::trace_state_ptr()));
+            return std::exchange(_ready_to_respond, make_ready_future<>())
+                .then([this] { return _read_buf.close(); })
+                .then([this] { return util::skip_entire_stream(_read_buf); });
         }
 
         if (_server._stats.requests_serving > _server._max_concurrent_requests) {
             ++_server._stats.requests_shed;
             return _read_buf.skip(f.length).then([this, stream = f.stream] {
+                const auto message = format("too many in-flight requests (configured via max_concurrent_requests_per_shard): {}",
+                                            _server._stats.requests_serving);
+                clogger.debug("{}: {}, request dropped", _client_state.get_remote_address(), message);
                 write_response(make_error(stream, exceptions::exception_code::OVERLOADED,
-                        format("too many in-flight requests (configured via max_concurrent_requests_per_shard): {}", _server._stats.requests_serving),
-                        tracing::trace_state_ptr()));
+                    message,
+                    tracing::trace_state_ptr()));
                 return make_ready_future<>();
             });
         }
@@ -669,14 +729,23 @@ future<> cql_server::connection::process_request() {
                     _process_request_stage(this, istream, op, stream, seastar::ref(_client_state), tracing_requested, mem_permit) :
                     process_request_one(istream, op, stream, seastar::ref(_client_state), tracing_requested, mem_permit);
 
-            future<> request_response_future = request_process_future.then_wrapped([this, buf = std::move(buf), mem_permit, leave = std::move(leave)] (future<foreign_ptr<std::unique_ptr<cql_server::response>>> response_f) mutable {
-                    try {
+            future<> request_response_future = request_process_future.then_wrapped([this, buf = std::move(buf), mem_permit, leave = std::move(leave), stream] (future<foreign_ptr<std::unique_ptr<cql_server::response>>> response_f) mutable {
+                try {
+                    if (response_f.failed()) {
+                        const auto message = format("request processing failed, error [{}]", response_f.get_exception());
+                        clogger.error("{}: {}", _client_state.get_remote_address(), message);
+                        write_response(make_error(stream, exceptions::exception_code::SERVER_ERROR,
+                                                  message,
+                                                  tracing::trace_state_ptr()));
+                    } else {
                         write_response(response_f.get0(), std::move(mem_permit), _compression);
-                        _ready_to_respond = _ready_to_respond.finally([leave = std::move(leave)] {});
-                    } catch (...) {
-                        clogger.error("request processing failed: {}", std::current_exception());
                     }
-                });
+                    _ready_to_respond = _ready_to_respond.finally([leave = std::move(leave)] {});
+                } catch (...) {
+                    clogger.error("{}: request processing failed: {}",
+                                  _client_state.get_remote_address(), std::current_exception());
+                }
+            });
 
             if (should_paralelize) {
                 return make_ready_future<>();
@@ -715,7 +784,7 @@ future<fragmented_temporary_buffer> cql_server::connection::read_and_decompress_
             if (length < 4) {
                 throw std::runtime_error(fmt::format("CQL frame truncated: expected to have at least 4 bytes, got {}", length));
             }
-            return _buffer_reader.read_exactly(_read_buf, length).then([this] (fragmented_temporary_buffer buf) {
+            return _buffer_reader.read_exactly(_read_buf, length).then([] (fragmented_temporary_buffer buf) {
                 auto linearization_buffer = bytes_ostream();
                 int32_t uncomp_len = request_reader(buf.get_istream(), linearization_buffer).read_int();
                 if (uncomp_len < 0) {
@@ -738,7 +807,7 @@ future<fragmented_temporary_buffer> cql_server::connection::read_and_decompress_
                 return uncomp;
             });
         } else if (_compression == cql_compression::snappy) {
-            return _buffer_reader.read_exactly(_read_buf, length).then([this] (fragmented_temporary_buffer buf) {
+            return _buffer_reader.read_exactly(_read_buf, length).then([] (fragmented_temporary_buffer buf) {
                 auto in = input_buffer.get_linearized_view(fragmented_temporary_buffer::view(buf));
                 size_t uncomp_len;
                 if (snappy_uncompressed_length(reinterpret_cast<const char*>(in.data()), in.size(), &uncomp_len) != SNAPPY_OK) {
@@ -763,7 +832,6 @@ future<fragmented_temporary_buffer> cql_server::connection::read_and_decompress_
 
 future<std::unique_ptr<cql_server::response>> cql_server::connection::process_startup(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.startups;
     auto options = in.read_string_map();
     auto compression_opt = options.find("COMPRESSION");
     if (compression_opt != options.end()) {
@@ -806,7 +874,6 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_st
 
 future<std::unique_ptr<cql_server::response>> cql_server::connection::process_auth_response(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.auth_responses;
     auto sasl_challenge = client_state.get_auth_service()->underlying_authenticator().new_sasl_challenge();
     auto buf = in.read_raw_bytes_view(in.bytes_left());
     auto challenge = sasl_challenge->evaluate_response(buf);
@@ -823,7 +890,7 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_au
                 f = f.then([&client_state] {
                     return client_state.maybe_update_per_service_level_params();
                 });
-                return f.then([this, stream, &client_state, challenge = std::move(challenge), trace_state]() mutable {
+                return f.then([this, stream, challenge = std::move(challenge), trace_state]() mutable {
                     return make_ready_future<std::unique_ptr<cql_server::response>>(make_auth_success(stream, std::move(challenge), trace_state));
                 });
             });
@@ -834,7 +901,6 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_au
 
 future<std::unique_ptr<cql_server::response>> cql_server::connection::process_options(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.options_requests;
     return make_ready_future<std::unique_ptr<cql_server::response>>(make_supported(stream, std::move(trace_state)));
 }
 
@@ -931,13 +997,11 @@ process_query_internal(service::client_state& client_state, distributed<cql3::qu
 
 future<cql_server::result_with_foreign_response_ptr>
 cql_server::connection::process_query(uint16_t stream, request_reader in, service::client_state& client_state, service_permit permit, tracing::trace_state_ptr trace_state) {
-    ++_server._stats.query_requests;
     return process(stream, in, client_state, std::move(permit), std::move(trace_state), process_query_internal);
 }
 
 future<std::unique_ptr<cql_server::response>> cql_server::connection::process_prepare(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.prepare_requests;
 
     auto query = sstring(in.read_long_string_view());
 
@@ -956,7 +1020,7 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_pr
         }
     }).then([this, query, stream, &client_state, trace_state] () mutable {
         tracing::trace(trace_state, "Done preparing on remote shards");
-        return _server._query_processor.local().prepare(std::move(query), client_state, false).then([this, stream, &client_state, trace_state] (auto msg) {
+        return _server._query_processor.local().prepare(std::move(query), client_state, false).then([this, stream, trace_state] (auto msg) {
             tracing::trace(trace_state, "Done preparing on a local shard - preparing a result. ID is [{}]", seastar::value_of([&msg] {
                 return messages::result_message::prepared::cql::get_id(msg);
             }));
@@ -1037,7 +1101,6 @@ process_execute_internal(service::client_state& client_state, distributed<cql3::
 
 future<cql_server::result_with_foreign_response_ptr> cql_server::connection::process_execute(uint16_t stream, request_reader in,
         service::client_state& client_state, service_permit permit, tracing::trace_state_ptr trace_state) {
-    ++_server._stats.execute_requests;
     return process(stream, in, client_state, std::move(permit), std::move(trace_state), process_execute_internal);
 }
 
@@ -1159,14 +1222,12 @@ process_batch_internal(service::client_state& client_state, distributed<cql3::qu
 future<cql_server::result_with_foreign_response_ptr>
 cql_server::connection::process_batch(uint16_t stream, request_reader in, service::client_state& client_state, service_permit permit,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.batch_requests;
     return process(stream, in, client_state, permit, std::move(trace_state), process_batch_internal);
 }
 
 future<std::unique_ptr<cql_server::response>>
 cql_server::connection::process_register(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
-    ++_server._stats.register_requests;
     std::vector<sstring> event_types;
     in.read_string_list(event_types);
     for (auto&& event_type : event_types) {
@@ -1521,11 +1582,7 @@ void cql_server::response::compress_lz4()
         output[1] = (input_len >> 16) & 0xFF;
         output[2] = (input_len >> 8) & 0xFF;
         output[3] = input_len & 0xFF;
-#ifdef HAVE_LZ4_COMPRESS_DEFAULT
         auto ret = LZ4_compress_default(input, output + 4, input_len, LZ4_compressBound(input_len));
-#else
-        auto ret = LZ4_compress(input, output + 4, input_len);
-#endif
         if (ret == 0) {
             throw std::runtime_error("CQL frame LZ4 compression failure");
         }

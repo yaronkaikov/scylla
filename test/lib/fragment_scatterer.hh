@@ -6,8 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
-#include "mutation.hh"
-#include "mutation_rebuilder.hh"
+#include "mutation/mutation.hh"
+#include "mutation/mutation_rebuilder.hh"
 
 // A StreamedMutationConsumer which distributes fragments randomly into several mutations.
 class fragment_scatterer {

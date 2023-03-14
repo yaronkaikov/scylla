@@ -9,7 +9,8 @@
 #include <seastar/core/coroutine.hh>
 
 #include "consumer.hh"
-#include "mutation_source_metadata.hh"
+#include "replica/database.hh"
+#include "mutation/mutation_source_metadata.hh"
 #include "service/priority_manager.hh"
 #include "db/view/view_update_generator.hh"
 #include "db/view/view_update_checks.hh"
@@ -29,7 +30,7 @@ std::function<future<> (flat_mutation_reader_v2)> make_streaming_consumer(sstrin
         std::exception_ptr ex;
         try {
             auto cf = db.local().find_column_family(reader.schema()).shared_from_this();
-            auto use_view_update_path = co_await db::view::check_needs_view_update_path(sys_dist_ks.local(), *cf, reason);
+            auto use_view_update_path = co_await db::view::check_needs_view_update_path(sys_dist_ks.local(), db.local().get_token_metadata(), *cf, reason);
             //FIXME: for better estimations this should be transmitted from remote
             auto metadata = mutation_source_metadata{};
             auto& cs = cf->get_compaction_strategy();
@@ -43,7 +44,7 @@ std::function<future<> (flat_mutation_reader_v2)> make_streaming_consumer(sstrin
             };
 
             auto consumer = make_interposer_consumer(metadata,
-                    [cf = std::move(cf), adjusted_estimated_partitions, use_view_update_path, &vug, origin = std::move(origin), offstrategy, reason] (flat_mutation_reader_v2 reader) {
+                    [cf = std::move(cf), adjusted_estimated_partitions, use_view_update_path, &vug, origin = std::move(origin), offstrategy] (flat_mutation_reader_v2 reader) {
                 sstables::shared_sstable sst;
                 try {
                     sst = use_view_update_path ? cf->make_streaming_staging_sstable() : cf->make_streaming_sstable_for_write();
@@ -59,7 +60,7 @@ std::function<future<> (flat_mutation_reader_v2)> make_streaming_consumer(sstrin
                                              cf->get_sstables_manager().configure_writer(origin),
                                              encoding_stats{}, pc).then([sst] {
                     return sst->open_data();
-                }).then([cf, sst, offstrategy, reason, origin] {
+                }).then([cf, sst, offstrategy, origin] {
                     if (offstrategy && sstables::repair_origin == origin) {
                         sstables::sstlog.debug("Enabled automatic off-strategy trigger for table {}.{}",
                                 cf->schema()->ks_name(), cf->schema()->cf_name());

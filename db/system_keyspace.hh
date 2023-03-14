@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include "utils/UUID.hh"
 #include "gms/inet_address.hh"
 #include "query-result-set.hh"
@@ -87,6 +87,18 @@ public:
     virtual ~table_selector() = default;
     virtual bool contains(const schema_ptr&) = 0;
     virtual bool contains_keyspace(std::string_view) = 0;
+};
+
+struct compaction_history_entry {
+    utils::UUID id;
+    sstring ks;
+    sstring cf;
+    int64_t compacted_at = 0;
+    int64_t bytes_in = 0;
+    int64_t bytes_out = 0;
+    // Key: number of rows merged
+    // Value: counter
+    std::unordered_map<int32_t, int64_t> rows_merged;
 };
 
 class system_keyspace : public seastar::peering_sharded_service<system_keyspace>, public seastar::async_sharded_service<system_keyspace> {
@@ -297,22 +309,10 @@ public:
         DECOMMISSIONED
     };
 
-    struct compaction_history_entry {
-        utils::UUID id;
-        sstring ks;
-        sstring cf;
-        int64_t compacted_at = 0;
-        int64_t bytes_in = 0;
-        int64_t bytes_out = 0;
-        // Key: number of rows merged
-        // Value: counter
-        std::unordered_map<int32_t, int64_t> rows_merged;
-    };
-
     future<> update_compaction_history(utils::UUID uuid, sstring ksname, sstring cfname, int64_t compacted_at, int64_t bytes_in, int64_t bytes_out,
                                        std::unordered_map<int32_t, int64_t> rows_merged);
     using compaction_history_consumer = noncopyable_function<future<>(const compaction_history_entry&)>;
-    static future<> get_compaction_history(compaction_history_consumer&& f);
+    future<> get_compaction_history(compaction_history_consumer&& f);
 
     struct repair_history_entry {
         tasks::task_id id;
@@ -332,10 +332,8 @@ public:
 
     static future<> save_truncation_record(table_id, db_clock::time_point truncated_at, db::replay_position);
     static future<> save_truncation_record(const replica::column_family&, db_clock::time_point truncated_at, db::replay_position);
-    static future<replay_positions> get_truncated_position(table_id);
-    static future<db::replay_position> get_truncated_position(table_id, uint32_t shard);
-    static future<db_clock::time_point> get_truncated_at(table_id);
-    static future<truncation_record> get_truncation_record(table_id cf_id);
+    future<replay_positions> get_truncated_position(table_id);
+    future<db_clock::time_point> get_truncated_at(table_id);
 
     /**
      * Return a map of stored tokens to IP addresses
@@ -383,6 +381,8 @@ private:
      * Sets the local host ID explicitly.  Used only internally when intializing the host_id
      */
     future<locator::host_id> set_local_random_host_id();
+    future<truncation_record> get_truncation_record(table_id cf_id);
+
 public:
     static api::timestamp_type schema_creation_timestamp();
 
@@ -391,14 +391,14 @@ public:
      */
     static mutation make_size_estimates_mutation(const sstring& ks, std::vector<range_estimates> estimates);
 
-    static future<> register_view_for_building(sstring ks_name, sstring view_name, const dht::token& token);
-    static future<> update_view_build_progress(sstring ks_name, sstring view_name, const dht::token& token);
-    static future<> remove_view_build_progress(sstring ks_name, sstring view_name);
-    static future<> remove_view_build_progress_across_all_shards(sstring ks_name, sstring view_name);
-    static future<> mark_view_as_built(sstring ks_name, sstring view_name);
-    static future<> remove_built_view(sstring ks_name, sstring view_name);
-    static future<std::vector<view_name>> load_built_views();
-    static future<std::vector<view_build_progress>> load_view_build_progress();
+    future<> register_view_for_building(sstring ks_name, sstring view_name, const dht::token& token);
+    future<> update_view_build_progress(sstring ks_name, sstring view_name, const dht::token& token);
+    future<> remove_view_build_progress(sstring ks_name, sstring view_name);
+    future<> remove_view_build_progress_across_all_shards(sstring ks_name, sstring view_name);
+    future<> mark_view_as_built(sstring ks_name, sstring view_name);
+    future<> remove_built_view(sstring ks_name, sstring view_name);
+    future<std::vector<view_name>> load_built_views();
+    future<std::vector<view_build_progress>> load_view_build_progress();
 
     // Paxos related functions
     static future<service::paxos::paxos_state> load_paxos_state(partition_key_view key, schema_ptr s, gc_clock::time_point now,

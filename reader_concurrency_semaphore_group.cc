@@ -29,7 +29,6 @@ future<> reader_concurrency_semaphore_group::adjust() {
 future<> reader_concurrency_semaphore_group::change_weight(weighted_reader_concurrency_semaphore& sem, size_t new_weight) {
     auto diff = new_weight - sem.weight;
     if (diff) {
-        auto old_weight = sem.weight;
         sem.weight += diff;
         _total_weight += diff;
         return adjust();
@@ -44,7 +43,7 @@ future<> reader_concurrency_semaphore_group::wait_adjust_complete() {
 }
 
 future<> reader_concurrency_semaphore_group::stop() noexcept {
-    return parallel_for_each(_semaphores, [this] (auto&& item) {
+    return parallel_for_each(_semaphores, [] (auto&& item) {
         return item.second.sem.stop();
     }).then([this] {
         _semaphores.clear();

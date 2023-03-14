@@ -284,6 +284,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Debug',
         'can_have_debug_info': True,
+        'build_seastar_shared_libs': False,
         'default': True,
         'description': 'a mode with no optimizations, with sanitizers, and with additional debug checks enabled, used for testing',
         'advanced_optimizations': False,
@@ -296,6 +297,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'RelWithDebInfo',
         'can_have_debug_info': True,
+        'build_seastar_shared_libs': False,
         'default': True,
         'description': 'a mode with optimizations and no debug checks, used for production builds',
         'advanced_optimizations': True,
@@ -308,6 +310,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Dev',
         'can_have_debug_info': False,
+        'build_seastar_shared_libs': False,
         'default': True,
         'description': 'a mode with no optimizations and no debug checks, optimized for fast build times, used for development',
         'advanced_optimizations': False,
@@ -320,6 +323,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Sanitize',
         'can_have_debug_info': True,
+        'build_seastar_shared_libs': False,
         'default': False,
         'description': 'a mode with optimizations and sanitizers enabled, used for finding memory errors',
         'advanced_optimizations': False,
@@ -332,6 +336,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Debug',
         'can_have_debug_info': True,
+        'build_seastar_shared_libs': False,
         'default': False,
         'description': 'a mode exclusively used for generating test coverage reports',
         'advanced_optimizations': False,
@@ -410,6 +415,7 @@ scylla_tests = set([
     'test/boost/json_test',
     'test/boost/keys_test',
     'test/boost/large_paging_state_test',
+    'test/boost/recent_entries_map_test',
     'test/boost/like_matcher_test',
     'test/boost/limiting_data_source_test',
     'test/boost/linearizing_input_stream_test',
@@ -444,6 +450,7 @@ scylla_tests = set([
     'test/boost/reusable_buffer_test',
     'test/boost/restrictions_test',
     'test/boost/repair_test',
+    'test/boost/role_manager_test',
     'test/boost/row_cache_test',
     'test/boost/rust_test',
     'test/boost/schema_change_test',
@@ -673,24 +680,29 @@ scylla_core = (['message/messaging_service.cc',
                 'replica/memtable.cc',
                 'replica/exceptions.cc',
                 'replica/dirty_memory_manager.cc',
+                'mutation/atomic_cell.cc',
+                'mutation/canonical_mutation.cc',
+                'mutation/frozen_mutation.cc',
+                'mutation/mutation.cc',
+                'mutation/mutation_fragment.cc',
+                'mutation/mutation_partition.cc',
+                'mutation/mutation_partition_v2.cc',
+                'mutation/mutation_partition_view.cc',
+                'mutation/mutation_partition_serializer.cc',
+                'mutation/partition_version.cc',
+                'mutation/range_tombstone.cc',
+                'mutation/range_tombstone_list.cc',
                 'absl-flat_hash_map.cc',
-                'atomic_cell.cc',
-                'caching_options.cc',
                 'collection_mutation.cc',
                 'client_data.cc',
                 'debug.cc',
-                'hashers.cc',
-                'schema.cc',
+                'schema/caching_options.cc',
+                'schema/schema.cc',
+                'schema/schema_registry.cc',
                 'frozen_schema.cc',
-                'schema_registry.cc',
                 'bytes.cc',
                 'timeout_config.cc',
-                'mutation.cc',
-                'mutation_fragment.cc',
-                'partition_version.cc',
                 'row_cache.cc',
-                'canonical_mutation.cc',
-                'frozen_mutation.cc',
                 'schema_mutations.cc',
                 'generic_server.cc',
                 'utils/array-search.cc',
@@ -705,9 +717,6 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/rjson.cc',
                 'utils/human_readable.cc',
                 'utils/histogram_metrics_helper.cc',
-                'mutation_partition.cc',
-                'mutation_partition_view.cc',
-                'mutation_partition_serializer.cc',
                 'converting_mutation_partition_applier.cc',
                 'readers/combined.cc',
                 'readers/multishard.cc',
@@ -732,9 +741,11 @@ scylla_core = (['message/messaging_service.cc',
                 'compaction/compaction_strategy.cc',
                 'compaction/size_tiered_compaction_strategy.cc',
                 'compaction/leveled_compaction_strategy.cc',
+                'compaction/task_manager_module.cc',
                 'compaction/time_window_compaction_strategy.cc',
                 'compaction/compaction_manager.cc',
                 'compaction/incremental_compaction_strategy.cc',
+                'compaction/incremental_backlog_tracker.cc',
                 'sstables/integrity_checked_file_impl.cc',
                 'sstables/prepended_input_stream.cc',
                 'sstables/m_format_read_helpers.cc',
@@ -842,7 +853,7 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/murmur_hash.cc',
                 'utils/uuid.cc',
                 'utils/big_decimal.cc',
-                'types.cc',
+                'types/types.cc',
                 'validation.cc',
                 'service/priority_manager.cc',
                 'service/migration_manager.cc',
@@ -858,7 +869,6 @@ scylla_core = (['message/messaging_service.cc',
                 'cql3/constants.cc',
                 'cql3/query_processor.cc',
                 'cql3/query_options.cc',
-                'cql3/column_condition.cc',
                 'cql3/user_types.cc',
                 'cql3/untyped_result_set.cc',
                 'cql3/selection/abstract_function_selector.cc',
@@ -1010,11 +1020,10 @@ scylla_core = (['message/messaging_service.cc',
                 'audit/audit.cc',
                 'audit/audit_cf_storage_helper.cc',
                 'audit/audit_syslog_storage_helper.cc',
-                'range_tombstone.cc',
-                'range_tombstone_list.cc',
                 'tombstone_gc_options.cc',
                 'tombstone_gc.cc',
                 'utils/disk-error-handler.cc',
+                'utils/hashers.cc',
                 'duration.cc',
                 'vint-serialization.cc',
                 'utils/arch/powerpc/crc32-vpmsum/crc32_wrapper.cc',
@@ -1029,6 +1038,8 @@ scylla_core = (['message/messaging_service.cc',
                 'ent/encryption/encrypted_file_impl.cc',
                 'ent/encryption/kmip_host.cc',
                 'ent/encryption/kmip_key_provider.cc',
+                'ent/encryption/kms_host.cc',
+                'ent/encryption/kms_key_provider.cc',
                 'ent/ldap/ldap_connection.cc',
                 'in-memory-file-impl.cc',
                 'mirror-file-impl.cc',
@@ -1060,6 +1071,7 @@ scylla_core = (['message/messaging_service.cc',
                 'service/broadcast_tables/experimental/lang.cc',
                 'tasks/task_manager.cc',
                 'rust/wasmtime_bindings/src/lib.rs',
+                'utils/to_string.cc',
                 'reader_concurrency_semaphore_group.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')] \
                   + scylla_raft_core
@@ -1197,6 +1209,7 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
     'test/lib/data_model.cc',
     'test/lib/exception_utils.cc',
     'test/lib/random_schema.cc',
+    'test/lib/key_utils.cc',
 ]
 
 scylla_raft_dependencies = scylla_raft_core + ['utils/uuid.cc', 'utils/error_injection.cc']
@@ -1213,6 +1226,9 @@ scylla_perfs = ['test/perf/perf_fast_forward.cc',
                 'test/lib/test_services.cc',
                 'test/lib/test_utils.cc',
                 'test/lib/tmpdir.cc',
+                'test/lib/key_utils.cc',
+                'test/lib/random_schema.cc',
+                'test/lib/data_model.cc',
                 'seastar/tests/perf/linux_perf_event.cc']
 
 deps = {
@@ -1311,7 +1327,7 @@ deps['test/boost/bytes_ostream_test'] = [
 ]
 
 deps['test/boost/input_stream_test'] = ['test/boost/input_stream_test.cc']
-deps['test/boost/UUID_test'] = ['utils/UUID_gen.cc', 'test/boost/UUID_test.cc', 'utils/uuid.cc', 'utils/dynamic_bitset.cc', 'hashers.cc']
+deps['test/boost/UUID_test'] = ['utils/UUID_gen.cc', 'test/boost/UUID_test.cc', 'utils/uuid.cc', 'utils/dynamic_bitset.cc', 'utils/hashers.cc']
 deps['test/boost/murmur_hash_test'] = ['bytes.cc', 'utils/murmur_hash.cc', 'test/boost/murmur_hash_test.cc']
 deps['test/boost/allocation_strategy_test'] = ['test/boost/allocation_strategy_test.cc', 'utils/logalloc.cc', 'utils/dynamic_bitset.cc']
 deps['test/boost/log_heap_test'] = ['test/boost/log_heap_test.cc']
@@ -1361,41 +1377,24 @@ warnings = [
     '-Wall',
     '-Werror',
     '-Wno-mismatched-tags',  # clang-only
-    '-Wno-maybe-uninitialized',  # false positives on gcc 5
     '-Wno-tautological-compare',
     '-Wno-parentheses-equality',
     '-Wno-c++11-narrowing',
-    '-Wno-sometimes-uninitialized',
-    '-Wno-return-stack-address',
     '-Wno-missing-braces',
-    '-Wno-unused-lambda-capture',
-    '-Wno-overflow',
-    '-Wno-noexcept-type',
-    '-Wno-nonnull-compare',
-    '-Wno-error=cpp',
     '-Wno-ignored-attributes',
     '-Wno-overloaded-virtual',
-    '-Wno-stringop-overflow',
     '-Wno-unused-command-line-argument',
-    '-Wno-defaulted-function-deleted',
-    '-Wno-redeclared-class-member',
     '-Wno-unsupported-friend',
-    '-Wno-unused-variable',
     '-Wno-delete-non-abstract-non-virtual-dtor',
     '-Wno-braced-scalar-init',
     '-Wno-implicit-int-float-conversion',
     '-Wno-delete-abstract-non-virtual-dtor',
-    '-Wno-uninitialized-const-reference',
     # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=77728
     '-Wno-psabi',
     '-Wno-narrowing',
-    '-Wno-array-bounds',
     '-Wno-nonnull',
-    '-Wno-catch-value',
     '-Wno-stringop-overread', # false positives with gcc 12
     '-Wno-uninitialized',  # false positives with gcc 12,
-    '-Wno-missing-attributes', # something in seastar's memory.cc, TBD,
-    '-Wno-use-after-free', # false positives with gcc 12
     '-Wno-dangling-pointer', # false positives with gcc 12
 ]
 
@@ -1513,14 +1512,15 @@ if not try_compile(compiler=args.cxx, source='''\
     print('Installed boost version too old.  Please update {}.'.format(pkgname("boost-devel")))
     sys.exit(1)
 
-if try_compile(args.cxx, source = textwrap.dedent('''\
+if not try_compile(args.cxx, source=textwrap.dedent('''\
         #include <lz4.h>
 
         void m() {
             LZ4_compress_default(static_cast<const char*>(0), static_cast<char*>(0), 0, 0);
         }
         '''), flags=args.user_cflags.split()):
-    defines.append("HAVE_LZ4_COMPRESS_DEFAULT")
+    print('Installed lz4-devel is too old. Please upgrade it to r129 / v1.73 and up')
+    sys.exit(1)
 
 has_sanitize_address_use_after_scope = try_compile(compiler=args.cxx, flags=['-fsanitize-address-use-after-scope'], source='int f() {}')
 
@@ -1650,6 +1650,7 @@ def configure_seastar(build_dir, mode, mode_config):
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
         '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
         '-DSeastar_SCHEDULING_GROUPS_COUNT=17',
+        '-DSeastar_IO_URING=OFF', # io_uring backend is not stable enough
     ] + distro_extra_cmake_args
 
     if args.stack_guards is not None:
@@ -1667,6 +1668,8 @@ def configure_seastar(build_dir, mode, mode_config):
         seastar_cmake_args += ['-DSeastar_ALLOC_FAILURE_INJECTION=ON']
     if args.seastar_debug_allocations:
         seastar_cmake_args += ['-DSeastar_DEBUG_ALLOCATIONS=ON']
+    if modes[mode]['build_seastar_shared_libs']:
+        seastar_cmake_args += ['-DBUILD_SHARED_LIBS=ON']
 
     # In LTO builds, Seastar is configured and built twice: once into intermediate
     # files used for linking Seastar into Scylla, and once into regular ELF object
@@ -1703,9 +1706,16 @@ if not ninja:
     sys.exit(1)
 
 def query_seastar_flags(pc_file, link_static_cxx=False):
-    cflags = pkg_config(pc_file, '--cflags', '--static')
-    libs = pkg_config(pc_file, '--libs', '--static')
-
+    use_shared_libs = modes[mode]['build_seastar_shared_libs']
+    if use_shared_libs:
+        opt = '--shared'
+    else:
+        opt = '--static'
+    cflags = pkg_config(pc_file, '--cflags', opt)
+    libs = pkg_config(pc_file, '--libs', opt)
+    if use_shared_libs:
+        rpath = os.path.dirname(libs.split()[0])
+        libs = f"-Wl,-rpath='{rpath}' {libs}"
     if link_static_cxx:
         libs = libs.replace('-lstdc++ ', '')
 
@@ -1961,6 +1971,7 @@ with open(buildfile, 'w') as f:
         # to an IR file (.o.lto), which is used when linking the main Scylla executable,
         # and to an ELF (.o files) file, used when linking anything else.
 
+        seastar_lib_ext = 'so' if modeval['build_seastar_shared_libs'] else 'a'
         for binary in sorted(build_artifacts):
             if binary in other:
                 continue
@@ -2005,8 +2016,8 @@ with open(buildfile, 'w') as f:
                 objs = internal_objs + external_objs
                 suffix = ""
             # We also link Scylla with `seastar.lto/libseastar.a`, and tests with regular `seastar/libseastar.a`.
-            seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.a'
-            seastar_testing_dep = f'$builddir/{mode}/seastar{suffix}/libseastar_testing.a'
+            seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.{seastar_lib_ext}'
+            seastar_testing_dep = f'$builddir/{mode}/seastar{suffix}/libseastar_testing.{seastar_lib_ext}'
             seastar_libs = f'$seastar_libs_{mode}{suffix.replace(".", "_")}'
             seastar_testing_libs = f'$seastar_testing_libs_{mode}{suffix.replace(".", "_")}'
 
@@ -2109,7 +2120,7 @@ with open(buildfile, 'w') as f:
         for obj in compiles:
             src = compiles[obj]
             for suffix in [''] + ['.lto'] * modes[mode]['has_lto']:
-                seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.a'
+                seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.{seastar_lib_ext}'
                 f.write(f'build {obj}{suffix}: cxx.{mode}{suffix} {src} || {seastar_dep} {gen_headers_dep}\n')
                 if src in modeval['per_src_extra_cxxflags']:
                     f.write('    cxxflags = {seastar_cflags} $cxxflags $cxxflags_{mode} {extra_cxxflags}\n'.format(mode=mode, extra_cxxflags=modeval["per_src_extra_cxxflags"][src], **modeval))
@@ -2158,12 +2169,14 @@ with open(buildfile, 'w') as f:
                     mode=mode, hh=hh, gen_headers_dep=gen_headers_dep))
 
         for suffix in [''] + ['.lto'] * modes[mode]['has_lto']:
-            f.write('build $builddir/{mode}/seastar{suffix}/libseastar.a: ninja $builddir/{mode}/seastar{suffix}/build.ninja | always\n'
+            seastar_dep = f'$builddir/{mode}/seastar{suffix}/libseastar.{seastar_lib_ext}'
+            seastar_testing_dep = f'$builddir/{mode}/seastar{suffix}/libseastar_testing.{seastar_lib_ext}'
+            f.write('build {seastar_dep}: ninja $builddir/{mode}/seastar{suffix}/build.ninja | always\n'
                     .format(**locals()))
             f.write('  pool = submodule_pool\n')
             f.write('  subdir = $builddir/{mode}/seastar{suffix}\n'.format(**locals()))
             f.write('  target = seastar\n'.format(**locals()))
-            f.write('build $builddir/{mode}/seastar{suffix}/libseastar_testing.a: ninja $builddir/{mode}/seastar{suffix}/build.ninja | always\n'
+            f.write('build {seastar_testing_dep}: ninja $builddir/{mode}/seastar{suffix}/build.ninja | always\n'
                     .format(**locals()))
             f.write('  pool = submodule_pool\n')
             f.write('  subdir = $builddir/{mode}/seastar{suffix}\n'.format(**locals()))

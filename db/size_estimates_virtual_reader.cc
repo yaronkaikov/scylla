@@ -20,7 +20,7 @@
 #include "dht/i_partitioner.hh"
 #include "partition_range_compat.hh"
 #include "range.hh"
-#include "mutation_fragment.hh"
+#include "mutation/mutation_fragment.hh"
 #include "sstables/sstables.hh"
 #include "replica/database.hh"
 
@@ -295,7 +295,7 @@ future<> size_estimates_mutation_reader::fast_forward_to(const dht::partition_ra
 }
 
 future<> size_estimates_mutation_reader::fast_forward_to(position_range pr) {
-    forward_buffer_to(pr.start());
+    clear_buffer();
     _end_of_stream = false;
     if (_partition_reader) {
         return _partition_reader->fast_forward_to(std::move(pr));

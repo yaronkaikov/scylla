@@ -18,7 +18,7 @@
 #include <seastar/core/reactor.hh>
 #include <seastar/json/json_elements.hh>
 #include "system_keyspace.hh"
-#include "types.hh"
+#include "types/types.hh"
 #include "service/storage_proxy.hh"
 #include "service/client_state.hh"
 #include "service/query_state.hh"
@@ -36,8 +36,8 @@
 #include "db/config.hh"
 #include "gms/feature_service.hh"
 #include "system_keyspace_view_types.hh"
-#include "schema_builder.hh"
-#include "hashers.hh"
+#include "schema/schema_builder.hh"
+#include "utils/hashers.hh"
 #include "release.hh"
 #include "log.hh"
 #include <seastar/core/enum.hh>
@@ -1391,15 +1391,13 @@ namespace db {
 typedef utils::UUID truncation_key;
 typedef std::unordered_map<truncation_key, truncation_record> truncation_map;
 
-static constexpr uint8_t current_version = 1;
-
 future<truncation_record> system_keyspace::get_truncation_record(table_id cf_id) {
-    if (qctx->qp().db().get_config().ignore_truncation_record.is_set()) {
+    if (_db.local().get_config().ignore_truncation_record.is_set()) {
         truncation_record r{truncation_record::current_magic};
         return make_ready_future<truncation_record>(std::move(r));
     }
     sstring req = format("SELECT * from system.{} WHERE table_uuid = ?", TRUNCATED);
-    return qctx->qp().execute_internal(req, {cf_id.uuid()}, cql3::query_processor::cache_internal::yes).then([](::shared_ptr<cql3::untyped_result_set> rs) {
+    return execute_cql(req, {cf_id.uuid()}).then([](::shared_ptr<cql3::untyped_result_set> rs) {
         truncation_record r{truncation_record::current_magic};
 
         for (const cql3::untyped_result_set_row& row : *rs) {
@@ -1447,17 +1445,6 @@ future<> system_keyspace::save_truncation_record(table_id id, db_clock::time_poi
 
 future<> system_keyspace::save_truncation_record(const replica::column_family& cf, db_clock::time_point truncated_at, db::replay_position rp) {
     return save_truncation_record(cf.schema()->id(), truncated_at, rp);
-}
-
-future<db::replay_position> system_keyspace::get_truncated_position(table_id cf_id, uint32_t shard) {
-    return get_truncated_position(std::move(cf_id)).then([shard](replay_positions positions) {
-       for (auto& rp : positions) {
-           if (shard == rp.shard_id()) {
-               return make_ready_future<db::replay_position>(rp);
-           }
-       }
-       return make_ready_future<db::replay_position>();
-    });
 }
 
 future<replay_positions> system_keyspace::get_truncated_position(table_id cf_id) {
@@ -2278,10 +2265,15 @@ public:
             struct stats {
                 // take the pre-reserved memory into account, as seastar only returns
                 // the stats of memory managed by the seastar allocator, but we instruct
-                // it to reserve addition memory for system.
-                uint64_t total = db::config::wasm_udf_reserved_memory;
+                // it to reserve addition memory for non-seastar allocator on per-shard
+                // basis.
+                uint64_t total = 0;
                 uint64_t free = 0;
-                static stats reduce(stats a, stats b) { return stats{a.total + b.total, a.free + b.free}; }
+                static stats reduce(stats a, stats b) {
+                    return stats{
+                        a.total + b.total + db::config::wasm_udf_reserved_memory,
+                        a.free + b.free};
+                    };
             };
             return map_reduce_shards<stats>([] () {
                 const auto& s = memory::stats();
@@ -2850,7 +2842,6 @@ future<> system_keyspace_make(db::system_keyspace& sys_ks, distributed<replica::
 
     auto& db = dist_db.local();
     auto& db_config = db.get_config();
-    auto enable_cache = db_config.enable_cache();
     bool durable = db_config.data_file_directories().size() > 0;
     for (auto&& table : system_keyspace::all_tables(db_config)) {
         if (!tables.contains(table)) {
@@ -2982,9 +2973,9 @@ future<> system_keyspace::update_compaction_history(utils::UUID uuid, sstring ks
 
 future<> system_keyspace::get_compaction_history(compaction_history_consumer&& f) {
     return do_with(compaction_history_consumer(std::move(f)),
-            [](compaction_history_consumer& consumer) mutable {
+            [this](compaction_history_consumer& consumer) mutable {
         sstring req = format("SELECT * from system.{}", COMPACTION_HISTORY);
-        return qctx->qp().query_internal(req, [&consumer] (const cql3::untyped_result_set::row& row) mutable {
+        return _qp.local().query_internal(req, [&consumer] (const cql3::untyped_result_set::row& row) mutable {
             compaction_history_entry entry;
             entry.id = row.get_as<utils::UUID>("id");
             entry.ks = row.get_as<sstring>("keyspace_name");
@@ -3069,7 +3060,7 @@ mutation system_keyspace::make_size_estimates_mutation(const sstring& ks, std::v
 future<> system_keyspace::register_view_for_building(sstring ks_name, sstring view_name, const dht::token& token) {
     sstring req = format("INSERT INTO system.{} (keyspace_name, view_name, generation_number, cpu_id, first_token) VALUES (?, ?, ?, ?, ?)",
             v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS);
-    return qctx->execute_cql(
+    return execute_cql(
             std::move(req),
             std::move(ks_name),
             std::move(view_name),
@@ -3081,7 +3072,7 @@ future<> system_keyspace::register_view_for_building(sstring ks_name, sstring vi
 future<> system_keyspace::update_view_build_progress(sstring ks_name, sstring view_name, const dht::token& token) {
     sstring req = format("INSERT INTO system.{} (keyspace_name, view_name, next_token, cpu_id) VALUES (?, ?, ?, ?)",
             v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS);
-    return qctx->execute_cql(
+    return execute_cql(
             std::move(req),
             std::move(ks_name),
             std::move(view_name),
@@ -3090,14 +3081,14 @@ future<> system_keyspace::update_view_build_progress(sstring ks_name, sstring vi
 }
 
 future<> system_keyspace::remove_view_build_progress_across_all_shards(sstring ks_name, sstring view_name) {
-    return qctx->execute_cql(
+    return execute_cql(
             format("DELETE FROM system.{} WHERE keyspace_name = ? AND view_name = ?", v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS),
             std::move(ks_name),
             std::move(view_name)).discard_result();
 }
 
 future<> system_keyspace::remove_view_build_progress(sstring ks_name, sstring view_name) {
-    return qctx->execute_cql(
+    return execute_cql(
             format("DELETE FROM system.{} WHERE keyspace_name = ? AND view_name = ? AND cpu_id = ?", v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS),
             std::move(ks_name),
             std::move(view_name),
@@ -3105,21 +3096,21 @@ future<> system_keyspace::remove_view_build_progress(sstring ks_name, sstring vi
 }
 
 future<> system_keyspace::mark_view_as_built(sstring ks_name, sstring view_name) {
-    return qctx->execute_cql(
+    return execute_cql(
             format("INSERT INTO system.{} (keyspace_name, view_name) VALUES (?, ?)", v3::BUILT_VIEWS),
             std::move(ks_name),
             std::move(view_name)).discard_result();
 }
 
 future<> system_keyspace::remove_built_view(sstring ks_name, sstring view_name) {
-    return qctx->execute_cql(
+    return execute_cql(
             format("DELETE FROM system.{} WHERE keyspace_name = ? AND view_name = ?", v3::BUILT_VIEWS),
             std::move(ks_name),
             std::move(view_name)).discard_result();
 }
 
 future<std::vector<system_keyspace::view_name>> system_keyspace::load_built_views() {
-    return qctx->execute_cql(format("SELECT * FROM system.{}", v3::BUILT_VIEWS)).then([] (::shared_ptr<cql3::untyped_result_set> cql_result) {
+    return execute_cql(format("SELECT * FROM system.{}", v3::BUILT_VIEWS)).then([] (::shared_ptr<cql3::untyped_result_set> cql_result) {
         return boost::copy_range<std::vector<view_name>>(*cql_result
                 | boost::adaptors::transformed([] (const cql3::untyped_result_set::row& row) {
             auto ks_name = row.get_as<sstring>("keyspace_name");
@@ -3130,7 +3121,7 @@ future<std::vector<system_keyspace::view_name>> system_keyspace::load_built_view
 }
 
 future<std::vector<system_keyspace::view_build_progress>> system_keyspace::load_view_build_progress() {
-    return qctx->execute_cql(format("SELECT keyspace_name, view_name, first_token, next_token, cpu_id FROM system.{}",
+    return execute_cql(format("SELECT keyspace_name, view_name, first_token, next_token, cpu_id FROM system.{}",
             v3::SCYLLA_VIEWS_BUILDS_IN_PROGRESS)).then([] (::shared_ptr<cql3::untyped_result_set> cql_result) {
         std::vector<view_build_progress> progress;
         for (auto& row : *cql_result) {
@@ -3284,9 +3275,11 @@ future<> system_keyspace::enable_features_on_startup(sharded<gms::feature_servic
             }
         }
         if (is_registered_feat) {
-            // `gms::feature::enable` should be run within a seastar thread context
-            co_await seastar::async([&local_feat_srv, f] {
-                local_feat_srv.enable(sstring(f));
+            co_await feat.invoke_on_all([f] (auto& srv) -> future<> {
+                // `gms::feature::enable` should be run within a seastar thread context
+                co_await seastar::async([&srv, f] {
+                    srv.enable(sstring(f));
+                });
             });
         }
         // If a feature is not in `registered_features` but still in `known_features` list

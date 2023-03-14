@@ -14,7 +14,7 @@
 
 #include <seastar/core/thread.hh>
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/test_services.hh"
 #include "test/lib/mutation_source_test.hh"
@@ -24,7 +24,7 @@
 #include "test/lib/log.hh"
 
 #include "dht/sharder.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "service/priority_manager.hh"
 #include "readers/forwardable_v2.hh"
 

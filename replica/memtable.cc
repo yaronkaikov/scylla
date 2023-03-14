@@ -8,10 +8,10 @@
 
 #include "memtable.hh"
 #include "replica/database.hh"
-#include "frozen_mutation.hh"
+#include "mutation/frozen_mutation.hh"
 #include "partition_snapshot_reader.hh"
 #include "partition_builder.hh"
-#include "mutation_partition_view.hh"
+#include "mutation/mutation_partition_view.hh"
 #include "readers/empty_v2.hh"
 #include "readers/forwardable_v2.hh"
 
@@ -767,7 +767,7 @@ future<>
 memtable::apply(memtable& mt, reader_permit permit) {
     if (auto reader_opt = mt.make_flat_reader_opt(_schema, std::move(permit), query::full_partition_range, _schema->full_slice())) {
         return with_closeable(std::move(*reader_opt), [this] (auto&& rd) mutable {
-            return consume_partitions(rd, [self = this->shared_from_this(), &rd] (mutation&& m) {
+            return consume_partitions(rd, [self = this->shared_from_this()] (mutation&& m) {
                 self->apply(m);
                 return stop_iteration::no;
             });

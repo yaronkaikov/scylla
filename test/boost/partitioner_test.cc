@@ -8,14 +8,14 @@
 
 #include <boost/algorithm/cxx11/all_of.hpp>
 #include <boost/range/combine.hpp>
-#include <seastar/testing/thread_test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 
 #include "dht/i_partitioner.hh"
 #include "dht/sharder.hh"
 #include "dht/murmur3_partitioner.hh"
-#include "schema.hh"
-#include "types.hh"
-#include "schema_builder.hh"
+#include "schema/schema.hh"
+#include "types/types.hh"
+#include "schema/schema_builder.hh"
 #include "utils/div_ceil.hh"
 
 #include "test/lib/simple_schema.hh"

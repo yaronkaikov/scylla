@@ -191,17 +191,6 @@ Scylla sets up daily fstrim on the filesystem(s),
 containing your Scylla commitlog and data directory. This utility will
 discard, or trim, any blocks no longer in use by the filesystem.
 
-Experimental Features
-=====================
-
-Scylla Open Source uses experimental flags to expose non-production-ready features safely. These features are not stable enough to be used in production, and their API will likely change, breaking backward or forward compatibility.
-
-In recent Scylla versions, these features are controlled by the ``experimental_features`` list in scylla.yaml, allowing one to choose which experimental to enable.
-For example, some of the experimental features in Scylla Open Source 4.5 are: ``udf``, ``alternator-streams`` and ``raft``.
-Use ``scylla --help`` to get the list of experimental features.
-
-Scylla Enterprise and Scylla Cloud do not officially support experimental Features.
-
 Monitoring
 ==========
 Scylla exposes interfaces for online monitoring, as described below.

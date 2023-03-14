@@ -18,7 +18,7 @@
 #include "data_dictionary/data_dictionary.hh"
 #include <seastar/core/sstring.hh>
 #include <seastar/core/print.hh>
-#include "frozen_mutation.hh"
+#include "mutation/frozen_mutation.hh"
 #include "utils/UUID_gen.hh"
 #include <thrift/protocol/TBinaryProtocol.h>
 #include <boost/move/iterator.hpp>
@@ -27,16 +27,16 @@
 #include "service/storage_proxy.hh"
 #include "utils/class_registrator.hh"
 #include "noexcept_traits.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "thrift/utils.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "thrift/thrift_validation.hh"
 #include "service/storage_service.hh"
 #include "service/query_state.hh"
 #include "cql3/query_processor.hh"
 #include "cql3/column_identifier.hh"
 #include "timeout_config.hh"
-#include "mutation.hh"
+#include "mutation/mutation.hh"
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/adaptor/indirected.hpp>
@@ -263,7 +263,7 @@ public:
     }
 
     void get(thrift_fn::function<void(ColumnOrSuperColumn const& _return)> cob, thrift_fn::function<void(::apache::thrift::TDelayedException* _throw)> exn_cob, const std::string& key, const ColumnPath& column_path, const ConsistencyLevel::type consistency_level) {
-        return get_slice([cob = std::move(cob), &column_path](auto&& results) {
+        return get_slice([cob = std::move(cob)](auto&& results) {
             if (results.empty()) {
                 throw NotFoundException();
             }

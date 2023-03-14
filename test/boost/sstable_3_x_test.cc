@@ -14,7 +14,7 @@
 
 #include <seastar/core/thread.hh>
 #include <seastar/core/reactor.hh>
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
 #include <seastar/util/closeable.hh>
 
@@ -23,7 +23,7 @@
 #include "cell_locking.hh"
 #include "compress.hh"
 #include "counters.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "test/boost/sstable_test.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
 #include "test/lib/tmpdir.hh"
@@ -32,10 +32,10 @@
 #include "test/lib/random_utils.hh"
 #include "sstables/types.hh"
 #include "keys.hh"
-#include "types.hh"
+#include "types/types.hh"
 #include "types/user.hh"
 #include "partition_slice_builder.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "utils/UUID_gen.hh"
 #include "encoding_stats.hh"
 #include "sstables/mx/writer.hh"
@@ -706,12 +706,6 @@ SEASTAR_TEST_CASE(test_uncompressed_filtering_and_forwarding_range_tombstones_re
     };
     auto make_tombstone = [] (int64_t ts, int32_t tp) {
         return tombstone{api::timestamp_type{ts}, gc_clock::time_point(gc_clock::duration(tp))};
-    };
-
-    auto make_clustering_range = [] (clustering_key_prefix&& start, clustering_key_prefix&& end) {
-        return query::clustering_range::make(
-            query::clustering_range::bound(std::move(start), true),
-            query::clustering_range::bound(std::move(end), true));
     };
 
     auto make_assertions = [] (flat_mutation_reader_v2 rd) {
@@ -3022,10 +3016,10 @@ static std::vector<sstables::shared_sstable> open_sstables(test_env& env, schema
 
 static flat_mutation_reader_v2 compacted_sstable_reader(test_env& env, schema_ptr s,
                      sstring table_name, std::vector<unsigned long> generations) {
-    auto cm = make_lw_shared<compaction_manager>(compaction_manager::for_testing_tag{});
+    auto cm = make_lw_shared<compaction_manager_for_testing>(false);
     auto cl_stats = make_lw_shared<cell_locker_stats>();
     auto tracker = make_lw_shared<cache_tracker>();
-    auto cf = make_lw_shared<replica::column_family>(s, env.make_table_config(), replica::column_family::no_commitlog(), *cm, env.manager(), *cl_stats, *tracker);
+    auto cf = make_lw_shared<replica::column_family>(s, env.make_table_config(), replica::column_family::no_commitlog(), **cm, env.manager(), *cl_stats, *tracker);
     cf->mark_ready_for_writes();
     lw_shared_ptr<replica::memtable> mt = make_lw_shared<replica::memtable>(s);
 
@@ -4911,7 +4905,6 @@ SEASTAR_TEST_CASE(test_regular_and_shadowable_deletion) {
     mutation mut2{s, partition_key::from_deeply_exploded(*s, {0})};
     {
         auto& clustered_row = mut2.partition().clustered_row(*s, ckey);
-        gc_clock::time_point tp {gc_clock::duration(1540230880)};
         clustered_row.apply(row_marker{api::timestamp_type{1540230874370002}});
         clustered_row.apply(make_tombstone(1540230874370001, 1540251167));
         clustered_row.apply(shadowable_tombstone(make_tombstone(1540230874370002, 1540251216)));
@@ -5300,7 +5293,7 @@ static void test_sstable_log_too_many_rows_f(int rows, uint64_t threshold, bool 
     mt->apply(p);
 
     bool logged = false;
-    auto f = [&logged, &expected, &pk, &threshold](const schema& sc, const sstables::key& partition_key,
+    auto f = [&logged, &pk, &threshold](const schema& sc, const sstables::key& partition_key,
                      const clustering_key_prefix* clustering_key, uint64_t rows_count,
                      const column_definition* cdef, uint64_t cell_size, uint64_t collection_elements) {
         BOOST_REQUIRE_GT(rows_count, threshold);
@@ -5352,7 +5345,7 @@ static void test_sstable_too_many_collection_elements_f(int elements, uint64_t t
     mt->apply(p);
 
     bool logged = false;
-    auto f = [&logged, &expected, &pk, &threshold](const schema& sc, const sstables::key& partition_key,
+    auto f = [&logged, &pk, &threshold](const schema& sc, const sstables::key& partition_key,
                      const clustering_key_prefix* clustering_key, uint64_t rows_count,
                      const column_definition* cdef, uint64_t cell_size, uint64_t collection_elements) {
         BOOST_REQUIRE_GT(collection_elements, threshold);

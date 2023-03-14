@@ -17,7 +17,7 @@
 
 #include <seastar/net/inet_address.hh>
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
@@ -38,7 +38,7 @@
 #include "service/qos/qos_common.hh"
 #include "utils/rjson.hh"
 #include "utils/fmt-compat.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "service/migration_manager.hh"
 #include <regex>
 #include "gms/feature.hh"
@@ -1531,7 +1531,7 @@ SEASTAR_TEST_CASE(test_writetime_and_ttl) {
             return e.execute_cql(q).discard_result();
         }).then([&e] {
             return e.execute_cql("select writetime(i) from cf where p1 in ('key1');");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows()
                 .with_rows({{
                      {long_type->decompose(int64_t(the_timestamp))},
@@ -1652,7 +1652,7 @@ SEASTAR_TEST_CASE(test_tuples) {
             return e.execute_cql("insert into cf2 (p1, r1) values (1, (1, 2, 'abc'));").discard_result();
         }).then([&e] {
             return e.execute_cql("select * from cf2 where p1 = 1;");
-        }).then([&e, tt] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([tt] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
                 { int32_type->decompose(int32_t(1)), tt->decompose(make_tuple_value(tt, tuple_type_impl::native_type({int32_t(1), int64_t(2), sstring("abc")}))) }
             });
@@ -1755,12 +1755,12 @@ SEASTAR_TEST_CASE(test_duration_restrictions) {
                 return validate_request_failure(
                         env,
                         "select * from my_table0 where key = 0 and span < 3d;",
-                        "Slice restrictions are not supported on duration columns");
+                        "Duration type is unordered for span");
             }).then([&] {
                 return validate_request_failure(
                         env,
                         "update my_table0 set name = 'joe' where key = 0 if span >= 5m",
-                        "Slice conditions are not supported on durations");
+                        "Duration type is unordered for span");
             });
         });
     });
@@ -1777,7 +1777,7 @@ SEASTAR_TEST_CASE(test_select_multiple_ranges) {
             ).discard_result();
         }).then([&e] {
             return e.execute_cql("select r1 from cf where p1 in ('key1', 'key2');");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_size(2).with_row({
                 {int32_type->decompose(100)}
             }).with_row({
@@ -1804,7 +1804,7 @@ SEASTAR_TEST_CASE(test_validate_keyspace) {
         }).then_wrapped([&e] (future<shared_ptr<cql_transport::messages::result_message>> f) {
             assert_that_failed(f);
             return e.execute_cql("create keyspace SyStEm with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 };");
-        }).then_wrapped([&e] (future<shared_ptr<cql_transport::messages::result_message>> f) {
+        }).then_wrapped([] (future<shared_ptr<cql_transport::messages::result_message>> f) {
             assert_that_failed(f);
         });
     });
@@ -1835,7 +1835,7 @@ SEASTAR_TEST_CASE(test_validate_table) {
         }).then_wrapped([&e] (future<shared_ptr<cql_transport::messages::result_message>> f) {
             assert_that_failed(f);
             return e.execute_cql("create table tb (foo text PRIMARY KEY, bar text) with min_index_interval = 1024 and max_index_interval = 128;");
-        }).then_wrapped([&e] (future<shared_ptr<cql_transport::messages::result_message>> f) {
+        }).then_wrapped([] (future<shared_ptr<cql_transport::messages::result_message>> f) {
             assert_that_failed(f);
         });
     });
@@ -2702,7 +2702,7 @@ SEASTAR_TEST_CASE(test_compact_storage) {
             return e.execute_cql("insert into tcs4 (p1) values (1);").discard_result();
         }).then([&e] {
             return e.execute_cql("select * from tcs4;");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({ });
         });
     });
@@ -2784,7 +2784,7 @@ SEASTAR_TEST_CASE(test_result_order) {
             return e.execute_cql("insert into tro (p1, c1, r1) values (1, 'cccc', 6);").discard_result();
         }).then([&e] {
             return e.execute_cql("select * from tro where p1 = 1;");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
                 { int32_type->decompose(1), utf8_type->decompose(sstring("a")), int32_type->decompose(3) },
                 { int32_type->decompose(1), utf8_type->decompose(sstring("aaa")), int32_type->decompose(4) },
@@ -2806,7 +2806,7 @@ SEASTAR_TEST_CASE(test_frozen_collections) {
             return e.execute_cql("INSERT INTO tfc (a, b, c, d) VALUES (0, 0, {}, 0);").discard_result();
         }).then([&e] {
             return e.execute_cql("SELECT * FROM tfc;");
-        }).then([&e, frozen_map_of_set_and_list] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([frozen_map_of_set_and_list] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
                 { int32_type->decompose(0),
                   int32_type->decompose(0),
@@ -2830,7 +2830,7 @@ SEASTAR_TEST_CASE(test_alter_table) {
             return e.execute_cql("alter table tat alter r2 type blob;").discard_result();
         }).then([&e] {
             return e.execute_cql("select pk1, c1, ck2, r1, r2 from tat;");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
                 { int32_type->decompose(1), int32_type->decompose(2), int32_type->decompose(3), int32_type->decompose(4), int32_type->decompose(5) },
             });
@@ -2838,7 +2838,7 @@ SEASTAR_TEST_CASE(test_alter_table) {
             return e.execute_cql("insert into tat (pk1, c1, ck2, r2) values (1, 2, 3, 0x1234567812345678);").discard_result();
         }).then([&e] {
             return e.execute_cql("select pk1, c1, ck2, r1, r2 from tat;");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
                 { int32_type->decompose(1), int32_type->decompose(2), int32_type->decompose(3), int32_type->decompose(4), from_hex("1234567812345678") },
             });
@@ -2878,7 +2878,7 @@ SEASTAR_TEST_CASE(test_alter_table) {
             return e.execute_cql("alter table tat add r2 int;").discard_result();
         }).then([&e] {
             return e.execute_cql("select * from tat;");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
                 { int32_type->decompose(1), int32_type->decompose(2), int32_type->decompose(3), {}, int32_type->decompose(6), {} },
             });
@@ -3107,7 +3107,7 @@ SEASTAR_TEST_CASE(test_alter_table_validation) {
         }).then_wrapped([&e] (future<> f) {
             assert(!f.failed());
             return e.execute_cql("alter table tatv add r4 set<blob>;").discard_result();
-        }).then_wrapped([&e] (future<> f) {
+        }).then_wrapped([] (future<> f) {
             assert(!f.failed());
         });
     });
@@ -3135,7 +3135,7 @@ SEASTAR_TEST_CASE(test_pg_style_string_literal) {
         }).then_wrapped([&e] (future<> f) {
             assert_that_failed(f);
             return e.execute_cql("select * from test;");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows().with_rows({
                 { utf8_type->decompose(sstring("Apostrophe's$ $ not$ $ '' escaped")) },
                 { utf8_type->decompose(sstring("$''valid$_$key")) },
@@ -4536,7 +4536,7 @@ SEASTAR_TEST_CASE(test_time_uuid_fcts_result) {
         require_timeuuid_or_date("totimestamp");
 
         // test timestamp or timeuuid arg
-        auto require_timestamp_or_timeuuid = [&e] (const sstring& fct) {
+        auto require_timestamp_or_timeuuid = [] (const sstring& fct) {
         };
 
         require_timestamp_or_timeuuid("todate");
@@ -5018,7 +5018,6 @@ SEASTAR_THREAD_TEST_CASE(test_invalid_using_timestamps) {
 
 SEASTAR_THREAD_TEST_CASE(test_twcs_non_optimal_query_path) {
     do_with_cql_env_thread([] (cql_test_env& e) {
-        auto now_nano = std::chrono::duration_cast<std::chrono::nanoseconds>(db_clock::now().time_since_epoch()).count();
         e.execute_cql(
                 "CREATE TABLE tbl (pk int, ck int, v int, s int static, PRIMARY KEY (pk, ck))"
                 " WITH compaction = {"
@@ -5047,7 +5046,6 @@ SEASTAR_THREAD_TEST_CASE(test_twcs_non_optimal_query_path) {
 
 SEASTAR_THREAD_TEST_CASE(test_twcs_optimal_query_path) {
     do_with_cql_env_thread([] (cql_test_env& e) {
-        auto now_nano = std::chrono::duration_cast<std::chrono::nanoseconds>(db_clock::now().time_since_epoch()).count();
         e.execute_cql(
                 "CREATE TABLE tbl (pk int, ck int, v int, PRIMARY KEY (pk, ck))"
                 " WITH compaction = {"
@@ -5084,7 +5082,6 @@ SEASTAR_THREAD_TEST_CASE(test_query_unselected_columns) {
         BOOST_REQUIRE(e.local_db().get_statement_scheduling_group() == current_scheduling_group());
         BOOST_REQUIRE(default_scheduling_group() != current_scheduling_group());
 
-        auto now_nano = std::chrono::duration_cast<std::chrono::nanoseconds>(db_clock::now().time_since_epoch()).count();
         e.execute_cql("CREATE TABLE tbl (pk int, ck int, v text, PRIMARY KEY (pk, ck))").get();
 
         const int num_rows = 20;
@@ -5349,6 +5346,36 @@ SEASTAR_TEST_CASE(test_parallelized_select_sum_group_by) {
         });
 
         BOOST_CHECK_EQUAL(stat_parallelized, qp.get_cql_stats().select_parallelized);
+    });
+}
+
+SEASTAR_TEST_CASE(test_parallelized_select_counter_type) {
+    return with_parallelized_aggregation_enabled_thread([](cql_test_env& e) {
+        auto& qp = e.local_qp();
+        auto stat_parallelized = qp.get_cql_stats().select_parallelized;
+
+        e.execute_cql("CREATE TABLE tbl (k int, c counter, PRIMARY KEY (k));").get();
+        e.execute_cql("UPDATE tbl SET c = c + 4 WHERE k = 0;").get();
+        e.execute_cql("UPDATE tbl SET c = c + 2 WHERE k = 1;").get();
+
+        auto msg_sum = e.execute_cql("SELECT SUM(c) FROM tbl;").get();
+        assert_that(msg_sum).is_rows().with_rows({
+            {long_type->decompose(int64_t(6))}
+        });
+        auto msg_min = e.execute_cql("SELECT MIN(c) FROM tbl;").get();
+        assert_that(msg_min).is_rows().with_rows({
+            {long_type->decompose(int64_t(2))}
+        });
+        auto msg_max = e.execute_cql("SELECT MAX(c) FROM tbl;").get();
+        assert_that(msg_max).is_rows().with_rows({
+            {long_type->decompose(int64_t(4))}
+        });
+        auto msg_avg = e.execute_cql("SELECT AVG(c) FROM tbl;").get();
+        assert_that(msg_avg).is_rows().with_rows({
+            {long_type->decompose(int64_t(3))}
+        });
+
+        BOOST_CHECK_EQUAL(stat_parallelized + 4, qp.get_cql_stats().select_parallelized);
     });
 }
 

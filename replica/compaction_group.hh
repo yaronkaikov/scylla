@@ -33,6 +33,8 @@ class compaction_group {
     table& _t;
     class table_state;
     std::unique_ptr<table_state> _table_state;
+    // Tokens included in this compaction_groups
+    dht::token_range _token_range;
     // Holds list of memtables for this group
     lw_shared_ptr<memtable_list> _memtables;
     // SSTable set which contains all non-maintenance sstables
@@ -43,6 +45,8 @@ class compaction_group {
     // have not been deleted yet, so must not GC any tombstones in other sstables
     // that may delete data in these sstables:
     std::vector<sstables::shared_sstable> _sstables_compacted_but_not_deleted;
+    uint64_t _main_set_disk_space_used = 0;
+    uint64_t _maintenance_set_disk_space_used = 0;
 private:
     // Adds new sstable to the set of sstables
     // Doesn't update the cache. The cache must be synchronized in order for reads to see
@@ -55,8 +59,9 @@ private:
                    enable_backlog_tracker backlog_tracker);
     // Update compaction backlog tracker with the same changes applied to the underlying sstable set.
     void backlog_tracker_adjust_charges(const std::vector<sstables::shared_sstable>& old_sstables, const std::vector<sstables::shared_sstable>& new_sstables);
+    static uint64_t calculate_disk_space_used_for(const sstables::sstable_set& set);
 public:
-    compaction_group(table& t);
+    compaction_group(table& t, dht::token_range token_range);
 
     // Will stop ongoing compaction on behalf of this group, etc.
     future<> stop() noexcept;
@@ -69,6 +74,11 @@ public:
 
     future<> flush();
     bool can_flush() const;
+
+    const dht::token_range& token_range() const noexcept {
+        return _token_range;
+    }
+
     lw_shared_ptr<memtable_list>& memtables() noexcept;
     size_t memtable_count() const noexcept;
     // Returns minimum timestamp from memtable list
@@ -103,7 +113,14 @@ public:
 
     compaction_backlog_tracker& get_backlog_tracker();
 
+    size_t live_sstable_count() const noexcept;
+    uint64_t live_disk_space_used() const noexcept;
+    uint64_t total_disk_space_used() const noexcept;
+
     compaction::table_state& as_table_state() const noexcept;
 };
+
+// Used by the tests to increase the default number of compaction groups by increasing the minimum to X.
+void set_minimum_x_log2_compaction_groups(unsigned x_log2_compaction_groups);
 
 }

@@ -11,8 +11,8 @@
 #include <string>
 #include <string_view>
 #include <optional>
-#include "types.hh"
-#include "schema_fwd.hh"
+#include "types/types.hh"
+#include "schema/schema_fwd.hh"
 #include "keys.hh"
 #include "utils/rjson.hh"
 #include "utils/big_decimal.hh"

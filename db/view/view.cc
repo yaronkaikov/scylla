@@ -43,8 +43,8 @@
 #include "gms/inet_address.hh"
 #include "keys.hh"
 #include "locator/network_topology_strategy.hh"
-#include "mutation.hh"
-#include "mutation_partition.hh"
+#include "mutation/mutation.hh"
+#include "mutation/mutation_partition.hh"
 #include "service/migration_manager.hh"
 #include "service/storage_proxy.hh"
 #include "utils/small_vector.hh"
@@ -91,7 +91,7 @@ cql3::statements::select_statement& view_info::select_statement() const {
         }
 
         if (legacy_token_column || boost::algorithm::any_of(_schema.all_columns(), std::mem_fn(&column_definition::is_computed))) {
-            auto real_columns = _schema.all_columns() | boost::adaptors::filtered([this, legacy_token_column] (const column_definition& cdef) {
+            auto real_columns = _schema.all_columns() | boost::adaptors::filtered([legacy_token_column] (const column_definition& cdef) {
                 return &cdef != legacy_token_column && !cdef.is_computed();
             });
             schema::columns_type columns = boost::copy_range<schema::columns_type>(std::move(real_columns));
@@ -1742,8 +1742,9 @@ future<> mutate_MV(
     });
 }
 
-view_builder::view_builder(replica::database& db, db::system_distributed_keyspace& sys_dist_ks, service::migration_notifier& mn)
+view_builder::view_builder(replica::database& db, db::system_keyspace& sys_ks, db::system_distributed_keyspace& sys_dist_ks, service::migration_notifier& mn)
         : _db(db)
+        , _sys_ks(sys_ks)
         , _sys_dist_ks(sys_dist_ks)
         , _mnotifier(mn)
         , _permit(_db.get_reader_concurrency_semaphore().make_tracking_only_permit(nullptr, "view_builder", db::no_timeout)) {
@@ -1783,8 +1784,8 @@ future<> view_builder::start(service::migration_manager& mm) {
             while (!mm.have_schema_agreement()) {
                 seastar::sleep_abortable(500ms, _as).get();
             }
-            auto built = system_keyspace::load_built_views().get0();
-            auto in_progress = system_keyspace::load_view_build_progress().get0();
+            auto built = _sys_ks.load_built_views().get0();
+            auto in_progress = _sys_ks.load_view_build_progress().get0();
             setup_shard_build_step(vbi, std::move(built), std::move(in_progress));
         }).then_wrapped([this] (future<>&& f) {
             // All shards need to arrive at the same decisions on whether or not to
@@ -2000,9 +2001,9 @@ void view_builder::setup_shard_build_step(
         }
         if (this_shard_id() == 0) {
             vbi.bookkeeping_ops.push_back(_sys_dist_ks.remove_view(name.first, name.second));
-            vbi.bookkeeping_ops.push_back(system_keyspace::remove_built_view(name.first, name.second));
+            vbi.bookkeeping_ops.push_back(_sys_ks.remove_built_view(name.first, name.second));
             vbi.bookkeeping_ops.push_back(
-                    system_keyspace::remove_view_build_progress_across_all_shards(
+                    _sys_ks.remove_view_build_progress_across_all_shards(
                             std::move(name.first),
                             std::move(name.second)));
         }
@@ -2018,8 +2019,8 @@ void view_builder::setup_shard_build_step(
         if (auto view = maybe_fetch_view(view_name)) {
             if (vbi.built_views.contains(view->id())) {
                 if (this_shard_id() == 0) {
-                    auto f = _sys_dist_ks.finish_view_build(std::move(view_name.first), std::move(view_name.second)).then([view = std::move(view)] {
-                        return system_keyspace::remove_view_build_progress_across_all_shards(view->cf_name(), view->ks_name());
+                    auto f = _sys_dist_ks.finish_view_build(std::move(view_name.first), std::move(view_name.second)).then([this, view = std::move(view)] {
+                        return _sys_ks.remove_view_build_progress_across_all_shards(view->cf_name(), view->ks_name());
                     });
                     vbi.bookkeeping_ops.push_back(std::move(f));
                 }
@@ -2075,8 +2076,8 @@ future<> view_builder::calculate_shard_build_step(view_builder_init_state& vbi) 
 
     return parallel_for_each(_base_to_build_step, [this] (auto& p) {
         return initialize_reader_at_current_token(p.second);
-    }).then([this, &vbi] {
-        return seastar::when_all_succeed(vbi.bookkeeping_ops.begin(), vbi.bookkeeping_ops.end()).handle_exception([this] (std::exception_ptr ep) {
+    }).then([&vbi] {
+        return seastar::when_all_succeed(vbi.bookkeeping_ops.begin(), vbi.bookkeeping_ops.end()).handle_exception([] (std::exception_ptr ep) {
             vlogger.warn("Failed to update materialized view bookkeeping while synchronizing view builds on all shards ({}), continuing anyway.", ep);
         });
     });
@@ -2084,7 +2085,7 @@ future<> view_builder::calculate_shard_build_step(view_builder_init_state& vbi) 
 
 future<std::unordered_map<sstring, sstring>>
 view_builder::view_build_statuses(sstring keyspace, sstring view_name) const {
-    return _sys_dist_ks.view_status(std::move(keyspace), std::move(view_name)).then([this] (std::unordered_map<locator::host_id, sstring> status) {
+    return _sys_dist_ks.view_status(std::move(keyspace), std::move(view_name)).then([] (std::unordered_map<locator::host_id, sstring> status) {
         auto& endpoint_to_host_id = service::get_local_storage_proxy().get_token_metadata_ptr()->get_endpoint_to_host_id_map_for_reading();
         return boost::copy_range<std::unordered_map<sstring, sstring>>(endpoint_to_host_id
                 | boost::adaptors::transformed([&status] (const std::pair<gms::inet_address, locator::host_id>& p) {
@@ -2101,7 +2102,7 @@ future<> view_builder::add_new_view(view_ptr view, build_step& step) {
     auto f = this_shard_id() == 0 ? _sys_dist_ks.start_view_build(view->ks_name(), view->cf_name()) : make_ready_future<>();
     return when_all_succeed(
             std::move(f),
-            system_keyspace::register_view_for_building(view->ks_name(), view->cf_name(), step.current_token())).discard_result();
+            _sys_ks.register_view_for_building(view->ks_name(), view->cf_name(), step.current_token())).discard_result();
 }
 
 static future<> flush_base(lw_shared_ptr<replica::column_family> base, abort_source& as) {
@@ -2183,11 +2184,11 @@ void view_builder::on_drop_view(const sstring& ks_name, const sstring& view_name
             // current shard, since shard 0 may have already processed the notification, and this
             // shard may since have updated the system table if the drop happened concurrently
             // with the build.
-            return system_keyspace::remove_view_build_progress(ks_name, view_name);
+            return _sys_ks.remove_view_build_progress(ks_name, view_name);
         }
         return when_all_succeed(
-                    system_keyspace::remove_view_build_progress(ks_name, view_name),
-                    system_keyspace::remove_built_view(ks_name, view_name),
+                    _sys_ks.remove_view_build_progress(ks_name, view_name),
+                    _sys_ks.remove_built_view(ks_name, view_name),
                     _sys_dist_ks.remove_view(ks_name, view_name))
                         .discard_result()
                         .handle_exception([ks_name, view_name] (std::exception_ptr ep) {
@@ -2454,10 +2455,10 @@ void view_builder::execute(build_step& step, exponential_backoff_retry r) {
     for (auto& [view, _, next_token] : step.build_status) {
         if (next_token) {
             bookkeeping_ops.push_back(
-                    system_keyspace::update_view_build_progress(view->ks_name(), view->cf_name(), *next_token));
+                    _sys_ks.update_view_build_progress(view->ks_name(), view->cf_name(), *next_token));
         }
     }
-    seastar::when_all_succeed(bookkeeping_ops.begin(), bookkeeping_ops.end()).handle_exception([this] (std::exception_ptr ep) {
+    seastar::when_all_succeed(bookkeeping_ops.begin(), bookkeeping_ops.end()).handle_exception([] (std::exception_ptr ep) {
         vlogger.warn("Failed to update materialized view bookkeeping ({}), continuing anyway.", ep);
     }).get();
 }
@@ -2482,11 +2483,11 @@ future<> view_builder::maybe_mark_view_as_built(view_ptr view, dht::token next_t
                 auto view = builder._db.find_schema(view_id);
                 vlogger.info("Finished building view {}.{}", view->ks_name(), view->cf_name());
                 return seastar::when_all_succeed(
-                        system_keyspace::mark_view_as_built(view->ks_name(), view->cf_name()),
-                        builder._sys_dist_ks.finish_view_build(view->ks_name(), view->cf_name())).then_unpack([view] {
+                        builder._sys_ks.mark_view_as_built(view->ks_name(), view->cf_name()),
+                        builder._sys_dist_ks.finish_view_build(view->ks_name(), view->cf_name())).then_unpack([&builder, view] {
                     // The view is built, so shard 0 can remove the entry in the build progress system table on
                     // behalf of all shards. It is guaranteed to have a higher timestamp than the per-shard entries.
-                    return system_keyspace::remove_view_build_progress_across_all_shards(view->ks_name(), view->cf_name());
+                    return builder._sys_ks.remove_view_build_progress_across_all_shards(view->ks_name(), view->cf_name());
                 }).then([&builder, view] {
                     auto it = builder._build_notifiers.find(std::pair(view->ks_name(), view->cf_name()));
                     if (it != builder._build_notifiers.end()) {
@@ -2495,7 +2496,7 @@ future<> view_builder::maybe_mark_view_as_built(view_ptr view, dht::token next_t
                 });
             });
         }
-        return system_keyspace::update_view_build_progress(view->ks_name(), view->cf_name(), next_token);
+        return _sys_ks.update_view_build_progress(view->ks_name(), view->cf_name(), next_token);
     });
 }
 
@@ -2523,24 +2524,28 @@ update_backlog node_update_backlog::add_fetch(unsigned shard, update_backlog bac
     return std::max(backlog, _max.load(std::memory_order_relaxed));
 }
 
-future<bool> check_view_build_ongoing(db::system_distributed_keyspace& sys_dist_ks, const sstring& ks_name, const sstring& cf_name) {
-    return sys_dist_ks.view_status(ks_name, cf_name).then([] (std::unordered_map<locator::host_id, sstring>&& view_statuses) {
-        return boost::algorithm::any_of(view_statuses | boost::adaptors::map_values, [] (const sstring& view_status) {
-            return view_status == "STARTED";
+future<bool> check_view_build_ongoing(db::system_distributed_keyspace& sys_dist_ks, const locator::token_metadata& tm, const sstring& ks_name,
+        const sstring& cf_name) {
+    using view_statuses_type = std::unordered_map<locator::host_id, sstring>;
+    return sys_dist_ks.view_status(ks_name, cf_name).then([&tm] (view_statuses_type&& view_statuses) {
+        return boost::algorithm::any_of(view_statuses, [&tm] (const view_statuses_type::value_type& view_status) {
+            // Only consider status of known hosts.
+            return view_status.second == "STARTED" && tm.get_endpoint_for_host_id(view_status.first);
         });
     });
 }
 
-future<bool> check_needs_view_update_path(db::system_distributed_keyspace& sys_dist_ks, const replica::table& t, streaming::stream_reason reason) {
+future<bool> check_needs_view_update_path(db::system_distributed_keyspace& sys_dist_ks, const locator::token_metadata& tm, const replica::table& t,
+        streaming::stream_reason reason) {
     if (is_internal_keyspace(t.schema()->ks_name())) {
         return make_ready_future<bool>(false);
     }
     if (reason == streaming::stream_reason::repair && !t.views().empty()) {
         return make_ready_future<bool>(true);
     }
-    return do_with(t.views(), [&sys_dist_ks] (auto& views) {
+    return do_with(t.views(), [&sys_dist_ks, &tm] (auto& views) {
         return map_reduce(views,
-                [&sys_dist_ks] (const view_ptr& view) { return check_view_build_ongoing(sys_dist_ks, view->ks_name(), view->cf_name()); },
+                [&sys_dist_ks, &tm] (const view_ptr& view) { return check_view_build_ongoing(sys_dist_ks, tm, view->ks_name(), view->cf_name()); },
                 false,
                 std::logical_or<bool>());
     });

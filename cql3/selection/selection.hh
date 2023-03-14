@@ -11,7 +11,7 @@
 #pragma once
 
 #include "bytes.hh"
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include "query-result-reader.hh"
 #include "cql3/column_specification.hh"
 #include "cql3/selection/selector.hh"
@@ -178,6 +178,8 @@ public:
 
     friend class result_set_builder;
 };
+
+shared_ptr<selection> selection_from_partition_slice(schema_ptr schema, const query::partition_slice& slice);
 
 class result_set_builder {
 private:

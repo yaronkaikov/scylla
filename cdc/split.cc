@@ -6,8 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
-#include "mutation.hh"
-#include "schema.hh"
+#include "mutation/mutation.hh"
+#include "schema/schema.hh"
 
 #include "concrete_types.hh"
 #include "types/user.hh"

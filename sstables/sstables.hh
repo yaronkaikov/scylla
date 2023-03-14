@@ -20,8 +20,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <variant>
-#include "types.hh"
-#include "schema_fwd.hh"
+#include "schema/schema_fwd.hh"
 #include <seastar/core/stream.hh>
 #include "encoding_stats.hh"
 #include "filter.hh"
@@ -34,7 +33,7 @@
 #include "utils/observable.hh"
 #include "sstables/shareable_components.hh"
 #include "sstables/generation_type.hh"
-#include "mutation_fragment_stream_validator.hh"
+#include "mutation/mutation_fragment_stream_validator.hh"
 #include "readers/flat_mutation_reader_fwd.hh"
 #include "tracing/trace_state.hh"
 #include "utils/updateable_value.hh"
@@ -57,10 +56,6 @@ extern thread_local utils::updateable_value<bool> global_cache_index_pages;
 
 namespace mc {
 class writer;
-}
-
-namespace mx {
-class partition_reversing_data_source_impl;
 }
 
 namespace fs = std::filesystem;
@@ -102,7 +97,6 @@ struct sstable_writer_config {
     size_t promoted_index_auto_scale_threshold;
     uint64_t max_sstable_size = std::numeric_limits<uint64_t>::max();
     bool backup = false;
-    bool leave_unsealed = false;
     mutation_fragment_stream_validation_level validation_level;
     std::optional<db::replay_position> replay_position;
     std::optional<int> sstable_level;
@@ -116,6 +110,7 @@ private:
     friend class sstables_manager;
 };
 
+constexpr const char* normal_dir = "";
 constexpr const char* staging_dir = "staging";
 constexpr const char* upload_dir = "upload";
 constexpr const char* snapshots_dir = "snapshots";
@@ -138,7 +133,9 @@ struct sstable_open_config {
     // fields respectively. Problematic sstables might fail to load. Set to
     // false if you want to disable this, to be able to read such sstables.
     // Should only be disabled for diagnostics purposes.
-    bool load_first_and_last_position_metadata = true;
+    // FIXME: Enable it by default once the root cause of large allocation when reading sstable in reverse is fixed.
+    //  Ref: https://github.com/scylladb/scylladb/issues/11642
+    bool load_first_and_last_position_metadata = false;
 };
 
 class sstable : public enable_lw_shared_from_this<sstable> {
@@ -180,9 +177,9 @@ public:
         }
     };
 
-    static component_type component_from_sstring(version_types version, sstring& s);
-    static version_types version_from_sstring(sstring& s);
-    static format_types format_from_sstring(sstring& s);
+    static component_type component_from_sstring(version_types version, const sstring& s);
+    static version_types version_from_sstring(const sstring& s);
+    static format_types format_from_sstring(const sstring& s);
     static sstring component_basename(const sstring& ks, const sstring& cf, version_types version, generation_type generation,
                                       format_types format, component_type component);
     static sstring component_basename(const sstring& ks, const sstring& cf, version_types version, generation_type generation,
@@ -211,17 +208,16 @@ public:
     // Call as the last method before the object is destroyed.
     // No other uses of the object can happen at this point.
     future<> destroy();
-    future<> move_to_new_dir(sstring new_dir, generation_type generation, delayed_commit_changes* delay = nullptr);
 
-    // Move the sstable to the quarantine_dir
+    // Move the sstable between states
     //
-    // If the sstable is alredy quarantined, this is a noop.
-    // If the sstable is in the base directory or in the staging_dir,
-    // it is moved into the quarantine_dir subdirectory of the base directory.
-    //
-    // Note: moving a sstable in any other dir to quarantine
-    // will move it into a quarantine_dir subdirectory of its current directory.
-    future<> move_to_quarantine(delayed_commit_changes* delay = nullptr);
+    // Known states are normal, staging, upload and quarantine.
+    // It's up to the storage driver how to implement this.
+    future<> change_state(sstring to, delayed_commit_changes* delay = nullptr);
+
+    // Filesystem-specific call to grab an sstable from upload dir and
+    // put it into the desired destination assigning the given generation
+    future<> pick_up_from_upload(sstring to, generation_type new_generation);
 
     generation_type generation() const {
         return _generation;
@@ -486,6 +482,7 @@ public:
         future<> create_links(const sstable& sst, const sstring& dir) const;
         future<> create_links_common(const sstable& sst, sstring dst_dir, generation_type dst_gen, mark_for_removal mark_for_removal) const;
         future<> touch_temp_dir(const sstable& sst);
+        future<> move(const sstable& sst, sstring new_dir, generation_type generation, delayed_commit_changes* delay);
 
     public:
         explicit filesystem_storage(sstring dir_) : dir(std::move(dir_)) {}
@@ -493,8 +490,13 @@ public:
         using absolute_path = bool_class<class absolute_path_tag>; // FIXME -- should go away eventually
         future<> seal(const sstable& sst);
         future<> snapshot(const sstable& sst, sstring dir, absolute_path abs) const;
-        future<> quarantine(const sstable& sst, delayed_commit_changes* delay);
-        future<> move(const sstable& sst, sstring new_dir, generation_type generation, delayed_commit_changes* delay);
+
+        // Moves the files around with .move() method. States are basedir subdirectories
+        // with the exception that normal state maps to the basedir itself. If the sstable
+        // is already in the target state, this is a noop.
+        // Moving in a snapshot or upload will move to a subdirectory of the current directory.
+        future<> change_state(const sstable& sst, sstring to, generation_type generation, delayed_commit_changes* delay);
+
         // runs in async context
         void open(sstable& sst, const io_priority_class& pc);
         future<> wipe(const sstable& sst) noexcept;
@@ -516,8 +518,8 @@ private:
 
     size_t sstable_buffer_size;
 
-    static std::unordered_map<version_types, sstring, enum_hash<version_types>> _version_string;
-    static std::unordered_map<format_types, sstring, enum_hash<format_types>> _format_string;
+    static const std::unordered_map<version_types, sstring, enum_hash<version_types>> _version_string;
+    static const std::unordered_map<format_types, sstring, enum_hash<format_types>> _format_string;
 
     std::unordered_set<component_type, enum_hash<component_type>> _recognized_components;
     std::vector<sstring> _unrecognized_components;
@@ -554,8 +556,8 @@ private:
 
     filesystem_storage _storage;
 
-    version_types _version;
-    format_types _format;
+    const version_types _version;
+    const format_types _format;
 
     filter_tracker _filter_tracker;
     std::unique_ptr<partition_index_cache> _index_cache;
@@ -914,14 +916,10 @@ public:
     // will then re-export as public every method it needs.
     friend class test;
 
-    friend class components_writer;
-    friend class sstable_writer;
     friend class mc::writer;
     friend class index_reader;
     friend class promoted_index;
-    friend class compaction;
     friend class sstables_manager;
-    friend class mx::partition_reversing_data_source_impl;
     template <typename DataConsumeRowsContext>
     friend std::unique_ptr<DataConsumeRowsContext>
     data_consume_rows(const schema&, shared_sstable, typename DataConsumeRowsContext::consumer&, disk_read_range, uint64_t);

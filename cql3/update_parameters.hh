@@ -12,11 +12,12 @@
 
 #include "gc_clock.hh"
 #include "timestamp.hh"
-#include "schema_fwd.hh"
-#include "atomic_cell.hh"
-#include "tombstone.hh"
+#include "schema/schema_fwd.hh"
+#include "mutation/atomic_cell.hh"
+#include "mutation/tombstone.hh"
 #include "exceptions/exceptions.hh"
 #include "cql3/query_options.hh"
+#include "cql3/selection/selection.hh"
 #include "query-request.hh"
 #include "query-result.hh"
 
@@ -63,27 +64,19 @@ public:
         };
     public:
         struct row {
-            // Order CAS columns by ordinal column id.
-            std::map<ordinal_column_id, data_value> cells;
+            bool has_static;
+            // indexes are determined by prefetch_data::selection
+            std::vector<managed_bytes_opt> cells;
             // Return true if this row has at least one static column set.
             bool has_static_columns(const schema& schema) const {
-                if (!schema.has_static_columns()) {
-                    return false;
-                }
-                // Static columns use a continuous range of ids so to efficiently check
-                // if a row has a static cell, we can look up the first cell with id >=
-                // first static column id and check if it's static.
-                auto it = cells.lower_bound(schema.static_begin()->ordinal_id);
-                if (it == cells.end() || !schema.column_at(it->first).is_static()) {
-                    return false;
-                }
-                return true;
+                return has_static;
             }
         };
         // Use an ordered map since CAS result set must be naturally ordered
         // when returned to the client.
         std::map<key, row, key_less> rows;
         schema_ptr schema;
+        shared_ptr<cql3::selection::selection> selection;
     public:
         prefetch_data(schema_ptr schema);
         // Find a row object for either static or regular subset of cells, depending
@@ -93,7 +86,7 @@ public:
     };
     // Note: value (mutation) only required to contain the rows we are interested in
 private:
-    const gc_clock::duration _ttl;
+    const std::optional<gc_clock::duration> _ttl;
     // For operations that require a read-before-write, stores prefetched cell values.
     // For CAS statements, stores values of conditioned columns.
     // Is a reference to an outside prefetch_data container since a CAS BATCH statement
@@ -106,7 +99,7 @@ public:
     const query_options& _options;
 
     update_parameters(const schema_ptr schema_, const query_options& options,
-            api::timestamp_type timestamp, gc_clock::duration ttl, const prefetch_data& prefetched)
+            api::timestamp_type timestamp, std::optional<gc_clock::duration> ttl, const prefetch_data& prefetched)
         : _ttl(ttl)
         , _prefetched(prefetched)
         , _timestamp(timestamp)
@@ -127,11 +120,7 @@ public:
     }
 
     atomic_cell make_cell(const abstract_type& type, const raw_value_view& value, atomic_cell::collection_member cm = atomic_cell::collection_member::no) const {
-        auto ttl = _ttl;
-
-        if (ttl.count() <= 0) {
-            ttl = _schema->default_time_to_live();
-        }
+        auto ttl = this->ttl();
 
         return value.with_value([&] (const FragmentedView auto& v) {
             if (ttl.count() > 0) {
@@ -143,11 +132,7 @@ public:
     };
 
     atomic_cell make_cell(const abstract_type& type, const managed_bytes_view& value, atomic_cell::collection_member cm = atomic_cell::collection_member::no) const {
-        auto ttl = _ttl;
-
-        if (ttl.count() <= 0) {
-            ttl = _schema->default_time_to_live();
-        }
+        auto ttl = this->ttl();
 
         if (ttl.count() > 0) {
             return atomic_cell::make_live(type, _timestamp, value, _local_deletion_time + ttl, ttl, cm);
@@ -169,7 +154,7 @@ public:
     }
 
     gc_clock::duration ttl() const {
-        return _ttl.count() > 0 ? _ttl : _schema->default_time_to_live();
+        return _ttl.value_or(_schema->default_time_to_live());
     }
 
     gc_clock::time_point expiry() const {
@@ -180,7 +165,7 @@ public:
         return _timestamp;
     }
 
-    const std::vector<std::pair<data_value, data_value>>*
+    std::optional<std::vector<std::pair<data_value, data_value>>>
     get_prefetched_list(const partition_key& pkey, const clustering_key& ckey, const column_definition& column) const;
 
     static prefetch_data build_prefetch_data(schema_ptr schema, const query::result& query_result,

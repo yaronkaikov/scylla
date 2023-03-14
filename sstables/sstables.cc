@@ -33,7 +33,6 @@
 #include <seastar/coroutine/as_future.hh>
 
 #include "dht/sharder.hh"
-#include "types.hh"
 #include "writer.hh"
 #include "m_format_read_helpers.hh"
 #include "open_info.hh"
@@ -54,7 +53,7 @@
 #include <boost/range/algorithm/sort.hpp>
 #include <regex>
 #include <seastar/core/align.hh>
-#include "range_tombstone_list.hh"
+#include "mutation/range_tombstone_list.hh"
 #include "counters.hh"
 #include "binary_search.hh"
 #include "utils/bloom_filter.hh"
@@ -189,7 +188,7 @@ future<file> sstable::new_sstable_component_file(const io_error_handler& error_h
   }
 }
 
-std::unordered_map<sstable::version_types, sstring, enum_hash<sstable::version_types>> sstable::_version_string = {
+const std::unordered_map<sstable::version_types, sstring, enum_hash<sstable::version_types>> sstable::_version_string = {
     { sstable::version_types::ka , "ka" },
     { sstable::version_types::la , "la" },
     { sstable::version_types::mc , "mc" },
@@ -197,7 +196,7 @@ std::unordered_map<sstable::version_types, sstring, enum_hash<sstable::version_t
     { sstable::version_types::me , "me" },
 };
 
-std::unordered_map<sstable::format_types, sstring, enum_hash<sstable::format_types>> sstable::_format_string = {
+const std::unordered_map<sstable::format_types, sstring, enum_hash<sstable::format_types>> sstable::_format_string = {
     { sstable::format_types::big , "big" }
 };
 
@@ -205,10 +204,10 @@ std::unordered_map<sstable::format_types, sstring, enum_hash<sstable::format_typ
 // enough.  If that changes, it would be adviseable to create a full static
 // reverse mapping, even if it is done at runtime.
 template <typename Map>
-static typename Map::key_type reverse_map(const typename Map::mapped_type& value, Map& map) {
-    for (auto& pair: map) {
-        if (pair.second == value) {
-            return pair.first;
+static typename Map::key_type reverse_map(const typename Map::mapped_type& v, const Map& map) {
+    for (auto& [key, value]: map) {
+        if (value == v) {
+            return key;
         }
     }
     throw std::out_of_range("unable to reverse map");
@@ -482,7 +481,7 @@ parse(const schema& schema, sstable_version_types v, random_access_reader& in, d
 
     key_type nr_elements;
     co_await parse(schema, v, in, nr_elements);
-    for (auto _ : boost::irange<key_type>(0, nr_elements)) {
+    for ([[maybe_unused]] auto _ : boost::irange<key_type>(0, nr_elements)) {
         key_type new_key;
         unsigned new_size;
         co_await parse(schema, v, in, new_key);
@@ -962,7 +961,7 @@ void sstable::filesystem_storage::open(sstable& sst, const io_priority_class& pc
         // the generation of a sstable that exists.
         w.close();
         remove_mirrored_file(file_path).get();
-        throw std::runtime_error(format("SSTable write failed due to existence of TOC file for generation {:d} of {}.{}", sst._generation, sst._schema->ks_name(), sst._schema->cf_name()));
+        throw std::runtime_error(format("SSTable write failed due to existence of TOC file for generation {:d} of {}.{}", sst._generation.value(), sst._schema->ks_name(), sst._schema->cf_name()));
     }
 
     for (auto&& key : sst._recognized_components) {
@@ -1037,7 +1036,7 @@ future<> sstable::read_simple(T& component, const io_priority_class& pc) {
                 return r->close();
             }).then([r] {});
         });
-    }).then_wrapped([this, file_path] (future<> f) {
+    }).then_wrapped([file_path] (future<> f) {
         try {
             f.get();
         } catch (std::system_error& e) {
@@ -2226,29 +2225,42 @@ future<> sstable::filesystem_storage::move(const sstable& sst, sstring new_dir, 
     }
 }
 
-future<> sstable::move_to_new_dir(sstring new_dir, generation_type new_generation, delayed_commit_changes* delay_commit) {
-    co_await _storage.move(*this, std::move(new_dir), new_generation, delay_commit);
-    _generation = std::move(new_generation);
-}
-
-future<> sstable::filesystem_storage::quarantine(const sstable& sst, delayed_commit_changes* delay_commit) {
+future<> sstable::filesystem_storage::change_state(const sstable& sst, sstring to, generation_type new_generation, delayed_commit_changes* delay_commit) {
     auto path = fs::path(dir);
-    if (path.filename().native() == staging_dir) {
-        path = path.parent_path();
+    auto current = path.filename().native();
+
+    // Moving between states means moving between basedir/state subdirectories.
+    // However, normal state maps to the basedir itself and thus there's no way
+    // to check if current is normal_dir. The best that can be done here is to
+    // check that it's not anything else
+    if (current == staging_dir || current == upload_dir || current == quarantine_dir) {
+        if (to == quarantine_dir && current != staging_dir) {
+            // Legacy exception -- quarantine from anything but staging
+            // moves to the current directory quarantine subdir
+            path = path / to;
+        } else {
+            path = path.parent_path() / to;
+        }
+    } else {
+        current = normal_dir;
+        path = path / to;
     }
-    // Note: moving a sstable in a snapshot or in the uploads dir to quarantine
-    // will move it into a "quarantine" subdirectory of its current directory.
-    auto new_dir = (path / sstables::quarantine_dir).native();
-    sstlog.info("Moving SSTable {} to quarantine in {}", sst.get_filename(), new_dir);
-    co_await move(sst, std::move(new_dir), sst.generation(), delay_commit);
+
+    if (current == to) {
+        co_return; // Already there
+    }
+
+    sstlog.info("Moving sstable {} to {} in {}", sst.get_filename(), to, path);
+    co_await move(sst, path.native(), std::move(new_generation), delay_commit);
 }
 
-future<> sstable::move_to_quarantine(delayed_commit_changes* delay_commit) {
-    if (is_quarantined()) {
-        return make_ready_future<>();
-    }
+future<> sstable::change_state(sstring to, delayed_commit_changes* delay_commit) {
+    co_await _storage.change_state(*this, to, _generation, delay_commit);
+}
 
-    return _storage.quarantine(*this, delay_commit);
+future<> sstable::pick_up_from_upload(sstring to, generation_type new_generation) {
+    co_await _storage.change_state(*this, to, new_generation, nullptr);
+    _generation = std::move(new_generation);
 }
 
 future<> sstable::delayed_commit_changes::commit() {
@@ -2381,7 +2393,7 @@ entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname
     return make_entry_descriptor(std::move(sstdir), std::move(fname), &ks, &cf);
 }
 
-sstable::version_types sstable::version_from_sstring(sstring &s) {
+sstable::version_types sstable::version_from_sstring(const sstring &s) {
     try {
         return reverse_map(s, _version_string);
     } catch (std::out_of_range&) {
@@ -2389,7 +2401,7 @@ sstable::version_types sstable::version_from_sstring(sstring &s) {
     }
 }
 
-sstable::format_types sstable::format_from_sstring(sstring &s) {
+sstable::format_types sstable::format_from_sstring(const sstring &s) {
     try {
         return reverse_map(s, _format_string);
     } catch (std::out_of_range&) {
@@ -2397,7 +2409,7 @@ sstable::format_types sstable::format_from_sstring(sstring &s) {
     }
 }
 
-component_type sstable::component_from_sstring(version_types v, sstring &s) {
+component_type sstable::component_from_sstring(version_types v, const sstring &s) {
     try {
         return reverse_map(s, sstable_version_constants::get_component_map(v));
     } catch (std::out_of_range&) {
@@ -2519,9 +2531,14 @@ static future<bool> do_validate_uncompressed(input_stream<char>& stream, const c
         offset += buf.size();
     }
 
-    if (!stream.eof()) {
-        sstlog.error("Chunk count mismatch between CRC.db and Data.db at offset {}: expected {} chunks but data file has more", offset, checksum.checksums.size());
-        valid = false;
+    {
+        // We should be at EOF here, but the flag might not be set yet. To ensure
+        // it is set, try to read some more. This should return an empty buffer.
+        auto buf = co_await stream.read();
+        if (!buf.empty()) {
+            sstlog.error("Chunk count mismatch between CRC.db and Data.db at offset {}: expected {} chunks but data file has more", offset, checksum.checksums.size());
+            valid = false;
+        }
     }
 
     if (actual_full_checksum != expected_digest) {
@@ -2743,7 +2760,6 @@ future<> sstable::close_files() {
     }
 
     auto unlinked = make_ready_future<>();
-    auto unlinked_temp_dir = make_ready_future<>();
     if (_marked_for_deletion != mark_for_deletion::none) {
         // If a deletion fails for some reason we
         // log and ignore this failure, because on startup we'll again try to
@@ -2766,7 +2782,7 @@ future<> sstable::close_files() {
 
     _on_closed(*this);
 
-    return when_all_succeed(std::move(index_closed), std::move(data_closed), std::move(unlinked), std::move(unlinked_temp_dir)).discard_result().then([this, me = shared_from_this()] {
+    return when_all_succeed(std::move(index_closed), std::move(data_closed), std::move(unlinked)).discard_result().then([this, me = shared_from_this()] {
         if (_open_mode) {
             if (_open_mode.value() == open_flags::ro) {
                 _stats.on_close_for_reading();

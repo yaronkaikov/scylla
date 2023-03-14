@@ -18,13 +18,13 @@
 #include "query_context.hh"
 #include "query-result-set.hh"
 #include "query-result-writer.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "map_difference.hh"
 #include "utils/UUID_gen.hh"
 #include <seastar/coroutine/all.hh>
 #include "log.hh"
 #include "frozen_schema.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "mutation_query.hh"
 #include "system_keyspace.hh"
 #include "system_distributed_keyspace.hh"
@@ -39,7 +39,7 @@
 #include "db/marshal/type_parser.hh"
 #include "db/config.hh"
 #include "db/extensions.hh"
-#include "hashers.hh"
+#include "utils/hashers.hh"
 
 #include <seastar/util/noncopyable_function.hh>
 #include <seastar/rpc/rpc_types.hh>
@@ -75,7 +75,7 @@
 #include "cql3/expr/expression.hh"
 #include "cql3/column_identifier.hh"
 #include "cql3/column_specification.hh"
-#include "types.hh"
+#include "types/types.hh"
 
 using namespace db;
 using namespace std::chrono_literals;
@@ -132,14 +132,7 @@ struct qualified_name {
             , table_name(s->cf_name())
     { }
 
-    bool operator<(const qualified_name& o) const {
-        return keyspace_name < o.keyspace_name
-               || (keyspace_name == o.keyspace_name && table_name < o.table_name);
-    }
-
-    bool operator==(const qualified_name& o) const {
-        return keyspace_name == o.keyspace_name && table_name == o.table_name;
-    }
+    auto operator<=>(const qualified_name&) const = default;
 };
 
 static future<schema_mutations> read_table_mutations(distributed<service::storage_proxy>& proxy, const qualified_name& table, schema_ptr s);
@@ -428,6 +421,37 @@ schema_ptr view_virtual_columns() {
     static thread_local auto schema = columns_schema(VIEW_VIRTUAL_COLUMNS);
     return schema;
 }
+
+// Returns table ids of all schema tables which contribute to schema_mutations,
+// i.e. those which are used to define schema of a table or a view.
+// All such tables have a clustering key whose first column is the table name.
+static
+const std::unordered_set<table_id>& schema_tables_holding_schema_mutations() {
+    static const std::unordered_set<table_id> table_ids = [] {
+        std::unordered_set<table_id> ids;
+        for (auto&& s : {
+                tables(),
+                views(),
+                columns(),
+                view_virtual_columns(),
+                computed_columns(),
+                dropped_columns(),
+                indexes(),
+                scylla_tables(),
+                db::system_keyspace::legacy::column_families(),
+                db::system_keyspace::legacy::columns(),
+                db::system_keyspace::legacy::triggers()}) {
+            assert(s->clustering_key_size() > 0);
+            auto&& first_column_name = s->clustering_column_at(0).name_as_text();
+            assert(first_column_name == "table_name"
+                || first_column_name == "view_name"
+                || first_column_name == "columnfamily_name");
+            ids.emplace(s->id());
+        }
+        return ids;
+    }();
+    return table_ids;
+};
 
 // Computed columns are a special kind of columns. Rather than having their value provided directly
 // by the user, they are computed - possibly from other column values. This table stores which columns
@@ -892,6 +916,7 @@ read_schema_partition_for_keyspace(distributed<service::storage_proxy>& proxy, s
 future<mutation>
 read_schema_partition_for_table(distributed<service::storage_proxy>& proxy, schema_ptr schema, const sstring& keyspace_name, const sstring& table_name)
 {
+    assert(schema_tables_holding_schema_mutations().contains(schema->id()));
     auto keyspace_key = partition_key::from_singular(*schema, keyspace_name);
     auto clustering_range = query::clustering_range(clustering_key_prefix::from_clustering_prefix(
             *schema, exploded_clustering_prefix({utf8_type->decompose(table_name)})));
@@ -997,23 +1022,78 @@ static read_table_names_of_keyspace(distributed<service::storage_proxy>& proxy, 
     }));
 }
 
-static table_id table_id_from_mutations(const schema_mutations& sm) {
+static std::optional<table_id> table_id_from_mutations(const schema_mutations& sm) {
     auto table_rs = query::result_set(sm.columnfamilies_mutation());
+    if (table_rs.empty()) {
+        return std::nullopt;
+    }
     query::result_set_row table_row = table_rs.row(0);
     return table_id(table_row.get_nonnull<utils::UUID>("id"));
 }
 
+using table_name = sstring;
+using keyspace_name = sstring;
+
+enum class table_kind { table, view };
+
+static std::ostream& operator<<(std::ostream& os, table_kind k) {
+    switch (k) {
+        case table_kind::table: return os << "table";
+        case table_kind::view: return os << "view";
+    }
+    abort();
+}
+
+static constexpr std::initializer_list<table_kind> all_table_kinds = {
+    table_kind::table,
+    table_kind::view
+};
+
+static schema_ptr get_table_holder(table_kind k) {
+    switch (k) {
+        case table_kind::table: return tables();
+        case table_kind::view: return views();
+    }
+    abort();
+}
+
+struct table_selector {
+    bool all_in_keyspace = false; // If true, selects all existing tables in a keyspace plus what's in "tables";
+    std::unordered_map<table_kind, std::unordered_set<sstring>> tables;
+
+    table_selector& operator+=(table_selector&& o) {
+        all_in_keyspace |= o.all_in_keyspace;
+        for (auto t : all_table_kinds) {
+            tables[t].merge(std::move(o.tables[t]));
+        }
+        return *this;
+    }
+
+    void add(table_kind t, sstring name) {
+        tables[t].emplace(std::move(name));
+    }
+
+    void add(sstring name) {
+        for (auto t : all_table_kinds) {
+            add(t, name);
+        }
+    }
+};
+
 static
 future<std::map<table_id, schema_mutations>>
-read_tables_for_keyspaces(distributed<service::storage_proxy>& proxy, const std::set<sstring>& keyspace_names, schema_ptr s)
+read_tables_for_keyspaces(distributed<service::storage_proxy>& proxy, const std::set<sstring>& keyspace_names, table_kind kind,
+                          const std::unordered_map<sstring, table_selector>& tables_per_keyspace)
 {
     std::map<table_id, schema_mutations> result;
-    for (auto&& keyspace_name : keyspace_names) {
-        for (auto&& table_name : co_await read_table_names_of_keyspace(proxy, keyspace_name, s)) {
+    for (auto&& [keyspace_name, sel] : tables_per_keyspace) {
+        for (auto&& table_name : sel.tables.find(kind)->second) {
             auto qn = qualified_name(keyspace_name, table_name);
-            auto muts = co_await read_table_mutations(proxy, qn, s);
+            auto muts = co_await read_table_mutations(proxy, qn, get_table_holder(kind));
             auto id = table_id_from_mutations(muts);
-            result.emplace(std::move(id), std::move(muts));
+            if (id) {
+                result.emplace(std::move(*id), std::move(muts));
+            }
         }
     }
     co_return result;
@@ -1118,6 +1198,47 @@ future<> store_column_mapping(distributed<service::storage_proxy>& proxy, schema
 // and or filesystem calls, e.g. fsync.
 constexpr size_t max_concurrent = 8;
 
+// Extracts the names of tables affected by a schema mutation.
+// The mutation must target one of the tables in schema_tables_holding_schema_mutations().
+static
+table_selector get_affected_tables(const sstring& keyspace_name, const mutation& m) {
+    const schema& s = *m.schema();
+    auto get_table_name = [&] (const clustering_key& ck) {
+        // The first component of the clustering key in each table listed in
+        // schema_tables_holding_schema_mutations contains the table name.
+        return value_cast<sstring>(utf8_type->deserialize(ck.get_component(s, 0)));
+    };
+    table_selector result;
+    if (m.partition().partition_tombstone()) {
+        slogger.trace("Mutation of {}.{} for keyspace {} contains a partition tombstone",
+                      m.schema()->ks_name(), m.schema()->cf_name(), keyspace_name);
+        result.all_in_keyspace = true;
+    }
+    for (auto&& e : m.partition().row_tombstones()) {
+        const range_tombstone& rt = e.tombstone();
+        if (rt.start.size(s) == 0 || rt.end.size(s) == 0) {
+            slogger.trace("Mutation of {}.{} for keyspace {} contains a multi-table range tombstone",
+                          m.schema()->ks_name(), m.schema()->cf_name(), keyspace_name);
+            result.all_in_keyspace = true;
+            break;
+        }
+        auto table_name = get_table_name(rt.start);
+        if (table_name != get_table_name(rt.end)) {
+            slogger.trace("Mutation of {}.{} for keyspace {} contains a multi-table range tombstone",
+                          m.schema()->ks_name(), m.schema()->cf_name(), keyspace_name);
+            result.all_in_keyspace = true;
+            break;
+        }
+        result.add(table_name);
+    }
+    for (auto&& row : m.partition().clustered_rows()) {
+        result.add(get_table_name(row.key()));
+    }
+    slogger.trace("Mutation of {}.{} for keyspace {} affects tables: {}, all_in_keyspace: {}",
+                  m.schema()->ks_name(), m.schema()->cf_name(), keyspace_name, result.tables, result.all_in_keyspace);
+    return result;
+}
+
 static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush)
 {
     slogger.trace("do_merge_schema: {}", mutations);
@@ -1125,19 +1246,40 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
     // compare before/after schemas of the affected keyspaces only
     std::set<sstring> keyspaces;
     std::set<table_id> column_families;
+    std::unordered_map<keyspace_name, table_selector> affected_tables;
     for (auto&& mutation : mutations) {
-        keyspaces.emplace(value_cast<sstring>(utf8_type->deserialize(mutation.key().get_component(*s, 0))));
+        sstring keyspace_name = value_cast<sstring>(utf8_type->deserialize(mutation.key().get_component(*s, 0)));
+
+        if (schema_tables_holding_schema_mutations().contains(mutation.schema()->id())) {
+            affected_tables[keyspace_name] += get_affected_tables(keyspace_name, mutation);
+        }
+
+        keyspaces.emplace(std::move(keyspace_name));
         column_families.emplace(mutation.column_family_id());
         // We must force recalculation of schema version after the merge, since the resulting
         // schema may be a mix of the old and new schemas.
         delete_schema_version(mutation);
     }
 
+    // Resolve sel.all_in_keyspace == true to the actual list of tables and views.
+    for (auto&& [keyspace_name, sel] : affected_tables) {
+        if (sel.all_in_keyspace) {
+            // FIXME: Obtain from the database object
+            slogger.trace("Reading table list for keyspace {}", keyspace_name);
+            for (auto k : all_table_kinds) {
+                for (auto&& n : co_await read_table_names_of_keyspace(proxy, keyspace_name, get_table_holder(k))) {
+                    sel.add(k, std::move(n));
+                }
+            }
+        }
+        slogger.debug("Affected tables for keyspace {}: {}", keyspace_name, sel.tables);
+    }
+
     // current state of the schema
     auto&& old_keyspaces = co_await read_schema_for_keyspaces(proxy, KEYSPACES, keyspaces);
-    auto&& old_column_families = co_await read_tables_for_keyspaces(proxy, keyspaces, tables());
+    auto&& old_column_families = co_await read_tables_for_keyspaces(proxy, keyspaces, table_kind::table, affected_tables);
     auto&& old_types = co_await read_schema_for_keyspaces(proxy, TYPES, keyspaces);
-    auto&& old_views = co_await read_tables_for_keyspaces(proxy, keyspaces, views());
+    auto&& old_views = co_await read_tables_for_keyspaces(proxy, keyspaces, table_kind::view, affected_tables);
     auto old_functions = co_await read_schema_for_keyspaces(proxy, FUNCTIONS, keyspaces);
     auto old_aggregates = co_await read_schema_for_keyspaces(proxy, AGGREGATES, keyspaces);
     auto old_scylla_aggregates = co_await read_schema_for_keyspaces(proxy, SCYLLA_AGGREGATES, keyspaces);
@@ -1157,9 +1299,9 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
 
     // with new data applied
     auto&& new_keyspaces = co_await read_schema_for_keyspaces(proxy, KEYSPACES, keyspaces);
-    auto&& new_column_families = co_await read_tables_for_keyspaces(proxy, keyspaces, tables());
+    auto&& new_column_families = co_await read_tables_for_keyspaces(proxy, keyspaces, table_kind::table, affected_tables);
     auto&& new_types = co_await read_schema_for_keyspaces(proxy, TYPES, keyspaces);
-    auto&& new_views = co_await read_tables_for_keyspaces(proxy, keyspaces, views());
+    auto&& new_views = co_await read_tables_for_keyspaces(proxy, keyspaces, table_kind::view, affected_tables);
     auto new_functions = co_await read_schema_for_keyspaces(proxy, FUNCTIONS, keyspaces);
     auto new_aggregates = co_await read_schema_for_keyspaces(proxy, AGGREGATES, keyspaces);
     auto new_scylla_aggregates = co_await read_schema_for_keyspaces(proxy, SCYLLA_AGGREGATES, keyspaces);
@@ -1358,11 +1500,11 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
     // was already dropped (see https://github.com/scylladb/scylla/issues/5614)
     auto& db = proxy.local().get_db();
     auto ts = db_clock::now();
-    co_await max_concurrent_for_each(views_diff.dropped, max_concurrent, [&db, ts] (schema_diff::dropped_schema& dt) {
+    co_await max_concurrent_for_each(views_diff.dropped, max_concurrent, [&db] (schema_diff::dropped_schema& dt) {
         auto& s = *dt.schema.get();
         return replica::database::drop_table_on_all_shards(db, s.ks_name(), s.cf_name());
     });
-    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [&db, ts] (schema_diff::dropped_schema& dt) -> future<> {
+    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [&db] (schema_diff::dropped_schema& dt) -> future<> {
         auto& s = *dt.schema.get();
         return replica::database::drop_table_on_all_shards(db, s.ks_name(), s.cf_name());
     });
@@ -1420,7 +1562,7 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
             store_column_mapping(proxy, altered.old_schema.get(), true),
             store_column_mapping(proxy, altered.new_schema.get(), false));
     });
-    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [&proxy] (schema_diff::dropped_schema& dropped) -> future<> {
+    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [] (schema_diff::dropped_schema& dropped) -> future<> {
         schema_ptr s = dropped.schema.get();
         co_await drop_column_mapping(s->id(), s->version());
     });
@@ -1755,7 +1897,7 @@ static shared_ptr<cql3::functions::user_function> create_func(replica::database&
         return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
                 std::move(body), language, std::move(return_type),
                 row.get_nonnull<bool>("called_on_null_input"), std::move(ctx));
-    } else if (language == "xwasm") {
+    } else if (language == "wasm") {
         wasm::context ctx{db.wasm_engine(), name.name, qctx->qp().get_wasm_instance_cache(), db.get_config().wasm_udf_yield_fuel(), db.get_config().wasm_udf_total_fuel()};
         wasm::precompile(ctx, arg_names, body);
         return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
@@ -1821,7 +1963,7 @@ static shared_ptr<cql3::functions::user_aggregate> create_aggregate(replica::dat
 
 static void drop_cached_func(replica::database& db, const query::result_set_row& row) {
     auto language = row.get_nonnull<sstring>("language");
-    if (language == "xwasm") {
+    if (language == "wasm") {
         cql3::functions::function_name name{
             row.get_nonnull<sstring>("keyspace_name"), row.get_nonnull<sstring>("function_name")};
         auto arg_types = read_arg_types(db, row, name.keyspace);
@@ -2239,15 +2381,15 @@ std::vector<mutation> make_create_aggregate_mutations(schema_features features, 
     mutation& m = p.first;
     clustering_key& ckey = p.second;
 
-    data_type state_type = aggregate->sfunc().arg_types()[0];
+    data_type state_type = aggregate->sfunc()->arg_types()[0];
     if (aggregate->has_finalfunc()) {
-        m.set_clustered_cell(ckey, "final_func", aggregate->finalfunc().name().name, timestamp);
+        m.set_clustered_cell(ckey, "final_func", aggregate->finalfunc()->name().name, timestamp);
     }
     if (aggregate->initcond()) {
         m.set_clustered_cell(ckey, "initcond", state_type->deserialize(*aggregate->initcond()).to_parsable_string(), timestamp);
     }
     m.set_clustered_cell(ckey, "return_type", aggregate->return_type()->as_cql3_type().to_string(), timestamp);
-    m.set_clustered_cell(ckey, "state_func", aggregate->sfunc().name().name, timestamp);
+    m.set_clustered_cell(ckey, "state_func", aggregate->sfunc()->name().name, timestamp);
     m.set_clustered_cell(ckey, "state_type", state_type->as_cql3_type().to_string(), timestamp);
     std::vector<mutation> muts = {m};
 
@@ -2256,7 +2398,7 @@ std::vector<mutation> make_create_aggregate_mutations(schema_features features, 
         auto sa_p = get_mutation(sa_schema, *aggregate);
         mutation& sa_mut = sa_p.first;
         clustering_key& sa_ckey = sa_p.second;
-        sa_mut.set_clustered_cell(sa_ckey, "reduce_func", aggregate->reducefunc().name().name, timestamp);
+        sa_mut.set_clustered_cell(sa_ckey, "reduce_func", aggregate->reducefunc()->name().name, timestamp);
         sa_mut.set_clustered_cell(sa_ckey, "state_type", state_type->as_cql3_type().to_string(), timestamp);
 
         muts.emplace_back(sa_mut);

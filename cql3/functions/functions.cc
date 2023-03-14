@@ -13,6 +13,7 @@
 #include "cql3/lists.hh"
 #include "cql3/constants.hh"
 #include "cql3/user_types.hh"
+#include "cql3/ut_name.hh"
 #include "cql3/type_json.hh"
 #include "cql3/functions/user_function.hh"
 #include "cql3/functions/user_aggregate.hh"
@@ -51,6 +52,13 @@ logging::logger log("cql3_fuctions");
 bool abstract_function::requires_thread() const { return false; }
 
 bool as_json_function::requires_thread() const { return false; }
+
+static bool same_signature(const shared_ptr<function>& f1, const shared_ptr<function>& f2) {
+    if (f1 == nullptr || f2 == nullptr) {
+        return false;
+    }
+    return f1->name() == f2->name() && f1->arg_types() == f2->arg_types();
+}
 
 thread_local std::unordered_multimap<function_name, shared_ptr<function>> functions::_declared = init();
 
@@ -143,17 +151,51 @@ void functions::replace_function(shared_ptr<function> func) {
     with_udf_iter(func->name(), func->arg_types(), [func] (functions::declared_t::iterator i) {
         i->second = std::move(func);
     });
+    auto scalar_func = dynamic_pointer_cast<scalar_function>(func);
+    if (!scalar_func) {
+        return;
+    }
+    for (auto& fit : _declared) {
+        auto aggregate = dynamic_pointer_cast<user_aggregate>(fit.second);
+        if (aggregate && (same_signature(aggregate->sfunc(), scalar_func)
+            || (same_signature(aggregate->finalfunc(), scalar_func))
+            || (same_signature(aggregate->reducefunc(), scalar_func))))
+        {
+            // we need to replace at least one underlying function
+            shared_ptr<scalar_function> sfunc = same_signature(aggregate->sfunc(), scalar_func) ? scalar_func : aggregate->sfunc();
+            shared_ptr<scalar_function> finalfunc = same_signature(aggregate->finalfunc(), scalar_func) ? scalar_func : aggregate->finalfunc();
+            shared_ptr<scalar_function> reducefunc = same_signature(aggregate->reducefunc(), scalar_func) ? scalar_func : aggregate->reducefunc();
+            fit.second = ::make_shared<user_aggregate>(aggregate->name(), aggregate->initcond(), sfunc, reducefunc, finalfunc);
+        }
+    }
 }
 
 void functions::remove_function(const function_name& name, const std::vector<data_type>& arg_types) {
     with_udf_iter(name, arg_types, [] (functions::declared_t::iterator i) { _declared.erase(i); });
 }
 
-std::optional<function_name> functions::used_by_user_aggregate(const function_name& name) {
+std::optional<function_name> functions::used_by_user_aggregate(shared_ptr<user_function> func) {
     for (const shared_ptr<function>& fptr : _declared | boost::adaptors::map_values) {
         auto aggregate = dynamic_pointer_cast<user_aggregate>(fptr);
-        if (aggregate && (aggregate->sfunc().name() == name || (aggregate->has_finalfunc() && aggregate->finalfunc().name() == name))) {
+        if (aggregate && (same_signature(aggregate->sfunc(), func)
+            || (same_signature(aggregate->finalfunc(), func))
+            || (same_signature(aggregate->reducefunc(), func))))
+        {
             return aggregate->name();
+        }
+    }
+    return {};
+}
+
+std::optional<function_name> functions::used_by_user_function(const ut_name& user_type) {
+    for (const shared_ptr<function>& fptr : _declared | boost::adaptors::map_values) {
+        for (auto& arg_type : fptr->arg_types()) {
+            if (arg_type->references_user_type(user_type.get_keyspace(), user_type.get_user_type_name())) {
+                return fptr->name();
+            }
+        }
+        if (fptr->return_type()->references_user_type(user_type.get_keyspace(), user_type.get_user_type_name())) {
+            return fptr->name();
         }
     }
     return {};
@@ -183,7 +225,7 @@ inline
 shared_ptr<function>
 make_from_json_function(data_dictionary::database db, const sstring& keyspace, data_type t) {
     return make_native_scalar_function<true>("fromjson", t, {utf8_type},
-            [&db, keyspace, t](const std::vector<bytes_opt>& parameters) -> bytes_opt {
+            [keyspace, t](const std::vector<bytes_opt>& parameters) -> bytes_opt {
         try {
             rjson::value json_value = rjson::parse(utf8_type->to_string(parameters[0].value()));
             bytes_opt parsed_json_value;
@@ -295,7 +337,9 @@ functions::get(data_dictionary::database db,
     if (name.has_keyspace()
                 ? name == TOKEN_FUNCTION_NAME
                 : name.name == TOKEN_FUNCTION_NAME.name) {
-        return ::make_shared<token_fct>(db.find_schema(receiver_ks, receiver_cf));
+        auto fun = ::make_shared<token_fct>(db.find_schema(receiver_ks, receiver_cf));
+        validate_types(db, keyspace, fun, provided_args, receiver_ks, receiver_cf);
+        return fun;
     }
 
     if (name.has_keyspace()

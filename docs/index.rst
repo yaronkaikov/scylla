@@ -159,4 +159,3 @@
   Contribute to ScyllaDB <contribute>
   glossary
   alternator/alternator
-

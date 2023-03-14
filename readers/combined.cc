@@ -11,6 +11,7 @@
 
 #include "readers/empty_v2.hh"
 #include "readers/clustering_combined.hh"
+#include "readers/range_tombstone_change_merger.hh"
 #include "readers/combined.hh"
 
 extern logging::logger mrlog;
@@ -31,82 +32,6 @@ struct mutation_fragment_and_stream_id {
 };
 
 using mutation_fragment_batch = boost::iterator_range<merger_vector<mutation_fragment_and_stream_id>::iterator>;
-
-// Merges range tombstone changes coming from different streams (readers).
-//
-// Add tombstones by calling apply().
-// Updates to the same stream identified by stream_id overwrite each other.
-// Applying an empty tombstone to a stream removes said stream.
-//
-// Call get() to get the tombstone with the highest timestamp from the currently
-// active ones.
-// Get returns disengaged optional when the last apply() call(s) didn't introduce
-// a change in the max tombstone.
-//
-// Call clear() when leaving the range abruptly (next_partition() or
-// fast_forward_to()).
-//
-// The merger doesn't keep track of the position component of the tombstones.
-// Emit them with the current position.
-class range_tombstone_change_merger {
-    struct stream_tombstone {
-        stream_id_t stream_id;
-        ::tombstone tombstone;
-    };
-
-private:
-    std::vector<stream_tombstone> _tombstones;
-    tombstone _current_tombstone;
-
-private:
-    const stream_tombstone* get_tombstone() const {
-        const stream_tombstone* max_tomb{nullptr};
-
-        for (const auto& tomb : _tombstones) {
-            if (!max_tomb || tomb.tombstone > max_tomb->tombstone) {
-                max_tomb = &tomb;
-            }
-        }
-        return max_tomb;
-    }
-
-public:
-    void apply(stream_id_t stream_id, tombstone tomb) {
-        auto it = std::find_if(_tombstones.begin(), _tombstones.end(), [&] (const stream_tombstone& tomb) {
-            return tomb.stream_id == stream_id;
-        });
-        if (it == _tombstones.end()) {
-            if (tomb) {
-                _tombstones.push_back({stream_id, tomb});
-            }
-        } else {
-            if (tomb) {
-                it->tombstone = tomb;
-            } else {
-                auto last = _tombstones.end() - 1;
-                if (it != last) {
-                    std::swap(*it, *last);
-                }
-                _tombstones.pop_back();
-            }
-        }
-    }
-
-    std::optional<tombstone> get() {
-        const auto* tomb = get_tombstone();
-        if (tomb && tomb->tombstone == _current_tombstone) {
-            return {};
-        } else {
-            _current_tombstone = tomb ? tomb->tombstone : tombstone();
-            return _current_tombstone;
-        }
-    }
-
-    void clear() {
-        _tombstones.clear();
-        _current_tombstone = {};
-    }
-};
 
 template<typename Producer>
 concept FragmentProducer = requires(Producer p, dht::partition_range part_range, position_range pos_range) {
@@ -155,7 +80,7 @@ class mutation_fragment_merger {
     const schema_ptr _schema;
     reader_permit _permit;
     Producer _producer;
-    range_tombstone_change_merger _tombstone_merger;
+    range_tombstone_change_merger<stream_id_t> _tombstone_merger;
     mutation_fragment_v2_opt _result;
 
 public:
@@ -664,7 +589,7 @@ future<> mutation_reader_merger::fast_forward_to(const dht::partition_range& pr)
     for (auto it = _all_readers.begin(); it != _all_readers.end(); ++it) {
         _next.emplace_back(it, mutation_fragment_v2::kind::partition_end);
     }
-    return parallel_for_each(_all_readers, [this, &pr] (flat_mutation_reader_v2& mr) {
+    return parallel_for_each(_all_readers, [&pr] (flat_mutation_reader_v2& mr) {
         return mr.fast_forward_to(pr);
     }).then([this, &pr] {
         add_readers(_selector->fast_forward_to(pr));
@@ -673,7 +598,7 @@ future<> mutation_reader_merger::fast_forward_to(const dht::partition_range& pr)
 
 future<> mutation_reader_merger::fast_forward_to(position_range pr) {
     prepare_forwardable_readers();
-    return parallel_for_each(_next, [this, pr = std::move(pr)] (reader_and_last_fragment_kind rk) {
+    return parallel_for_each(_next, [pr = std::move(pr)] (reader_and_last_fragment_kind rk) {
         return rk.reader->fast_forward_to(pr);
     });
 }
@@ -733,7 +658,7 @@ future<> merging_reader<P>::fast_forward_to(const dht::partition_range& pr) {
 
 template <FragmentProducer P>
 future<> merging_reader<P>::fast_forward_to(position_range pr) {
-    forward_buffer_to(pr.start());
+    clear_buffer();
     _end_of_stream = false;
     return _merger.fast_forward_to(std::move(pr));
 }
@@ -1185,7 +1110,7 @@ public:
         _forwarded_to = pr;
         _pr_end = _forwarded_to->end();
 
-        return parallel_for_each(_unpeeked_readers, [this, pr = std::move(pr)] (reader_iterator it) {
+        return parallel_for_each(_unpeeked_readers, [pr = std::move(pr)] (reader_iterator it) {
             return it->reader.fast_forward_to(pr);
         });
     }

@@ -15,13 +15,13 @@
 #include "query-result-set.hh"
 #include "seastar/core/shared_ptr.hh"
 #include "seastar/core/thread.hh"
-#include "to_string.hh"
+#include "utils/to_string.hh"
 #include "bytes.hh"
-#include "mutation_partition_serializer.hh"
+#include "mutation/mutation_partition_serializer.hh"
 #include "query-result-reader.hh"
 #include "query_result_merger.hh"
 #include "partition_slice_builder.hh"
-#include "schema_registry.hh"
+#include "schema/schema_registry.hh"
 #include "utils/overloaded_functor.hh"
 
 namespace query {
@@ -318,7 +318,7 @@ std::ostream& operator<<(std::ostream& os, const query::result::printer& p) {
 void result::ensure_counts() {
     if (!_partition_count || !row_count()) {
         uint64_t row_count;
-        std::tie(_partition_count, row_count) = result_view::do_with(*this, [this] (auto&& view) {
+        std::tie(_partition_count, row_count) = result_view::do_with(*this, [] (auto&& view) {
             return view.count_partitions_and_rows();
         });
         set_row_count(row_count);

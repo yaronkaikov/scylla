@@ -16,7 +16,7 @@
 #include "compaction.hh"
 #include "compaction_strategy.hh"
 #include "compaction_strategy_impl.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "sstables/sstable_set.hh"
 #include <boost/range/algorithm/find.hpp>
 #include <boost/range/algorithm/remove_if.hpp>
@@ -412,7 +412,9 @@ public:
                 l0_old_ssts.push_back(std::move(sst));
             }
         }
-        _l0_scts.replace_sstables(std::move(l0_old_ssts), std::move(l0_new_ssts));
+        if (l0_old_ssts.size() || l0_new_ssts.size()) {
+            _l0_scts.replace_sstables(std::move(l0_old_ssts), std::move(l0_new_ssts));
+        }
     }
 };
 

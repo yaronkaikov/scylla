@@ -27,13 +27,14 @@
 #include "cql3/result_set.hh"
 #include "cql3/type_json.hh"
 #include "cql3/column_identifier.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "service/storage_proxy.hh"
 #include "gms/feature.hh"
 #include "gms/feature_service.hh"
 
 #include "executor.hh"
 #include "rmw_operation.hh"
+#include "data_dictionary/data_dictionary.hh"
 
 /**
  * Base template type to implement  rapidjson::internal::TypeHelper<...>:s
@@ -140,24 +141,43 @@ namespace alternator {
 future<alternator::executor::request_return_type> alternator::executor::list_streams(client_state& client_state, service_permit permit, rjson::value request) {
     _stats.api_operations.list_streams++;
 
-    auto limit = rjson::get_opt<int>(request, "Limit").value_or(std::numeric_limits<int>::max());
+    auto limit = rjson::get_opt<int>(request, "Limit").value_or(100);
     auto streams_start = rjson::get_opt<stream_arn>(request, "ExclusiveStartStreamArn");
     auto table = find_table(_proxy, request);
     auto db = _proxy.data_dictionary();
-    auto cfs = db.get_tables();
-    auto i = cfs.begin();
-    auto e = cfs.end();
 
     if (limit < 1) {
         throw api_error::validation("Limit must be 1 or more");
     }
 
-    // TODO: the unordered_map here is not really well suited for partial
-    // querying - we're sorting on local hash order, and creating a table
-    // between queries may or may not miss info. But that should be rare,
-    // and we can probably expect this to be a single call.
+    std::vector<data_dictionary::table> cfs;
+
+    if (table) {
+        auto log_name = cdc::log_name(table->cf_name());
+        try {
+            cfs.emplace_back(db.find_table(table->ks_name(), log_name));
+        } catch (data_dictionary::no_such_column_family&) {
+            cfs.clear();
+        }
+    } else {
+        cfs = db.get_tables();
+    }
+
+    // # 12601 (maybe?) - sort the set of tables on ID. This should ensure we never
+    // generate duplicates in a paged listing here. Can obviously miss things if they 
+    // are added between paged calls and end up with a "smaller" UUID/ARN, but that 
+    // is to be expected.
+    if (limit < cfs.size() || streams_start) {
+        std::sort(cfs.begin(), cfs.end(), [](const data_dictionary::table& t1, const data_dictionary::table& t2) {
+            return t1.schema()->id().uuid() < t2.schema()->id().uuid();
+        });
+    }
+
+    auto i = cfs.begin();
+    auto e = cfs.end();
+
     if (streams_start) {
-        i = std::find_if(i, e, [&](data_dictionary::table t) {
+        i = std::find_if(i, e, [&](const data_dictionary::table& t) {
             return t.schema()->id().uuid() == streams_start
                 && cdc::get_base_table(db.real_database(), *t.schema())
                 && is_alternator_keyspace(t.schema()->ks_name())
@@ -181,14 +201,7 @@ future<alternator::executor::request_return_type> alternator::executor::list_str
         if (!is_alternator_keyspace(ks_name)) {
             continue;
         }
-        if (table && ks_name != table->ks_name()) {
-            continue;
-        }
         if (cdc::is_log_for_some_table(db.real_database(), ks_name, cf_name)) {
-            if (table && table != cdc::get_base_table(db.real_database(), *s)) {
-                continue;
-            }
-
             rjson::value new_entry = rjson::empty_object();
 
             last = i->schema()->id();
@@ -416,6 +429,8 @@ static std::chrono::seconds confidence_interval(data_dictionary::database db) {
     return std::chrono::seconds(db.get_config().alternator_streams_time_window_s());
 }
 
+using namespace std::chrono_literals;
+
 // Dynamo docs says no data shall live longer than 24h.
 static constexpr auto dynamodb_streams_max_window = 24h;
 
@@ -493,7 +508,7 @@ future<executor::request_return_type> executor::describe_stream(client_state& cl
     // filter out cdc generations older than the table or now() - cdc::ttl (typically dynamodb_streams_max_window - 24h)
     auto low_ts = std::max(as_timepoint(schema->id()), db_clock::now() - ttl);
 
-    return _sdks.cdc_get_versioned_streams(low_ts, { normal_token_owners }).then([this, db, shard_start, limit, ret = std::move(ret), stream_desc = std::move(stream_desc)] (std::map<db_clock::time_point, cdc::streams_version> topologies) mutable {
+    return _sdks.cdc_get_versioned_streams(low_ts, { normal_token_owners }).then([db, shard_start, limit, ret = std::move(ret), stream_desc = std::move(stream_desc)] (std::map<db_clock::time_point, cdc::streams_version> topologies) mutable {
 
         auto e = topologies.end();
         auto prev = e;

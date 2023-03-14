@@ -2,7 +2,7 @@
 Upgrade Guide - |SCYLLA_NAME| |SRC_VERSION| to |NEW_VERSION| for |OS|
 ======================================================================
 
-This document is a step-by-step procedure for upgrading from |SCYLLA_NAME| |FROM| to |SCYLLA_NAME| |TO|, and rollback to 2021.1 if required.
+This document is a step-by-step procedure for upgrading from |SCYLLA_NAME| |FROM| to |SCYLLA_NAME| |TO| (where "z" is the :ref:`latest available version <faq-pinning>`), and rollback to 2021.1 if required.
 
 Applicable versions
 ===================
@@ -66,7 +66,7 @@ Gracefully stop the node
 
 .. code:: sh
 
-   sudo service scylla-enterprise-server stop
+   sudo service scylla-server stop
 
 Download and install the new release
 ------------------------------------

@@ -12,8 +12,8 @@
 #include "types/map.hh"
 #include "sstables/sstables.hh"
 #include "replica/database.hh"
-#include "schema.hh"
-#include "schema_builder.hh"
+#include "schema/schema.hh"
+#include "schema/schema_builder.hh"
 #include "types/set.hh"
 #include "types/list.hh"
 #include <seastar/core/thread.hh>
@@ -48,12 +48,6 @@ public:
 
     static uint64_t calculate_generation_for_new_table(replica::column_family& cf) {
         return generation_value(cf.calculate_generation_for_new_table());
-    }
-
-    auto try_flush_memtable_to_sstable(lw_shared_ptr<replica::memtable> mt) {
-        auto cg = _cf->single_compaction_group_if_available();
-        assert(cg);
-        return _cf->try_flush_memtable_to_sstable(*cg, mt, replica::sstable_write_permit::unconditional());
     }
 };
 

@@ -14,7 +14,7 @@
 #include "prepared_statement.hh"
 #include "data_dictionary/data_dictionary.hh"
 #include "data_dictionary/keyspace_metadata.hh"
-#include "mutation.hh"
+#include "mutation/mutation.hh"
 #include "service/migration_manager.hh"
 #include "service/storage_proxy.hh"
 #include "transport/messages/result_message.hh"
@@ -23,6 +23,7 @@
 #include "gms/feature_service.hh"
 
 #include <regex>
+#include <stdexcept>
 
 bool is_system_keyspace(std::string_view keyspace);
 
@@ -175,13 +176,37 @@ std::optional<sstring> check_restricted_replication_strategy(
             break;
         }
     }
+    // The minimum_keyspace_rf configuration option can be used to forbid
+    // a lower replication factor. We assume that all numeric replication
+    // options are replication factors - this is true for SimpleStrategy and
+    // NetworkTopologyStrategy but in the future if we add more strategies,
+    // we may need to limit this test only to specific options.
+    // A zero replication factor is not forbidden - it is the traditional
+    // way to avoid replication on some DC.
+    // We ignore errors (non-number, negative number, etc.) here,
+    // these are checked and reported elsewhere.
+    for (auto opt : attrs.get_replication_options()) {
+        try {
+            auto rf = std::stol(opt.second);
+            if (rf > 0 && rf < qp.proxy().data_dictionary().get_config().minimum_keyspace_rf()) {
+                throw exceptions::configuration_exception(format(
+                    "Replication factor {}={} is forbidden by the current "
+                    "configuration setting of minimum_keyspace_rf={}. Please "
+                    "increase replication factor, or lower minimum_keyspace_rf "
+                    "set in the configuration.", opt.first, opt.second,
+                    qp.proxy().data_dictionary().get_config().minimum_keyspace_rf()));
+            }
+        } catch (std::invalid_argument&) {
+        } catch (std::out_of_range& ) {
+        }
+    }
     return std::nullopt;
 }
 
 future<::shared_ptr<messages::result_message>>
 create_keyspace_statement::execute(query_processor& qp, service::query_state& state, const query_options& options) const {
     std::optional<sstring> warning = check_restricted_replication_strategy(qp, keyspace(), *_attrs);
-    return schema_altering_statement::execute(qp, state, options).then([this, warning = std::move(warning)] (::shared_ptr<messages::result_message> msg) {
+    return schema_altering_statement::execute(qp, state, options).then([warning = std::move(warning)] (::shared_ptr<messages::result_message> msg) {
         if (warning) {
             msg->add_warning(*warning);
             mylogger.warn("{}", *warning);

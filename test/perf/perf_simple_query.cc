@@ -20,7 +20,7 @@
 #include "db/config.hh"
 
 #include "db/config.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "release.hh"
 #include <fstream>
 #include "service/storage_proxy.hh"

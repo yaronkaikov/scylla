@@ -17,7 +17,7 @@
 #include "utils/UUID_gen.hh"
 #include "row_cache.hh"
 #include "partition_slice_builder.hh"
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "replica/memtable.hh"
 #include "test/lib/memtable_snapshot_source.hh"
 #include "test/perf/perf.hh"
@@ -25,7 +25,7 @@
 #include "test/lib/random_utils.hh"
 #include "test/lib/simple_schema.hh"
 #include "querier.hh"
-#include "types.hh"
+#include "types/types.hh"
 #include "reader_concurrency_semaphore.hh"
 
 /// Tests read scenarios from cache.
@@ -222,7 +222,7 @@ void test_scan_with_range_delete_over_rows() {
 
 int main(int argc, char** argv) {
     app_template app;
-    return app.run(argc, argv, [&app] {
+    return app.run(argc, argv, [] {
         return seastar::async([&] {
             engine().at_exit([] {
                 cancelled = true;

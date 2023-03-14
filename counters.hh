@@ -12,8 +12,8 @@
 #include <boost/range/algorithm/find_if.hpp>
 #include <boost/range/numeric.hpp>
 
-#include "atomic_cell.hh"
-#include "types.hh"
+#include "mutation/atomic_cell.hh"
+#include "types/types.hh"
 #include "locator/host_id.hh"
 
 class mutation;

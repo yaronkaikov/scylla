@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
@@ -14,6 +14,7 @@
 #include "types/user.hh"
 #include "types/list.hh"
 #include "test/lib/exception_utils.hh"
+#include "db/config.hh"
 
 #include <boost/algorithm/string/join.hpp>
 
@@ -65,7 +66,7 @@ SEASTAR_TEST_CASE(test_user_type) {
             return e.execute_cql("insert into cf (id, t) values (1, (1001, 2001, 'abc1'));").discard_result();
         }).then([&e] {
             return e.execute_cql("select t.my_int, t.my_bigint, t.my_text from cf where id = 1;");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows()
                 .with_rows({
                      {int32_type->decompose(int32_t(1001)), long_type->decompose(int64_t(2001)), utf8_type->decompose(sstring("abc1"))},
@@ -74,7 +75,7 @@ SEASTAR_TEST_CASE(test_user_type) {
             return e.execute_cql("update cf set t = { my_int: 1002, my_bigint: 2002, my_text: 'abc2' } where id = 1;").discard_result();
         }).then([&e] {
             return e.execute_cql("select t.my_int, t.my_bigint, t.my_text from cf where id = 1;");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             assert_that(msg).is_rows()
                 .with_rows({
                      {int32_type->decompose(int32_t(1002)), long_type->decompose(int64_t(2002)), utf8_type->decompose(sstring("abc2"))},
@@ -83,7 +84,7 @@ SEASTAR_TEST_CASE(test_user_type) {
             return e.execute_cql("insert into cf (id, t) values (2, (frozen<ut1>)(2001, 3001, 'abc4'));").discard_result();
         }).then([&e] {
             return e.execute_cql("select t from cf where id = 2;");
-        }).then([&e] (shared_ptr<cql_transport::messages::result_message> msg) {
+        }).then([] (shared_ptr<cql_transport::messages::result_message> msg) {
             auto ut = user_type_impl::get_instance("ks", to_bytes("ut1"),
                         {to_bytes("my_int"), to_bytes("my_bigint"), to_bytes("my_text")},
                         {int32_type, long_type, utf8_type}, false);
@@ -184,7 +185,42 @@ SEASTAR_TEST_CASE(test_invalid_user_type_statements) {
                 boost::irange(1, 1 << 15) | boost::adaptors::transformed([] (int i) { return format("a{} int", i); }), ", "))).discard_result().get();
         REQUIRE_INVALID(e, "alter type ut4 add b int",
                 "Cannot add new field to type ks.ut4: maximum number of fields reached");
+
+        e.execute_cql("create type ut5 (a int)").discard_result().get();
+        e.execute_cql("create table cf3 (a int primary key, b ut5)").discard_result().get();
+        REQUIRE_INVALID(e, "drop type ut5",
+                "Cannot drop user type ks.ut5 as it is still used by table ks.cf3");
+        e.execute_cql("drop table cf3").discard_result().get();
+        e.execute_cql("drop type ut5").discard_result().get();
+
+        e.execute_cql("create type ut6 (a int)").discard_result().get();
+        e.execute_cql("create type ut7 (b frozen<ut6>)").discard_result().get();
+        REQUIRE_INVALID(e, "drop type ut6",
+                "Cannot drop user type ks.ut6 as it is still used by user type ut7");
+        e.execute_cql("drop type ut7").discard_result().get();
+        e.execute_cql("drop type ut6").discard_result().get();
     });
+}
+
+SEASTAR_TEST_CASE(test_drop_user_type_used_in_udf) {
+    auto db_cfg_ptr = make_shared<db::config>();
+    auto& db_cfg = *db_cfg_ptr;
+    db_cfg.enable_user_defined_functions({true}, db::config::config_source::CommandLine);
+    // Raise timeout to survive debug mode and contention.
+    db_cfg.user_defined_function_time_limit_ms(1000);
+    db_cfg.experimental_features({db::experimental_features_t::feature::UDF}, db::config::config_source::CommandLine);
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        e.execute_cql("create type ut (a int)").discard_result().get();
+        e.execute_cql("create function f1(a int) called on null input returns ut language lua as 'return {a = 42}'").discard_result().get();
+        REQUIRE_INVALID(e, "drop type ut",
+                "Cannot drop user type ks.ut as it is still used by function ks.f1");
+        e.execute_cql("drop function f1").discard_result().get();
+        e.execute_cql("create function f2(a ut) called on null input returns int language lua as 'return 42'").discard_result().get();
+        REQUIRE_INVALID(e, "drop type ut",
+                "Cannot drop user type ks.ut as it is still used by function ks.f2");
+        e.execute_cql("drop function f2").discard_result().get();
+        e.execute_cql("drop type ut").discard_result().get();
+    }, db_cfg_ptr);
 }
 
 static future<> test_alter_user_type(bool frozen) {

@@ -560,11 +560,9 @@ murmur3_partitioner_ignore_msb_bits: 12
 # Set to `false` to fall-back to the old algorithm.
 # enable_optimized_reversed_reads: true
 
-# This parameter is temporarilt set to `false` due to bug with timeouts.
-#
 # Use on a new, parallel algorithm for performing aggregate queries.
 # Set to `false` to fall-back to the old algorithm.
-# enable_parallelized_aggregation: false
+# enable_parallelized_aggregation: true
 
 # When enabled, the node will start using separate commit log for schema changes
 # right from the boot. Without this, it only happens following a restart after
@@ -669,3 +667,35 @@ consistent_cluster_management: true
 #   <name>:
 #       ...
 #
+
+#
+# KMS host(s).
+#
+# The unique name of kms host/account config that can be referenced in table schema.
+#
+# host.yourdomain.com={ endpoint=<http(s)://host[:port]>, aws_access_key_id=<AWS access id>, aws_secret_access_key=<AWS secret key>, aws_region=<AWS region>, master_key=<alias or id>, keyfile=/path/to/keyfile, truststore=/path/to/truststore.pem, key_cache_millis=<cache ms>, timeout=<timeout ms> }:...
+#
+# Actual connection can be either an explicit endpoint (<host>:<port>), or selected automatic via aws_region.
+# 
+# Authentication can be explicit with aws_access_key_id and aws_secret_access_key. Either secret or both can be ommitted
+# in which case the provider will try to read them from AWS credentials in ~/.aws/credentials
+#
+# master_key is an AWS KMS key id or alias from which all keys used for actual encryption of scylla data will be derived.
+# This key must be pre-created with access policy allowing the above AWS id Encrypt, Decrypt and GenerateDataKey operations.
+#
+# kms_hosts:
+#   <name>:
+#       endpoint: http(s)://<host>(:port) (optional)
+#       aws_region: <aws region> (optional)
+#       aws_access_key_id: <aws access key id> (optional)
+#       aws_secret_access_key: <aws secret access key> (optional)
+#       master_key: <named KMS key for encrypting data keys> (required)
+#       certificate: <identifying certificate> (optional)
+#       keyfile: <identifying key> (optional)
+#       truststore: <truststore for SSL connection> (optional)
+#       priority_string: <kmip tls priority string> (optional)
+#   <name>:
+#       ...
+#
+
+

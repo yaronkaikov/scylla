@@ -40,11 +40,13 @@
 #include "utils/error_injection.hh"
 #include "utils/histogram_metrics_helper.hh"
 #include "utils/fb_utilities.hh"
-#include "mutation_source_metadata.hh"
+#include "mutation/mutation_source_metadata.hh"
 #include "gms/gossiper.hh"
 #include "db/config.hh"
 #include "db/commitlog/commitlog.hh"
 #include "utils/lister.hh"
+#include "dht/token.hh"
+#include "dht/i_partitioner.hh"
 
 #include <boost/range/algorithm/remove_if.hpp>
 #include <boost/range/algorithm.hpp>
@@ -387,19 +389,9 @@ static bool belongs_to_other_shard(const std::vector<shard_id>& shards) {
     return shards.size() != size_t(belongs_to_current_shard(shards));
 }
 
-sstables::shared_sstable table::make_sstable(sstring dir, sstables::generation_type generation, sstables::sstable_version_types v, sstables::sstable_format_types f,
-        io_error_handler_gen error_handler_gen) {
-    return get_sstables_manager().make_sstable(_schema, dir, generation, v, f, gc_clock::now(), error_handler_gen);
-}
-
-sstables::shared_sstable table::make_sstable(sstring dir, sstables::generation_type generation,
-        sstables::sstable_version_types v, sstables::sstable_format_types f) {
-    return get_sstables_manager().make_sstable(_schema, dir, generation, v, f);
-}
-
 sstables::shared_sstable table::make_sstable(sstring dir) {
-    return make_sstable(dir, calculate_generation_for_new_table(),
-                        get_sstables_manager().get_highest_supported_format(), sstables::sstable::format_types::big);
+    auto& sstm = get_sstables_manager();
+    return sstm.make_sstable(_schema, dir, calculate_generation_for_new_table(), sstm.get_highest_supported_format(), sstables::sstable::format_types::big);
 }
 
 sstables::shared_sstable table::make_sstable() {
@@ -413,12 +405,6 @@ void table::notify_bootstrap_or_replace_start() {
 void table::notify_bootstrap_or_replace_end() {
     _is_bootstrap_or_replace = false;
     trigger_offstrategy_compaction();
-}
-
-void table::update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable) noexcept {
-    _stats.live_disk_space_used += disk_space_used_by_sstable;
-    _stats.total_disk_space_used += disk_space_used_by_sstable;
-    _stats.live_sstable_count++;
 }
 
 inline void table::add_sstable_to_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable) {
@@ -446,14 +432,13 @@ compaction_group::do_add_sstable(lw_shared_ptr<sstables::sstable_set> sstables, 
     if (backlog_tracker) {
         table::add_sstable_to_backlog_tracker(get_backlog_tracker(), sstable);
     }
-    // update sstable set last in case either updating
-    // staging sstables or backlog tracker throws
-    _t.update_stats_for_new_sstable(sstable->bytes_on_disk());
     return new_sstables;
 }
 
 void compaction_group::add_sstable(sstables::shared_sstable sstable) {
+    auto sstable_size = sstable->bytes_on_disk();
     _main_sstables = do_add_sstable(_main_sstables, std::move(sstable), enable_backlog_tracker::yes);
+    _main_set_disk_space_used += sstable_size;
 }
 
 const lw_shared_ptr<sstables::sstable_set>& compaction_group::main_sstables() const noexcept {
@@ -462,10 +447,13 @@ const lw_shared_ptr<sstables::sstable_set>& compaction_group::main_sstables() co
 
 void compaction_group::set_main_sstables(lw_shared_ptr<sstables::sstable_set> new_main_sstables) {
     _main_sstables = std::move(new_main_sstables);
+    _main_set_disk_space_used = calculate_disk_space_used_for(*_main_sstables);
 }
 
 void compaction_group::add_maintenance_sstable(sstables::shared_sstable sst) {
+    auto sstable_size = sst->bytes_on_disk();
     _maintenance_sstables = do_add_sstable(_maintenance_sstables, std::move(sst), enable_backlog_tracker::no);
+    _maintenance_set_disk_space_used += sstable_size;
 }
 
 const lw_shared_ptr<sstables::sstable_set>& compaction_group::maintenance_sstables() const noexcept {
@@ -474,6 +462,7 @@ const lw_shared_ptr<sstables::sstable_set>& compaction_group::maintenance_sstabl
 
 void compaction_group::set_maintenance_sstables(lw_shared_ptr<sstables::sstable_set> new_maintenance_sstables) {
     _maintenance_sstables = std::move(new_maintenance_sstables);
+    _maintenance_set_disk_space_used = calculate_disk_space_used_for(*_maintenance_sstables);
 }
 
 void table::add_sstable(compaction_group& cg, sstables::shared_sstable sstable) {
@@ -508,10 +497,10 @@ void table::enable_off_strategy_trigger() {
 
 std::vector<std::unique_ptr<compaction_group>> table::make_compaction_groups() {
     std::vector<std::unique_ptr<compaction_group>> ret;
-    auto number_of_cg = 1 << _x_log2_compaction_groups;
-    ret.reserve(number_of_cg);
-    for (auto i = 0; i < number_of_cg; i++) {
-        ret.emplace_back(std::make_unique<compaction_group>(*this));
+    auto&& ranges = dht::split_token_range_msb(_x_log2_compaction_groups);
+    tlogger.debug("Created {} compaction groups for {}.{}", ranges.size(), _schema->ks_name(), _schema->cf_name());
+    for (auto&& range : ranges) {
+        ret.emplace_back(std::make_unique<compaction_group>(*this, std::move(range)));
     }
     return ret;
 }
@@ -525,7 +514,12 @@ compaction_group& table::compaction_group_for_token(dht::token token) const noex
     if (idx >= _compaction_groups.size()) {
         on_fatal_internal_error(tlogger, format("compaction_group_for_token: index out of range: idx={} size_log2={} size={} token={}", idx, _x_log2_compaction_groups, _compaction_groups.size(), token));
     }
-    return *_compaction_groups[idx];
+    auto& ret = *_compaction_groups[idx];
+    if (!ret.token_range().contains(token, dht::token_comparator())) {
+        on_fatal_internal_error(tlogger, format("compaction_group_for_token: compaction_group idx={} range={} does not contain token={}",
+                idx, ret.token_range(), token));
+    }
+    return ret;
 }
 
 compaction_group& table::compaction_group_for_key(partition_key_view key, const schema_ptr& s) const noexcept {
@@ -552,6 +546,12 @@ future<> table::parallel_foreach_compaction_group(std::function<future<>(compact
     });
 }
 
+void table::update_stats_for_new_sstable(const sstables::shared_sstable& sst) noexcept {
+    _stats.live_disk_space_used += sst->bytes_on_disk();
+    _stats.total_disk_space_used += sst->bytes_on_disk();
+    _stats.live_sstable_count++;
+}
+
 future<>
 table::do_add_sstable_and_update_cache(sstables::shared_sstable sst, sstables::offstrategy offstrategy) {
     auto permit = co_await seastar::get_units(_sstable_set_mutation_sem, 1);
@@ -564,6 +564,7 @@ table::do_add_sstable_and_update_cache(sstables::shared_sstable sst, sstables::o
         } else {
             add_maintenance_sstable(cg, sst);
         }
+        update_stats_for_new_sstable(sst);
     }), dht::partition_range::make({sst->get_first_decorated_key(), true}, {sst->get_last_decorated_key(), true}));
 }
 
@@ -603,6 +604,7 @@ table::update_cache(compaction_group& cg, lw_shared_ptr<memtable> m, std::vector
     auto adder = row_cache::external_updater([this, m, ssts = std::move(ssts), new_ssts_ms = std::move(*ms_opt), &cg] () mutable {
         for (auto& sst : ssts) {
             add_sstable(cg, sst);
+            update_stats_for_new_sstable(sst);
         }
         m->mark_flushed(std::move(new_ssts_ms));
         try_trigger_compaction(cg);
@@ -717,13 +719,17 @@ table::seal_active_memtable(compaction_group& cg, flush_permit&& flush_permit) n
                 ex = std::current_exception();
                 _config.cf_stats->failed_memtables_flushes_count++;
 
+                auto should_retry = [](auto* ep) {
+                    int ec = ep->code().value();
+                    return ec == ENOSPC || ec == EDQUOT;
+                };
                 if (try_catch<std::bad_alloc>(ex)) {
                     // There is a chance something else will free the memory, so we can try again
                     allowed_retries--;
                 } else if (auto ep = try_catch<std::system_error>(ex)) {
-                    allowed_retries = ep->code().value() == ENOSPC ? default_retries : 0;
+                    allowed_retries = should_retry(ep) ? default_retries : 0;
                 } else if (auto ep = try_catch<storage_io_error>(ex)) {
-                    allowed_retries = ep->code().value() == ENOSPC ? default_retries : 0;
+                    allowed_retries = should_retry(ep) ? default_retries : 0;
                 } else {
                     allowed_retries = 0;
                 }
@@ -844,7 +850,7 @@ table::try_flush_memtable_to_sstable(compaction_group& cg, lw_shared_ptr<memtabl
             co_await _compaction_manager.maybe_wait_for_sstable_count_reduction(cg.as_table_state());
         }
 
-        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, metadata, estimated_partitions, &cg] (flat_mutation_reader_v2 reader) mutable -> future<> {
+        auto consumer = _compaction_strategy.make_interposer_consumer(metadata, [this, old, permit, &newtabs, estimated_partitions, &cg] (flat_mutation_reader_v2 reader) mutable -> future<> {
           std::exception_ptr ex;
           try {
             auto&& priority = service::get_local_memtable_flush_priority();
@@ -992,19 +998,36 @@ void table::set_metrics() {
     }
 }
 
+size_t compaction_group::live_sstable_count() const noexcept {
+    return _main_sstables->size() + _maintenance_sstables->size();
+}
+
+uint64_t compaction_group::live_disk_space_used() const noexcept {
+    return _main_set_disk_space_used + _maintenance_set_disk_space_used;
+}
+
+uint64_t compaction_group::total_disk_space_used() const noexcept {
+    return live_disk_space_used() + boost::accumulate(_sstables_compacted_but_not_deleted | boost::adaptors::transformed(std::mem_fn(&sstables::sstable::bytes_on_disk)), uint64_t(0));
+}
+
+uint64_t compaction_group::calculate_disk_space_used_for(const sstables::sstable_set& set) {
+    uint64_t disk_space_used = 0;
+
+    set.for_each_sstable([&] (const sstables::shared_sstable& sst) {
+        disk_space_used += sst->bytes_on_disk();
+    });
+    return disk_space_used;
+}
+
 void table::rebuild_statistics() {
-    // zeroing live_disk_space_used and live_sstable_count because the
-    // sstable list was re-created
     _stats.live_disk_space_used = 0;
     _stats.live_sstable_count = 0;
+    _stats.total_disk_space_used = 0;
 
-    _sstables->for_each_sstable([this] (const sstables::shared_sstable& tab) {
-        update_stats_for_new_sstable(tab->bytes_on_disk());
-    });
     for (const compaction_group_ptr& cg : compaction_groups()) {
-        for (auto& tab: cg->compacted_undeleted_sstables()) {
-            update_stats_for_new_sstable(tab->bytes_on_disk());
-        }
+        _stats.live_disk_space_used += cg->live_disk_space_used();
+        _stats.total_disk_space_used += cg->total_disk_space_used();
+        _stats.live_sstable_count += cg->live_sstable_count();
     }
 }
 
@@ -1220,8 +1243,45 @@ future<bool> table::perform_offstrategy_compaction() {
 
 future<> table::perform_cleanup_compaction(compaction::owned_ranges_ptr sorted_owned_ranges) {
     co_await flush();
-    co_await parallel_foreach_compaction_group([this, sorted_owned_ranges = std::move(sorted_owned_ranges)] (compaction_group& cg) {
-        return get_compaction_manager().perform_cleanup(sorted_owned_ranges, cg.as_table_state());
+
+    if (_compaction_groups.size() == 1) {
+        auto& cg = *_compaction_groups[0];
+        co_return co_await get_compaction_manager().perform_cleanup(std::move(sorted_owned_ranges), cg.as_table_state());
+    }
+
+    // candidate ranges for the next compaction_group
+    std::deque<dht::token_range> candidates;
+    for (auto&& range : *sorted_owned_ranges) {
+        candidates.emplace_back(std::move(range));
+    }
+
+    auto cmp = dht::token_comparator();
+    dht::token_range_vector cg_ranges;
+    std::unordered_map<dht::token_range, compaction::owned_ranges_ptr> cg_ranges_map;
+    for (const auto& cg : _compaction_groups) {
+        const auto& cg_range = cg->token_range();
+        while (!candidates.empty()) {
+            auto range = std::move(candidates.front());
+            auto trimmed = range.intersection(cg_range, cmp);
+            if (!trimmed) {
+                assert(!cg_ranges.empty());
+                break;
+            }
+            cg_ranges.emplace_back(*trimmed);
+            candidates.pop_front();
+            if (!trimmed->contains(range, cmp)) {
+                auto remainder = range.subtract(*trimmed, cmp);
+                assert(remainder.size() == 1);
+                candidates.emplace_front(std::move(remainder[0]));
+                break;
+            }
+        }
+        cg_ranges_map[cg_range] = compaction::make_owned_ranges_ptr(std::move(cg_ranges));
+        co_await coroutine::maybe_yield();
+    }
+    co_await parallel_foreach_compaction_group([&] (compaction_group& cg) {
+        auto&& cg_ranges = std::move(cg_ranges_map.at(cg.token_range()));
+        return get_compaction_manager().perform_cleanup(std::move(cg_ranges), cg.as_table_state());
     });
 }
 
@@ -1250,7 +1310,7 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
 
             new_sstables = make_lw_shared<sstables::sstable_set>(new_cs.make_sstable_set(t._schema));
             std::vector<sstables::shared_sstable> new_sstables_for_backlog_tracker;
-            new_sstables_for_backlog_tracker.reserve(cg.main_sstables()->all()->size());
+            new_sstables_for_backlog_tracker.reserve(cg.main_sstables()->size());
             cg.main_sstables()->for_each_sstable([this, &new_sstables_for_backlog_tracker] (const sstables::shared_sstable& s) {
                 new_sstables->insert(s);
                 new_sstables_for_backlog_tracker.push_back(s);
@@ -1279,7 +1339,7 @@ void table::set_compaction_strategy(sstables::compaction_strategy_type strategy)
 }
 
 size_t table::sstables_count() const {
-    return _sstables->all()->size();
+    return _sstables->size();
 }
 
 std::vector<uint64_t> table::sstable_count_per_level() const {
@@ -1307,11 +1367,11 @@ future<std::unordered_set<sstring>> table::get_sstables_by_partition_key(const s
             partition_key(partition_key::from_nodetool_style_string(_schema, key)),
             [this] (std::unordered_set<sstring>& filenames, lw_shared_ptr<sstables::sstable_set::incremental_selector>& sel, partition_key& pk) {
         return do_with(dht::decorated_key(dht::decorate_key(*_schema, pk)),
-                [this, &filenames, &sel, &pk](dht::decorated_key& dk) mutable {
+                [this, &filenames, &sel](dht::decorated_key& dk) mutable {
             const auto& sst = sel->select(dk).sstables;
             auto hk = sstables::sstable::make_hashed_key(*_schema, dk.key());
 
-            return do_for_each(sst, [this, &filenames, &dk, hk = std::move(hk)] (std::vector<sstables::shared_sstable>::const_iterator::reference s) mutable {
+            return do_for_each(sst, [&filenames, &dk, hk = std::move(hk)] (std::vector<sstables::shared_sstable>::const_iterator::reference s) mutable {
                 auto name = s->get_filename();
                 return s->has_partition_key(hk, dk).then([name = std::move(name), &filenames] (bool contains) mutable {
                     if (contains) {
@@ -1379,9 +1439,10 @@ table::make_memtable_list(compaction_group& cg) {
     return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.dirty_memory_manager, _stats, _config.memory_compaction_scheduling_group);
 }
 
-compaction_group::compaction_group(table& t)
+compaction_group::compaction_group(table& t, dht::token_range token_range)
     : _t(t)
     , _table_state(std::make_unique<table_state>(t, *this))
+    , _token_range(std::move(token_range))
     , _memtables(_t._config.enable_disk_writes ? _t.make_memtable_list(*this) : _t.make_memory_only_memtable_list())
     , _main_sstables(make_lw_shared<sstables::sstable_set>(t._compaction_strategy.make_sstable_set(t.schema())))
     , _maintenance_sstables(t.make_maintenance_sstable_set())
@@ -1405,6 +1466,16 @@ void compaction_group::clear_sstables() {
     _maintenance_sstables = _t.make_maintenance_sstable_set();
 }
 
+static std::atomic<unsigned> minimum_x_log2_compaction_groups{0};
+
+void set_minimum_x_log2_compaction_groups(unsigned x_log2_compaction_groups) {
+    minimum_x_log2_compaction_groups.store(x_log2_compaction_groups, std::memory_order_relaxed);
+}
+
+static inline unsigned get_x_log2_compaction_groups(unsigned x_log2_compaction_groups) {
+    return std::max(x_log2_compaction_groups, minimum_x_log2_compaction_groups.load(std::memory_order_relaxed));
+}
+
 table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_manager& compaction_manager,
         sstables::sstables_manager& sst_manager, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
     : _schema(std::move(schema))
@@ -1413,7 +1484,7 @@ table::table(schema_ptr schema, config config, db::commitlog* cl, compaction_man
                          keyspace_label(_schema->ks_name()),
                          column_family_label(_schema->cf_name())
                         )
-    , _x_log2_compaction_groups(_config.x_log2_compaction_groups)
+    , _x_log2_compaction_groups(get_x_log2_compaction_groups(_config.x_log2_compaction_groups))
     , _compaction_manager(compaction_manager)
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
     , _compaction_groups(make_compaction_groups())
@@ -1647,11 +1718,11 @@ future<std::unordered_map<sstring, table::snapshot_details>> table::get_snapshot
                 continue;
             }
 
-            lister::scan_dir(snapshots_dir,  lister::dir_entry_types::of<directory_entry_type::directory>(), [this, datadir, &all_snapshots] (fs::path snapshots_dir, directory_entry de) {
+            lister::scan_dir(snapshots_dir,  lister::dir_entry_types::of<directory_entry_type::directory>(), [datadir, &all_snapshots] (fs::path snapshots_dir, directory_entry de) {
                 auto snapshot_name = de.name;
                 all_snapshots.emplace(snapshot_name, snapshot_details());
-                return lister::scan_dir(snapshots_dir / fs::path(snapshot_name),  lister::dir_entry_types::of<directory_entry_type::regular>(), [this, datadir, &all_snapshots, snapshot_name] (fs::path snapshot_dir, directory_entry de) {
-                    return io_check(file_stat, (snapshot_dir / de.name).native(), follow_symlink::no).then([this, datadir, &all_snapshots, snapshot_name, snapshot_dir, name = de.name] (stat_data sd) {
+                return lister::scan_dir(snapshots_dir / fs::path(snapshot_name),  lister::dir_entry_types::of<directory_entry_type::regular>(), [datadir, &all_snapshots, snapshot_name] (fs::path snapshot_dir, directory_entry de) {
+                    return io_check(file_stat, (snapshot_dir / de.name).native(), follow_symlink::no).then([datadir, &all_snapshots, snapshot_name, snapshot_dir, name = de.name] (stat_data sd) {
                         auto size = sd.allocated_size;
 
                         // The manifest is the only file expected to be in this directory not belonging to the SSTable.
@@ -1789,7 +1860,7 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
         tlogger.debug("cleaning out row cache");
     }));
     rebuild_statistics();
-    co_await coroutine::parallel_for_each(p->remove, [this, p] (pruner::removed_sstable& r) {
+    co_await coroutine::parallel_for_each(p->remove, [p] (pruner::removed_sstable& r) {
         if (r.enable_backlog_tracker) {
             remove_sstable_from_backlog_tracker(r.cg.get_backlog_tracker(), r.sst);
         }
@@ -1869,7 +1940,7 @@ const std::vector<view_ptr>& table::views() const {
 
 std::vector<view_ptr> table::affected_views(const schema_ptr& base, const mutation& update) const {
     //FIXME: Avoid allocating a vector here; consider returning the boost iterator.
-    return boost::copy_range<std::vector<view_ptr>>(_views | boost::adaptors::filtered([&, this] (auto&& view) {
+    return boost::copy_range<std::vector<view_ptr>>(_views | boost::adaptors::filtered([&] (auto&& view) {
         return db::view::partition_key_matches(*base, *view->view_info(), update.decorated_key());
     }));
 }
@@ -1903,11 +1974,12 @@ future<> table::generate_and_propagate_view_updates(const schema_ptr& base,
         tracing::trace_state_ptr tr_state,
         gc_clock::time_point now) const {
     auto base_token = m.token();
+    auto m_schema = m.schema();
     db::view::view_update_builder builder = db::view::make_view_update_builder(
             *this,
             base,
             std::move(views),
-            make_flat_mutation_reader_from_mutations_v2(m.schema(), std::move(permit), std::move(m)),
+            make_flat_mutation_reader_from_mutations_v2(std::move(m_schema), std::move(permit), std::move(m)),
             std::move(existings),
             now);
 
@@ -2472,7 +2544,7 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
             // completed first.
             // The _sstable_deletion_sem prevents list update on off-strategy completion and move_sstables_from_staging()
             // from stepping on each other's toe.
-            co_await sst->move_to_new_dir(dir(), sst->generation(), &delay_commit);
+            co_await sst->change_state(sstables::normal_dir, &delay_commit);
             // If view building finished faster, SSTable with repair origin still exists.
             // It can also happen the SSTable is not going through reshape, so it doesn't have a repair origin.
             // That being said, we'll only add this SSTable to tracker if its origin is other than repair.

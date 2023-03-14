@@ -16,8 +16,8 @@
 
 #include "test/lib/random_utils.hh"
 #include "utils/disk-error-handler.hh"
-#include "atomic_cell.hh"
-#include "types.hh"
+#include "mutation/atomic_cell.hh"
+#include "types/types.hh"
 
 BOOST_AUTO_TEST_CASE(test_atomic_cell) {
     struct test_case {
@@ -47,7 +47,6 @@ BOOST_AUTO_TEST_CASE(test_atomic_cell) {
 
     for (auto tc : cases) {
         auto& live = tc.live;
-        auto& fixed_size = tc.fixed_size;
         auto& value = tc.value;
         auto& expiring = tc.expiring;
         auto& counter_update = tc.counter_update;

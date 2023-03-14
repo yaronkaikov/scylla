@@ -456,9 +456,27 @@ std::pair<evaluation_inputs, std::unique_ptr<evaluation_inputs_data>> make_evalu
     return std::pair(std::move(inputs), std::move(data));
 }
 
+bind_variable
+make_bind_variable(int32_t index, data_type type) {
+    return bind_variable{index, make_receiver(type, "?")};
+}
+
+raw_value
+evaluate_with_bind_variables(const expression& e, std::vector<raw_value> parameters) {
+    query_options options(default_cql_config, db::consistency_level::ONE, std::nullopt, parameters, true,
+                          query_options::specific_options::DEFAULT);
+    return evaluate(e, evaluation_inputs{.options = &options});
+}
+
+
 // A mock implementation of data_dictionary::database, used in tests
 class mock_database_impl : public data_dictionary::impl {
     schema_ptr _table_schema;
+    // we cannot set _table_views here, as _table_schema is not necessarily
+    // a view. but if a test calls get_table_views(), the test guarantees
+    // that the _table_schema is a view, so we set _table_views is the accsseor
+    // instead.
+    mutable std::vector<view_ptr> _table_views;
     ::lw_shared_ptr<data_dictionary::keyspace_metadata> _keyspace_metadata;
 
     db::config _config;
@@ -527,7 +545,8 @@ public:
         throw std::bad_function_call();
     }
     virtual const std::vector<view_ptr>& get_table_views(data_dictionary::table t) const override {
-        return {view_ptr(_table_schema)};
+        _table_views = std::vector{view_ptr(_table_schema)};
+        return _table_views;
     }
     virtual sstring get_available_index_name(data_dictionary::database db,
                                              std::string_view ks_name,

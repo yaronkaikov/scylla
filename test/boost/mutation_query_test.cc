@@ -15,7 +15,7 @@
 #include "query-result-set.hh"
 #include "query-result-writer.hh"
 
-#include <seastar/testing/test_case.hh>
+#include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/mutation_assertions.hh"
 #include "test/lib/result_set_assertions.hh"
@@ -26,10 +26,10 @@
 #include "mutation_query.hh"
 #include <seastar/core/do_with.hh>
 #include <seastar/core/thread.hh>
-#include "schema_builder.hh"
+#include "schema/schema_builder.hh"
 #include "partition_slice_builder.hh"
 #include "readers/from_mutations_v2.hh"
-#include "mutation_rebuilder.hh"
+#include "mutation/mutation_rebuilder.hh"
 #include "readers/mutation_source.hh"
 #include "service/priority_manager.hh"
 

@@ -53,9 +53,6 @@ using namespace std::chrono_literals;
 // * Each value must be at least 8 byte aligned. If it was not, making
 //   the value addressable would also make the end of the descriptor
 //   addressable.
-namespace debug {
-constexpr size_t logalloc_alignment = 8;
-}
 template<typename T>
 [[nodiscard]] static T align_up_for_asan(T val) {
     return align_up(val, size_t(8));
@@ -77,9 +74,6 @@ void unpoison(const char *addr, size_t size) {
     ASAN_UNPOISON_MEMORY_REGION(addr, size);
 }
 #else
-namespace debug {
-constexpr size_t logalloc_alignment = 1;
-}
 template<typename T>
 [[nodiscard]] static T align_up_for_asan(T val) { return val; }
 template<typename T>
@@ -707,6 +701,7 @@ public:
         , _freed_segment_increases_general_memory_availability(freed_segment_increases_general_memory_availability)
         , _segments_base(align_up(_layout.start, static_cast<uintptr_t>(segment::size)))
     { }
+    virtual ~segment_store_backend() = default;
     memory::memory_layout memory_layout() const noexcept { return _layout; }
     uintptr_t segments_base() const noexcept { return _segments_base; }
     virtual void* alloc_segment_memory() noexcept = 0;

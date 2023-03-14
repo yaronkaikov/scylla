@@ -53,6 +53,8 @@ bytes base64_decode(const sstring&, size_t off = 0, size_t n = sstring::npos);
 sstring base64_encode(const bytes&, size_t off = 0, size_t n = bytes::npos);
 bytes calculate_md5(const bytes&, size_t off = 0, size_t n = bytes::npos);
 bytes calculate_sha256(const bytes&, size_t off = 0, size_t n = bytes::npos);
+bytes calculate_sha256(bytes_view);
+bytes hmac_sha256(bytes_view msg, bytes_view key);
 
 future<temporary_buffer<char>> read_text_file_fully(const sstring&);
 future<> write_text_file_fully(const sstring&, temporary_buffer<char>);
@@ -132,6 +134,7 @@ public:
 class encryption_config;
 class system_key;
 class kmip_host;
+class kms_host;
 
 /**
  * Context is a singleton object, shared across shards. I.e. even though there are obvious mutating
@@ -147,6 +150,7 @@ public:
     virtual shared_ptr<key_provider> get_provider(const options&) = 0;
     virtual shared_ptr<system_key> get_system_key(const sstring&) = 0;
     virtual shared_ptr<kmip_host> get_kmip_host(const sstring&) = 0;
+    virtual shared_ptr<kms_host> get_kms_host(const sstring&) = 0;
 
     virtual shared_ptr<key_provider> get_cached_provider(const sstring& id) const = 0;
     virtual void cache_provider(const sstring& id, shared_ptr<key_provider>) = 0;

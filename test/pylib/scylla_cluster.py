@@ -115,7 +115,7 @@ SCYLLA_CMDLINE_OPTIONS = [
     '-m', '1G',
     '--collectd', '0',
     '--overprovisioned',
-    '--max-networking-io-control-blocks', '100',
+    '--max-networking-io-control-blocks', '1000',
     '--unsafe-bypass-fsync', '1',
     '--kernel-page-cache', '1',
     '--commitlog-use-o-dsync', '0',
@@ -190,7 +190,9 @@ class ScyllaServer:
     """Starts and handles a single Scylla server, managing logs, checking if responsive,
        and cleanup when finished."""
     # pylint: disable=too-many-instance-attributes
-    START_TIMEOUT = 300     # seconds
+
+    # in seconds, used for topology operations such as bootstrap or decommission
+    TOPOLOGY_TIMEOUT = 1000
     start_time: float
     sleep_interval: float
     log_file: BufferedWriter
@@ -322,7 +324,7 @@ class ScyllaServer:
         # initializing. When the role is ready, queries begin to
         # work, so rely on this "side effect".
         profile = ExecutionProfile(load_balancing_policy=WhiteListRoundRobinPolicy([self.ip_addr]),
-                                   request_timeout=self.START_TIMEOUT)
+                                   request_timeout=self.TOPOLOGY_TIMEOUT)
         connected = False
         try:
             # In a cluster setup, it's possible that the CQL
@@ -382,7 +384,7 @@ class ScyllaServer:
         sleep_interval = 0.1
         cql_up_state = CqlUpState.NOT_CONNECTED
 
-        while time.time() < self.start_time + self.START_TIMEOUT:
+        while time.time() < self.start_time + self.TOPOLOGY_TIMEOUT:
             if self.cmd.returncode:
                 with self.log_filename.open('r') as log_file:
                     self.logger.error("failed to start server at host %s in %s",
@@ -427,7 +429,7 @@ class ScyllaServer:
         previous state propagation was missed."""
         auth = PlainTextAuthProvider(username='cassandra', password='cassandra')
         profile = ExecutionProfile(load_balancing_policy=WhiteListRoundRobinPolicy(self.seeds),
-                                   request_timeout=self.START_TIMEOUT)
+                                   request_timeout=self.TOPOLOGY_TIMEOUT)
         with Cluster(execution_profiles={EXEC_PROFILE_DEFAULT: profile},
                      contact_points=self.seeds,
                      auth_provider=auth,
@@ -735,18 +737,26 @@ class ScyllaCluster:
         if self.start_exception:
             # Mark as dirty so further test cases don't try to reuse this cluster.
             self.is_dirty = True
-            raise self.start_exception
+            raise Exception(f'Exception when starting cluster {self}:\n{self.start_exception}')
 
         for server in self.running.values():
             server.write_log_marker(f"------ Starting test {name} ------\n")
 
-    def after_test(self, name) -> None:
-        """Check that the cluster is still alive and the test
+    def after_test(self, name: str, success: bool) -> None:
+        """Mark the cluster as dirty after a failed test.
+        If the cluster is not dirty, check that it's still alive and the test
         hasn't left any garbage."""
         assert self.start_exception is None
-        if self._get_keyspace_count() != self.keyspace_count:
-            raise RuntimeError("Test post-condition failed, "
-                               "the test must drop all keyspaces it creates.")
+        if not success:
+            self.logger.debug(f"Test failed using cluster {self.name}, marking the cluster as dirty")
+            self.is_dirty = True
+        if self.is_dirty:
+            self.logger.info(f"The cluster {self.name} is dirty, not checking"
+                             f" keyspace count post-condition")
+        else:
+            if self._get_keyspace_count() != self.keyspace_count:
+                raise RuntimeError(f"Test post-condition on cluster {self.name} failed, "
+                                   f"the test must drop all keyspaces it creates.")
         for server in itertools.chain(self.running.values(), self.stopped.values()):
             server.write_log_marker(f"------ Ending test {name} ------\n")
 
@@ -852,7 +862,9 @@ class ScyllaClusterManager:
         self.is_after_test_ok: bool = False
         # API
         # NOTE: need to make a safe temp dir as tempfile can't make a safe temp sock name
-        self.manager_dir: str = tempfile.mkdtemp(prefix="manager-", dir=base_dir)
+        # Put the socket in /tmp, not base_dir, to avoid going over the length
+        # limit of UNIX-domain socket addresses (issue #12622).
+        self.manager_dir: str = tempfile.mkdtemp(prefix="manager-", dir="/tmp")
         self.sock_path: str = f"{self.manager_dir}/api"
         app = aiohttp.web.Application()
         self._setup_routes(app)
@@ -863,7 +875,8 @@ class ScyllaClusterManager:
         if self.is_running:
             self.logger.warning("ScyllaClusterManager already running")
             return
-        await self._get_cluster()
+        self.cluster = await self.clusters.get(self.logger)
+        self.logger.info("First Scylla cluster: %s", self.cluster)
         self.cluster.setLogger(self.logger)
         await self.runner.setup()
         self.site = aiohttp.web.UnixSite(self.runner, path=self.sock_path)
@@ -874,12 +887,10 @@ class ScyllaClusterManager:
         self.current_test_case_full_name = f'{self.test_uname}::{test_case_name}'
         self.logger.info("Setting up %s", self.current_test_case_full_name)
         if self.cluster.is_dirty:
-            self.logger.info(f"Current cluster %s is dirty after last test, stopping...", self.cluster.name)
-            await self.clusters.steal()
-            await self.cluster.stop()
-            await self.cluster.release_ips()
-            self.logger.info(f"Waiting for new cluster for test %s...", self.current_test_case_full_name)
-            await self._get_cluster()
+            self.logger.info(f"Current cluster %s is dirty after test %s, replacing with a new one...",
+                             self.cluster.name, self.current_test_case_full_name)
+            self.cluster = await self.clusters.replace_dirty(self.cluster, self.logger)
+            self.logger.info("Got new Scylla cluster: %s", self.cluster.name)
         self.cluster.setLogger(self.logger)
         self.logger.info("Leasing Scylla cluster %s for test %s", self.cluster, self.current_test_case_full_name)
         self.cluster.before_test(self.current_test_case_full_name)
@@ -895,22 +906,15 @@ class ScyllaClusterManager:
             del self.site
         if not self.cluster.is_dirty:
             self.logger.info("Returning Scylla cluster %s for test %s", self.cluster, self.test_uname)
-            await self.clusters.put(self.cluster)
+            await self.clusters.put(self.cluster, is_dirty=False)
         else:
             self.logger.info("ScyllaManager: Scylla cluster %s is dirty after %s, stopping it",
                             self.cluster, self.test_uname)
-            await self.cluster.stop()
-            await self.cluster.release_ips()
-            await self.clusters.steal()
+            await self.clusters.put(self.cluster, is_dirty=True)
         del self.cluster
         if os.path.exists(self.manager_dir):
             shutil.rmtree(self.manager_dir)
         self.is_running = False
-
-    async def _get_cluster(self) -> None:
-        self.cluster = await self.clusters.get(self.logger)
-        self.logger.info("Got new Scylla cluster %s", self.cluster)
-
 
     def _setup_routes(self, app: aiohttp.web.Application) -> None:
         def make_catching_handler(handler: Callable) -> Callable:
@@ -941,7 +945,7 @@ class ScyllaClusterManager:
         add_get('/cluster/host-ip/{server_id}', self._cluster_server_ip_addr)
         add_get('/cluster/host-id/{server_id}', self._cluster_host_id)
         add_get('/cluster/before-test/{test_case_name}', self._before_test_req)
-        add_get('/cluster/after-test', self._after_test)
+        add_get('/cluster/after-test/{success}', self._after_test)
         add_get('/cluster/mark-dirty', self._mark_dirty)
         add_get('/cluster/server/{server_id}/stop', self._cluster_server_stop)
         add_get('/cluster/server/{server_id}/stop_gracefully', self._cluster_server_stop_gracefully)
@@ -993,13 +997,16 @@ class ScyllaClusterManager:
     async def _after_test(self, _request) -> aiohttp.web.Response:
         assert self.cluster is not None
         assert self.current_test_case_full_name
-        self.logger.info("Finished test %s, cluster: %s", self.current_test_case_full_name, self.cluster)
+        success = _request.match_info["success"] == "True"
+        self.logger.info("Test %s %s, cluster: %s", self.current_test_case_full_name,
+                         "SUCCEEDED" if success else "FAILED", self.cluster)
         try:
-            self.cluster.after_test(self.current_test_case_full_name)
+            self.cluster.after_test(self.current_test_case_full_name, success)
         finally:
             self.current_test_case_full_name = ''
         self.is_after_test_ok = True
-        return aiohttp.web.Response(text="True")
+        cluster_str = str(self.cluster)
+        return aiohttp.web.Response(text=cluster_str)
 
     async def _mark_dirty(self, _request) -> aiohttp.web.Response:
         """Mark current cluster dirty"""
@@ -1071,7 +1078,8 @@ class ScyllaClusterManager:
 
         # initate remove
         try:
-            await self.cluster.api.remove_node(initiator.ip_addr, to_remove.host_id, ignore_dead)
+            await self.cluster.api.remove_node(initiator.ip_addr, to_remove.host_id, ignore_dead,
+                                               timeout=ScyllaServer.TOPOLOGY_TIMEOUT)
         except RuntimeError as exc:
             self.logger.error("_cluster_remove_node failed initiator %s server %s ignore_dead %s, check log at %s",
                           initiator, to_remove, ignore_dead, initiator.log_filename)
@@ -1090,7 +1098,7 @@ class ScyllaClusterManager:
             self.logger.warning("_cluster_decommission_node %s is only running node left", server_id)
         server = self.cluster.running[server_id]
         try:
-            await self.cluster.api.decommission_node(server.ip_addr)
+            await self.cluster.api.decommission_node(server.ip_addr, timeout=ScyllaServer.TOPOLOGY_TIMEOUT)
         except RuntimeError as exc:
             self.logger.error("_cluster_decommission_node %s, check log at %s", server,
                           server.log_filename)

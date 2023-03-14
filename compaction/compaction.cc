@@ -35,18 +35,18 @@
 #include "sstables/sstables_manager.hh"
 #include "compaction.hh"
 #include "compaction_manager.hh"
-#include "schema.hh"
+#include "schema/schema.hh"
 #include "db/system_keyspace.hh"
 #include "service/priority_manager.hh"
 #include "db_clock.hh"
-#include "mutation_compactor.hh"
+#include "mutation/mutation_compactor.hh"
 #include "leveled_manifest.hh"
 #include "dht/token.hh"
 #include "dht/partition_filter.hh"
 #include "mutation_writer/shard_based_splitting_writer.hh"
 #include "mutation_writer/partition_based_splitting_writer.hh"
-#include "mutation_source_metadata.hh"
-#include "mutation_fragment_stream_validator.hh"
+#include "mutation/mutation_source_metadata.hh"
+#include "mutation/mutation_fragment_stream_validator.hh"
 #include "utils/UUID_gen.hh"
 #include "utils/utf8.hh"
 #include "utils/fmt-compat.hh"
@@ -680,9 +680,9 @@ private:
             _rp = std::max(_rp, sst_stats.position);
         }
         log_info("{} {}", report_start_desc(), formatted_msg);
-        if (ssts->all()->size() < _sstables.size()) {
+        if (ssts->size() < _sstables.size()) {
             log_debug("{} out of {} input sstables are fully expired sstables that will not be actually compacted",
-                      _sstables.size() - ssts->all()->size(), _sstables.size());
+                      _sstables.size() - ssts->size(), _sstables.size());
         }
 
         _compacting = std::move(ssts);
@@ -1628,7 +1628,7 @@ public:
     }
 
     reader_consumer_v2 make_interposer_consumer(reader_consumer_v2 end_consumer) override {
-        return [this, end_consumer = std::move(end_consumer)] (flat_mutation_reader_v2 reader) mutable -> future<> {
+        return [end_consumer = std::move(end_consumer)] (flat_mutation_reader_v2 reader) mutable -> future<> {
             return mutation_writer::segregate_by_shard(std::move(reader), std::move(end_consumer));
         };
     }
@@ -1799,7 +1799,7 @@ static future<compaction_result> scrub_sstables_validate_mode(sstables::compacti
 
     if (validation_errors != 0) {
         for (auto& sst : *sstables->all()) {
-            co_await sst->move_to_quarantine();
+            co_await sst->change_state(sstables::quarantine_dir);
         }
     }
 

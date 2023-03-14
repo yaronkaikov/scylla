@@ -23,7 +23,7 @@
 #include "query-request.hh"
 #include "query-result.hh"
 #include <seastar/rpc/rpc.hh>
-#include "canonical_mutation.hh"
+#include "mutation/canonical_mutation.hh"
 #include "schema_mutations.hh"
 #include "db/config.hh"
 #include "db/view/view_update_backlog.hh"
@@ -31,13 +31,13 @@
 #include "range.hh"
 #include "frozen_schema.hh"
 #include "repair/repair.hh"
-#include "digest_algorithm.hh"
+#include "utils/digest_algorithm.hh"
 #include "service/paxos/proposal.hh"
 #include "service/paxos/prepare_response.hh"
 #include "query-request.hh"
 #include "mutation_query.hh"
 #include "repair/repair.hh"
-#include "digest_algorithm.hh"
+#include "utils/digest_algorithm.hh"
 #include "streaming/stream_reason.hh"
 #include "streaming/stream_mutation_fragments_cmd.hh"
 #include "cache_temperature.hh"
@@ -109,7 +109,7 @@
 #include "partition_range_compat.hh"
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/adaptor/indirected.hpp>
-#include "frozen_mutation.hh"
+#include "mutation/frozen_mutation.hh"
 #include "streaming/stream_manager.hh"
 #include "streaming/stream_mutation_fragments_cmd.hh"
 #include "idl/partition_checksum.dist.impl.hh"

@@ -20,7 +20,7 @@
 #include <seastar/core/print.hh>
 #include <seastar/net/byteorder.hh>
 #include "bytes.hh"
-#include "hashing.hh"
+#include "utils/hashing.hh"
 #include "utils/serialization.hh"
 
 namespace utils {
@@ -78,40 +78,20 @@ public:
 
     friend std::ostream& operator<<(std::ostream& out, const UUID& uuid);
 
-    bool operator==(const UUID& v) const noexcept {
-        return most_sig_bits == v.most_sig_bits
-                && least_sig_bits == v.least_sig_bits
-                ;
-    }
-    bool operator!=(const UUID& v) const noexcept {
-        return !(*this == v);
-    }
+    bool operator==(const UUID& v) const noexcept = default;
 
     // Please note that this comparator does not preserve timeuuid
     // monotonicity. For this reason you should avoid using it for
     // UUIDs that could store timeuuids, otherwise bugs like
     // https://github.com/scylladb/scylla/issues/7729 may happen.
-    bool operator<(const UUID& v) const noexcept {
-         if (most_sig_bits != v.most_sig_bits) {
-             return uint64_t(most_sig_bits) < uint64_t(v.most_sig_bits);
-         } else {
-             return uint64_t(least_sig_bits) < uint64_t(v.least_sig_bits);
-         }
+    std::strong_ordering operator<=>(const UUID& v) const noexcept {
+        auto cmp = uint64_t(most_sig_bits) <=> uint64_t(v.most_sig_bits);
+        if (cmp != 0) {
+            return cmp;
+        }
+        return uint64_t(least_sig_bits) <=> uint64_t(v.least_sig_bits);
     }
 
-    bool operator>(const UUID& v) const noexcept {
-        return v < *this;
-    }
-
-    bool operator<=(const UUID& v) const noexcept {
-        return !(*this > v);
-    }
-
-    bool operator>=(const UUID& v) const noexcept {
-        return !(*this < v);
-    }
-
-    // Valid (non-null) UUIDs always have their version
     // nibble set to a non-zero value
     bool is_null() const noexcept {
         return !most_sig_bits && !least_sig_bits;
@@ -211,21 +191,7 @@ inline std::strong_ordering uuid_tri_compare_timeuuid(bytes_view o1, bytes_view 
 template<typename Tag>
 struct tagged_uuid {
     utils::UUID id;
-    bool operator==(const tagged_uuid& o) const noexcept {
-        return id == o.id;
-    }
-    bool operator<(const tagged_uuid& o) const noexcept {
-        return id < o.id;
-    }
-    bool operator>(const tagged_uuid& o) const noexcept {
-        return id > o.id;
-    }
-    bool operator<=(const tagged_uuid& o) const noexcept {
-        return id <= o.id;
-    }
-    bool operator>=(const tagged_uuid& o) const noexcept {
-        return id >= o.id;
-    }
+    std::strong_ordering operator<=>(const tagged_uuid&) const noexcept = default;
     explicit operator bool() const noexcept {
         // The default constructor sets the id to nil, which is
         // guaranteed to not match any valid id.
