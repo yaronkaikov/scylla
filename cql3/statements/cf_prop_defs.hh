@@ -59,8 +59,6 @@ public:
 
     static const sstring KW_CDC;
 
-    static const sstring KW_IN_MEMORY;
-
     static const sstring COMPACTION_STRATEGY_CLASS_KEY;
     static const sstring COMPACTION_ENABLED_KEY;
 

@@ -505,9 +505,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     // TODO : default, always read?
     init("options-file", bpo::value<sstring>(), "configuration file (i.e. <SCYLLA_HOME>/conf/scylla.yaml)");
 
-    std::any get_in_memory_config_hook(utils::config_file& cfg);
-    static std::any in_memory_hook = get_in_memory_config_hook(*cfg);
-
     configurable::append_all(*cfg, init);
     cfg->add_options(init);
 

@@ -7,7 +7,6 @@ Scylla Enterprise Features
    :hidden:
 
    Workload Prioritization </using-scylla/workload-prioritization/>
-   In-memory tables </using-scylla/in-memory/>
    Global Secondary Indexes </using-scylla/secondary-indexes/>
    Local Secondary Indexes </using-scylla/local-secondary-indexes/>
    Materialized Views </using-scylla/materialized-views/>
@@ -107,7 +106,6 @@ Scylla Enterprise Features
   The following are **new features** for Scylla Scylla Enterprise 2018.1.x
 
   * :doc:`Scylla Auditing Guide </operating-scylla/security/auditing>` -  allows administrators to know which users performed what action at what time.
-  * :doc:`Scylla in-memory tables </using-scylla/in-memory/>` - an alternative table type for storing data in RAM.
   * :doc:`Scylla Counters </using-scylla/counters/>` - A data type for counting
   * :ref:`Time Window Compaction Strategy <time-window-compactionstrategy-twcs>` - a replacement compaction strategy for Date-Tiered Compaction Strategy, refined for time-series data.
   * `Heat Weighted Load Balancing <https://www.scylladb.com/2017/09/21/scylla-heat-weighted-load-balancing/>`_ a blog entry which investigates what happens if one of the nodes loses its cache and the solution Heat Weighted Load Balancing.

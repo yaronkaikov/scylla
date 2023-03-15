@@ -478,22 +478,6 @@ You can restrict the number of items in the IN clause with the following options
 The options can be configured on the command line, passed with ``SCYLLA_ARGS`` in ``/etc/default/scylla-server`` or ``/etc/sysconfig/scylla-server``, 
 or added to your ``scylla.yaml`` (see :doc:`Scylla Configuration<operating-scylla/admin>`).
 
-in-memory tables
-----------------
-
-Is MV and SI supported for use with in-memory tables? If so, how will it affect the total memory size limitation?
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-You can make MV table an in-memory, as you would with every other table. It effects the total memory size allocation just like any other table. Make sure before you create any kind of in-memory table that its use case warrants the creation. 
- 
-Can Scylla Enterprise in-memory tables be used without having a mirror file on disk?
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-No. In Scylla Enterprise 2018.1.7, in-memory tables are always persistent using an on-disk mirror file.
-
-What happens if we apply an ``ALTER`` CQL command to change a table from/to in memory?
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-It goes in and out of in-memory, as expected. This is :ref:`documented <change-a-table-to-an-in-memory-table>` in the Scylla Docs. 
-
 Can I change the coredump mount point? 
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
