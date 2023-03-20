@@ -227,7 +227,7 @@ void database::setup_scylla_memory_diagnostics_producer() {
                         name,
                         initial_res.count - available_res.count,
                         utils::to_hr_size(initial_res.memory - available_res.memory),
-                        sem.waiters());
+                        sem.get_stats().waiters);
             } else {
                 writeln("    {}: {}/{}, {}/{}, queued: {}\n",
                         name,
@@ -235,7 +235,7 @@ void database::setup_scylla_memory_diagnostics_producer() {
                         initial_res.count,
                         utils::to_hr_size(initial_res.memory - available_res.memory),
                         utils::to_hr_size(initial_res.memory),
-                        sem.waiters());
+                        sem.get_stats().waiters);
             }
         };
 
@@ -627,7 +627,7 @@ database::setup_metrics() {
                        sm::description("Holds the amount of memory consumed by current read operations. "),
                        {user_label_instance}),
 
-        sm::make_gauge("queued_reads", [this] { return _reader_concurrency_semaphores_group.sum_read_concurrency_sem_var(&reader_concurrency_semaphore::waiters); },
+        sm::make_gauge("queued_reads", [this] { return sum_read_concurrency_sem_stat(&reader_concurrency_semaphore::stats::waiters); },
                        sm::description("Holds the number of currently queued read operations."),
                        {user_label_instance}),
 
@@ -662,7 +662,7 @@ database::setup_metrics() {
                        sm::description("Holds the amount of memory consumed by current read operations issued on behalf of streaming "),
                        {streaming_label_instance}),
 
-        sm::make_gauge("queued_reads", [this] { return _streaming_concurrency_sem.waiters(); },
+        sm::make_gauge("queued_reads", [this] { return _streaming_concurrency_sem.get_stats().waiters; },
                        sm::description("Holds the number of currently queued read operations on behalf of streaming."),
                        {streaming_label_instance}),
 
@@ -697,7 +697,7 @@ database::setup_metrics() {
                        sm::description("Holds the amount of memory consumed by all read operations from \"system\" keyspace tables. "),
                        {system_label_instance}),
 
-        sm::make_gauge("queued_reads", [this] { return _system_read_concurrency_sem.waiters(); },
+        sm::make_gauge("queued_reads", [this] { return _system_read_concurrency_sem.get_stats().waiters; },
                        sm::description("Holds the number of currently queued read operations from \"system\" keyspace tables."),
                        {system_label_instance}),
 
@@ -835,7 +835,7 @@ future<> database::parse_system_tables(distributed<service::storage_proxy>& prox
         co_return;
     }));
     co_await do_parse_schema_tables(proxy, db::schema_tables::FUNCTIONS, coroutine::lambda([&] (schema_result_value_type& v) -> future<> {
-        auto&& user_functions = create_functions_from_schema_partition(*this, v.second);
+        auto&& user_functions = co_await create_functions_from_schema_partition(*this, v.second);
         for (auto&& func : user_functions) {
             cql3::functions::functions::add_function(func);
         }
@@ -978,12 +978,12 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
     auto& sst_manager = is_system_table(*schema) ? get_system_sstables_manager() : get_user_sstables_manager();
     lw_shared_ptr<column_family> cf;
     if (cfg.enable_commitlog && _commitlog) {
-        db::commitlog& cl = schema->ks_name() == db::schema_tables::NAME && _uses_schema_commitlog
+        db::commitlog& cl = schema->static_props().use_schema_commitlog && _uses_schema_commitlog
                 ? *_schema_commitlog
                 : *_commitlog;
-        cf = make_lw_shared<column_family>(schema, std::move(cfg), cl, _compaction_manager, sst_manager, *_cl_stats, _row_cache_tracker);
+        cf = make_lw_shared<column_family>(schema, std::move(cfg), ks.metadata()->get_storage_options_ptr(), cl, _compaction_manager, sst_manager, *_cl_stats, _row_cache_tracker);
     } else {
-       cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog(), _compaction_manager, sst_manager, *_cl_stats, _row_cache_tracker);
+       cf = make_lw_shared<column_family>(schema, std::move(cfg), ks.metadata()->get_storage_options_ptr(), column_family::no_commitlog(), _compaction_manager, sst_manager, *_cl_stats, _row_cache_tracker);
     }
     cf->set_durable_writes(ks.metadata()->durable_writes());
 
@@ -2180,7 +2180,7 @@ std::ostream&
 operator<<(std::ostream& os, const exploded_clustering_prefix& ecp) {
     // Can't pass to_hex() to transformed(), since it is overloaded, so wrap:
     auto enhex = [] (auto&& x) { return to_hex(x); };
-    fmt::print(os, "prefix{{{}}}", ::join(":", ecp._v | boost::adaptors::transformed(enhex)));
+    fmt::print(os, "prefix{{{}}}", fmt::join(ecp._v | boost::adaptors::transformed(enhex), ":"));
     return os;
 }
 
@@ -2324,16 +2324,24 @@ future<> database::stop() {
     if (_schema_commitlog) {
         co_await _schema_commitlog->release();
     }
+    dblog.info("Shutting down system dirty memory manager");
     co_await _system_dirty_memory_manager.shutdown();
+    dblog.info("Shutting down dirty memory manager");
     co_await _dirty_memory_manager.shutdown();
+    dblog.info("Shutting down memtable controller");
     co_await _memtable_controller.shutdown();
+    dblog.info("Closing user sstables manager");
     co_await _user_sstables_manager->close();
+    dblog.info("Closing system sstables manager");
     co_await _system_sstables_manager->close();
+    dblog.info("Stopping querier cache");
     co_await _querier_cache.stop();
+    dblog.info("Stopping concurrency semaphores");
     co_await _reader_concurrency_semaphores_group.stop();
     co_await _streaming_concurrency_sem.stop();
     co_await _compaction_concurrency_sem.stop();
     co_await _system_read_concurrency_sem.stop();
+    dblog.info("Joining memtable update action");
     co_await _update_memtable_flush_static_shares_action.join();
 }
 

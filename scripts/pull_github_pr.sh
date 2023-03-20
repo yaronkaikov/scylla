@@ -34,7 +34,11 @@ for required in jq curl; do
 done
 
 curl() {
-    command curl --user "${GITHUB_LOGIN}:${GITHUB_TOKEN}" "$@"
+    local opts=()
+    if [[ -n "$GITHUB_LOGIN" && -n "$GITHUB_TOKEN" ]]; then
+        opts+=(--user "${GITHUB_LOGIN}:${GITHUB_TOKEN}")
+    fi
+    command curl "${opts[@]}" "$@"
 }
 
 NL=$'\n'

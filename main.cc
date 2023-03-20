@@ -92,6 +92,7 @@
 #include "test/perf/entry_point.hh"
 #include "db/per_partition_rate_limit_extension.hh"
 #include "lang/wasm_instance_cache.hh"
+#include "lang/wasm_alien_thread_runner.hh"
 
 #include "service/raft/raft_address_map.hh"
 #include "service/raft/raft_group_registry.hh"
@@ -323,12 +324,8 @@ verify_seastar_io_scheduler(const boost::program_options::variables_map& opts, b
         }
     };
 
-    if (!opts.contains("max-io-requests") && !(opts.contains("io-properties") || opts.contains("io-properties-file"))) {
-        note_bad_conf("none of --max-io-requests, --io-properties and --io-properties-file are set.");
-    }
-    if (opts.contains("max-io-requests") && opts["max-io-requests"].as<unsigned>() < 4) {
-        auto cause = format("I/O Queue capacity for this shard is too low ({:d}, minimum 4 expected).", opts["max-io-requests"].as<unsigned>());
-        note_bad_conf(cause);
+    if (!(opts.contains("io-properties") || opts.contains("io-properties-file"))) {
+        note_bad_conf("none of --io-properties and --io-properties-file are set.");
     }
 }
 
@@ -520,9 +517,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
     // If --version is requested, print it out and exit immediately to avoid
     // Seastar-specific warnings that may occur when running the app
-    bpo::variables_map vm;
     auto parsed_opts = bpo::command_line_parser(ac, av).options(app.get_options_description()).allow_unregistered().run();
-    bpo::store(parsed_opts, vm);
     print_starting_message(ac, av, parsed_opts);
 
     sharded<locator::shared_token_metadata> token_metadata;
@@ -600,7 +595,14 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             ::stop_signal stop_signal; // we can move this earlier to support SIGINT during initialization
             read_config(opts, *cfg).get();
-            configurable::init_all(opts, *cfg, *ext).get();
+            auto notify_set = configurable::init_all(opts, *cfg, *ext, service_set(
+                db, ss, mm, proxy, feature_service, messaging, qp, bm
+            )).get0();
+
+            auto stop_configurables = defer_verbose_shutdown("configurables", [&] {
+                notify_set.notify_all(configurable::system_state::stopped).get();
+            });
+
             cfg->setup_directories();
 
             // We're writing to a non-atomic variable here. But bool writes are atomic
@@ -1028,6 +1030,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             static sharded<wasm::instance_cache> wasm_instance_cache;
             auto udf_enabled = cfg->enable_user_defined_functions() && cfg->check_experimental(db::experimental_features_t::feature::UDF);
             std::any stop_udf_cache_handlers;
+            std::shared_ptr<wasm::alien_thread_runner> alien_runner;
             if (udf_enabled) {
                 supervisor::notify("starting wasm udf cache");
                 size_t max_cache_size = dbcfg.available_memory * cfg->wasm_cache_memory_fraction();
@@ -1035,6 +1038,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 stop_udf_cache_handlers = defer_verbose_shutdown("udf cache", [] {
                     wasm_instance_cache.stop().get();
                 });
+                alien_runner = std::make_shared<wasm::alien_thread_runner>();
             }
 
             auto get_tm_cfg = sharded_parameter([&] {
@@ -1117,6 +1121,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_stats();
                 reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_split_metrics_local();
             };
+            storage_proxy_stats_cfg.rename = [] (void* ptr) {
+                reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_stats();
+                reinterpret_cast<service::storage_proxy_stats::stats*>(ptr)->register_split_metrics_local();
+            };
             proxy.start(std::ref(db), std::ref(gossiper), spcfg, std::ref(node_backlog),
                     scheduling_group_key_create(storage_proxy_stats_cfg).get0(),
                     std::ref(feature_service), std::ref(token_metadata), std::ref(erm_factory), std::ref(messaging)).get();
@@ -1170,6 +1178,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             if (udf_enabled) {
                 qp.invoke_on_all([&] (cql3::query_processor& qp) {
                     qp.set_wasm_instance_cache(&wasm_instance_cache.local());
+                    qp.set_alien_runner(alien_runner);
                 }).get();
             }
             sstables::init_metrics().get();
@@ -1637,6 +1646,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             db.invoke_on_all([] (replica::database& db) {
                 db.revert_initial_system_read_concurrency_boost();
             }).get();
+
+            notify_set.notify_all(configurable::system_state::started).get();
 
             audit::audit::start_audit(*cfg, qp).get();
             auto audit_stop = defer([] {

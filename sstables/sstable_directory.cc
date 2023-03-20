@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include <type_traits>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
 #include <seastar/util/file.hh>
@@ -109,50 +110,67 @@ void sstable_directory::validate(sstables::shared_sstable sst, process_flags fla
     }
 }
 
+future<sstables::shared_sstable> sstable_directory::load_sstable(sstables::entry_descriptor desc) const {
+    auto sst = _manager.make_sstable(_schema, _sstable_dir.native(), desc.generation, desc.version, desc.format, gc_clock::now(), _error_handler_gen);
+    co_await sst->load(_io_priority);
+    co_return sst;
+}
+
+future<sstables::shared_sstable> sstable_directory::load_sstable(sstables::entry_descriptor desc, process_flags flags) const {
+    auto sst = co_await load_sstable(std::move(desc));
+    validate(sst, flags);
+    if (flags.need_mutate_level) {
+        dirlog.trace("Mutating {} to level 0\n", sst->get_filename());
+        co_await sst->mutate_sstable_level(0);
+    }
+    co_return sst;
+}
+
 future<>
 sstable_directory::process_descriptor(sstables::entry_descriptor desc, process_flags flags) {
     if (desc.version > _max_version_seen) {
         _max_version_seen = desc.version;
     }
 
+    if (flags.sort_sstables_according_to_owner) {
+        co_await sort_sstable(std::move(desc), flags);
+    } else {
+        dirlog.debug("Added {} to unsorted sstables list", sstable_filename(desc));
+        _unsorted_sstables.push_back(co_await load_sstable(std::move(desc), flags));
+    }
+}
+
+future<std::vector<shard_id>> sstable_directory::get_shards_for_this_sstable(const sstables::entry_descriptor& desc, process_flags flags) const {
     auto sst = _manager.make_sstable(_schema, _sstable_dir.native(), desc.generation, desc.version, desc.format, gc_clock::now(), _error_handler_gen);
-    return sst->load(_io_priority).then([this, sst, flags] {
-        validate(sst, flags);
-        if (flags.need_mutate_level) {
-            dirlog.trace("Mutating {} to level 0\n", sst->get_filename());
-            return sst->mutate_sstable_level(0);
-        } else {
-            return make_ready_future<>();
-        }
-    }).then([sst, flags, this] {
-        if (flags.sort_sstables_according_to_owner) {
-            return sort_sstable(sst);
-        } else {
-            dirlog.debug("Added {} to unsorted sstables list", sst->get_filename());
-            _unsorted_sstables.push_back(sst);
-            return make_ready_future<>();
-        }
-    });
+    co_await sst->load_owner_shards(_io_priority);
+    validate(sst, flags);
+    co_return sst->get_shards_for_this_sstable();
+}
+
+future<foreign_sstable_open_info> sstable_directory::get_open_info_for_this_sstable(const sstables::entry_descriptor& desc) const {
+    auto sst = co_await load_sstable(std::move(desc));
+    co_return co_await sst->get_open_info();
 }
 
 future<>
-sstable_directory::sort_sstable(sstables::shared_sstable sst) {
-    return sst->get_open_info().then([sst, this] (sstables::foreign_sstable_open_info info) {
-        auto shards = sst->get_shards_for_this_sstable();
-        if (shards.size() == 1) {
-            if (shards[0] == this_shard_id()) {
-                dirlog.trace("{} identified as a local unshared SSTable", sst->get_filename());
-                _unshared_local_sstables.push_back(sst);
-            } else {
-                dirlog.trace("{} identified as a remote unshared SSTable", sst->get_filename());
-                _unshared_remote_sstables[shards[0]].push_back(std::move(info));
-            }
+sstable_directory::sort_sstable(sstables::entry_descriptor desc, process_flags flags) {
+    auto shards = co_await get_shards_for_this_sstable(desc, flags);
+    if (shards.size() == 1) {
+        if (shards[0] == this_shard_id()) {
+            dirlog.trace("{} identified as a local unshared SSTable", sstable_filename(desc));
+            _unshared_local_sstables.push_back(co_await load_sstable(std::move(desc), flags));
         } else {
-            dirlog.trace("{} identified as a shared SSTable", sst->get_filename());
-            _shared_sstable_info.push_back(std::move(info));
+            dirlog.trace("{} identified as a remote unshared SSTable", sstable_filename(desc));
+            _unshared_remote_sstables[shards[0]].push_back(std::move(desc));
         }
-        return make_ready_future<>();
-    });
+    } else {
+        dirlog.trace("{} identified as a shared SSTable", sstable_filename(desc));
+        _shared_sstable_info.push_back(co_await get_open_info_for_this_sstable(desc));
+    }
+}
+
+sstring sstable_directory::sstable_filename(const sstables::entry_descriptor& desc) const {
+    return sstable::filename(_sstable_dir.native(), _schema->ks_name(), _schema->cf_name(), desc.version, desc.generation, desc.format, component_type::Data);
 }
 
 generation_type
@@ -227,7 +245,7 @@ future<> sstable_directory::components_lister::process(sstable_directory& direct
 
     // _descriptors is everything with a TOC. So after we remove this, what's left is
     // SSTables for which a TOC was not found.
-    co_await directory.parallel_for_each_restricted(_state->descriptors, [this, flags, &directory] (std::tuple<generation_type, sstables::entry_descriptor>&& t) {
+    co_await directory.parallel_for_each_restricted(_state->descriptors, [this, flags, &directory] (std::pair<const generation_type, sstables::entry_descriptor>& t) {
         auto& desc = std::get<1>(t);
         _state->generations_found.erase(desc.generation);
         // This will try to pre-load this file and throw an exception if it is invalid
@@ -281,9 +299,9 @@ future<shared_sstable> sstable_directory::load_foreign_sstable(foreign_sstable_o
 }
 
 future<>
-sstable_directory::load_foreign_sstables(sstable_info_vector info_vec) {
-    return parallel_for_each_restricted(info_vec, [this] (sstables::foreign_sstable_open_info& info) {
-        return load_foreign_sstable(info).then([this] (auto sst) {
+sstable_directory::load_foreign_sstables(sstable_entry_descriptor_vector info_vec) {
+    return parallel_for_each_restricted(info_vec, [this] (const sstables::entry_descriptor& info) {
+        return load_sstable(info).then([this] (auto sst) {
             _unshared_local_sstables.push_back(sst);
             return make_ready_future<>();
         });
@@ -318,10 +336,8 @@ sstable_directory::collect_output_unshared_sstables(std::vector<sstables::shared
         }
 
         dirlog.trace("Collected output SSTable {} is remote. Storing it", sst->get_filename());
-        return sst->get_open_info().then([this, shard, sst] (sstables::foreign_sstable_open_info info) {
-            _unshared_remote_sstables[shard].push_back(std::move(info));
-            return make_ready_future<>();
-        });
+        _unshared_remote_sstables[shard].push_back(sstables::entry_descriptor::make_descriptor(_sstable_dir.native(), sst->component_basename(component_type::Data)));
+        return make_ready_future<>();
     });
 }
 
@@ -361,6 +377,7 @@ sstable_directory::do_for_each_sstable(std::function<future<>(sstables::shared_s
 }
 
 template <typename Container, typename Func>
+requires std::is_invocable_r_v<future<>, Func, typename std::decay_t<Container>::value_type&>
 future<>
 sstable_directory::parallel_for_each_restricted(Container&& C, Func&& func) {
     return do_with(std::move(C), std::move(func), [this] (Container& c, Func& func) mutable {
@@ -377,9 +394,21 @@ sstable_directory::store_phaser(utils::phased_barrier::operation op) {
     _operation_barrier.emplace(std::move(op));
 }
 
-sstable_directory::sstable_info_vector
+sstable_directory::sstable_open_info_vector
 sstable_directory::retrieve_shared_sstables() {
     return std::exchange(_shared_sstable_info, {});
+}
+
+bool sstable_directory::compare_sstable_storage_prefix(const sstring& prefix_a, const sstring& prefix_b) noexcept {
+    size_t size_a = prefix_a.size();
+    if (prefix_a.back() == '/') {
+        size_a--;
+    }
+    size_t size_b = prefix_b.size();
+    if (prefix_b.back() == '/') {
+        size_b--;
+    }
+    return size_a == size_b && sstring::traits_type::compare(prefix_a.begin(), prefix_b.begin(), size_a) == 0;
 }
 
 future<> sstable_directory::delete_atomically(std::vector<shared_sstable> ssts) {
@@ -387,22 +416,27 @@ future<> sstable_directory::delete_atomically(std::vector<shared_sstable> ssts) 
         return make_ready_future<>();
     }
     return seastar::async([ssts = std::move(ssts)] {
-        sstring sstdir;
+        shared_sstable first = nullptr;
         min_max_tracker<generation_type> gen_tracker;
 
         for (const auto& sst : ssts) {
             gen_tracker.update(sst->generation());
 
-            if (sstdir.empty()) {
-                sstdir = sst->_storage.prefix();
+            if (first == nullptr) {
+                first = sst;
             } else {
                 // All sstables are assumed to be in the same column_family, hence
-                // sharing their base directory.
-                assert (sstdir == sst->_storage.prefix());
+                // sharing their base directory. Since lexicographical comparison of
+                // paths is not the same as their actualy equivalence, this should
+                // rather check for fs::equivalent call on _storage.prefix()-s. But
+                // since we know that the worst thing filesystem storage driver can
+                // do is to prepend/drop the trailing slash, it should be enough to
+                // compare prefixes of both ... prefixes
+                assert(compare_sstable_storage_prefix(first->_storage.prefix(), sst->_storage.prefix()));
             }
         }
 
-        sstring pending_delete_dir = sstdir + "/" + sstable::pending_delete_dir_basename();
+        sstring pending_delete_dir = first->_storage.prefix() + "/" + sstable::pending_delete_dir_basename();
         sstring pending_delete_log = format("{}/sstables-{}-{}.log", pending_delete_dir, gen_tracker.min(), gen_tracker.max());
         sstring tmp_pending_delete_log = pending_delete_log + ".tmp";
         sstlog.trace("Writing {}", tmp_pending_delete_log);

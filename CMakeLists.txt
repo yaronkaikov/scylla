@@ -14,12 +14,12 @@ set(CMAKE_BUILD_TYPE "${CMAKE_BUILD_TYPE}" CACHE
 set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
   "Debug" "Release" "Dev" "Sanitize")
 string(TOUPPER "${CMAKE_BUILD_TYPE}" build_mode)
-include("mode.common")
-include("mode.${build_mode}")
+include(mode.common)
+include(mode.${build_mode})
 add_compile_definitions(
     ${Seastar_DEFINITIONS_${build_mode}}
     FMT_DEPRECATED_OSTREAM)
-include("limit_jobs")
+include(limit_jobs)
 # Configure Seastar compile options to align with Scylla
 set(CMAKE_CXX_STANDARD "20" CACHE INTERNAL "")
 set(CMAKE_CXX_EXTENSIONS ON CACHE INTERNAL "")
@@ -33,9 +33,10 @@ find_package(Boost REQUIRED
 find_package(Lua REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(ICU COMPONENTS uc i18n REQUIRED)
-find_package(absl REQUIRED)
+find_package(absl COMPONENTS hash raw_hash_set REQUIRED)
 find_package(libdeflate REQUIRED)
 find_package(libxcrypt REQUIRED)
+find_package(Snappy REQUIRED)
 find_package(RapidJSON REQUIRED)
 find_package(Thrift REQUIRED)
 find_package(xxHash REQUIRED)
@@ -44,7 +45,9 @@ set(scylla_gen_build_dir "${CMAKE_BINARY_DIR}/gen")
 file(MAKE_DIRECTORY "${scylla_gen_build_dir}")
 
 
-set(scylla_sources
+add_library(scylla-main STATIC)
+target_sources(scylla-main
+  PRIVATE
     absl-flat_hash_map.cc
     bytes.cc
     client_data.cc
@@ -53,18 +56,14 @@ set(scylla_sources
     compress.cc
     converting_mutation_partition_applier.cc
     counters.cc
-    data_dictionary/data_dictionary.cc
     direct_failure_detector/failure_detector.cc
     duration.cc
     exceptions/exceptions.cc
     frozen_schema.cc
     generic_server.cc
     debug.cc
-    index/secondary_index.cc
-    index/secondary_index_manager.cc
     init.cc
     keys.cc
-    main.cc
     message/messaging_service.cc
     multishard_mutation_query.cc
     mutation_query.cc
@@ -76,8 +75,6 @@ set(scylla_sources
     tombstone_gc_options.cc
     tombstone_gc.cc
     reader_concurrency_semaphore.cc
-    repair/repair.cc
-    repair/row_level.cc
     row_cache.cc
     schema_mutations.cc
     serializer.cc
@@ -89,7 +86,15 @@ set(scylla_sources
     validation.cc
     vint-serialization.cc
     zstd.cc)
-
+target_link_libraries(scylla-main
+  PRIVATE
+    db
+    absl::hash
+    absl::raw_hash_set
+    Seastar::seastar
+    Snappy::snappy
+    systemd
+    ZLIB::ZLIB)
 add_subdirectory(api)
 add_subdirectory(alternator)
 add_subdirectory(db)
@@ -97,9 +102,11 @@ add_subdirectory(auth)
 add_subdirectory(cdc)
 add_subdirectory(compaction)
 add_subdirectory(cql3)
+add_subdirectory(data_dictionary)
 add_subdirectory(dht)
 add_subdirectory(gms)
 add_subdirectory(idl)
+add_subdirectory(index)
 add_subdirectory(interface)
 add_subdirectory(lang)
 add_subdirectory(locator)
@@ -109,6 +116,7 @@ add_subdirectory(readers)
 add_subdirectory(redis)
 add_subdirectory(replica)
 add_subdirectory(raft)
+add_subdirectory(repair)
 add_subdirectory(rust)
 add_subdirectory(schema)
 add_subdirectory(service)
@@ -124,10 +132,11 @@ add_subdirectory(utils)
 include(add_version_library)
 add_version_library(scylla_version
     release.cc)
-add_executable(scylla
-    ${scylla_sources})
 
+add_executable(scylla
+  main.cc)
 target_link_libraries(scylla PRIVATE
+    scylla-main
     api
     auth
     alternator
@@ -135,9 +144,11 @@ target_link_libraries(scylla PRIVATE
     cdc
     compaction
     cql3
+    data_dictionary
     dht
     gms
     idl
+    index
     lang
     locator
     mutation
@@ -145,6 +156,7 @@ target_link_libraries(scylla PRIVATE
     raft
     readers
     redis
+    repair
     replica
     schema
     scylla_version
@@ -160,47 +172,12 @@ target_link_libraries(scylla PRIVATE
     utils)
 target_link_libraries(Boost::regex
   INTERFACE
-    ICU::i18n)
+    ICU::i18n
+    ICU::uc)
 
 target_link_libraries(scylla PRIVATE
     seastar
-    # Boost dependencies
-    Boost::filesystem
-    Boost::program_options
-    Boost::system
-    Boost::thread
-    Boost::regex
-    Boost::headers
-    # Abseil libs
-    absl::hashtablez_sampler
-    absl::raw_hash_set
-    absl::synchronization
-    absl::graphcycles_internal
-    absl::stacktrace
-    absl::symbolize
-    absl::debugging_internal
-    absl::demangle_internal
-    absl::time
-    absl::time_zone
-    absl::int128
-    absl::city
-    absl::hash
-    absl::malloc_internal
-    absl::spinlock_wait
-    absl::base
-    absl::dynamic_annotations
-    absl::raw_logging_internal
-    absl::exponential_biased
-    absl::throw_delegate
-    # System libs
-    libxcrypt::libxcrypt
-    libdeflate::libdeflate
-    ZLIB::ZLIB
-    ICU::uc
-    systemd
-    zstd
-    snappy
-    xxHash::xxhash)
+    Boost::program_options)
 
 # Force SHA1 build-id generation
 set(default_linker_flags "-Wl,--build-id=sha1")

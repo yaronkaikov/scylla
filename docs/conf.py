@@ -16,11 +16,11 @@ sys.path.insert(0, os.path.abspath(".."))
 BASE_URL = 'https://enterprise.docs.scylladb.com'
 # Build documentation for the following tags and branches.
 TAGS = []
-BRANCHES = ["enterprise"]
+BRANCHES = ["enterprise", "branch-2023.1", "branch-2022.2"]
 # Set the latest version.
 LATEST_VERSION = "enterprise"
 # Set which versions are not released yet.
-UNSTABLE_VERSIONS = ["enterprise"]
+UNSTABLE_VERSIONS = ["enterprise", "branch-2023.1]
 # Set which versions are deprecated.
 DEPRECATED_VERSIONS = [""]
 # Set to enterprise or opensource.

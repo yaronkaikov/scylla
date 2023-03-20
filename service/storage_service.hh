@@ -119,6 +119,8 @@ public:
     void cancel_watchdog();
 };
 
+struct node_ops_ctl;
+
 /**
  * This abstraction contains the token/identifier of this node
  * on the identifier space. This token gets gossiped around.
@@ -173,7 +175,7 @@ private:
     future<> node_ops_update_heartbeat(node_ops_id ops_uuid);
     future<> node_ops_done(node_ops_id ops_uuid);
     future<> node_ops_abort(node_ops_id ops_uuid);
-    void node_ops_singal_abort(std::optional<node_ops_id> ops_uuid);
+    void node_ops_signal_abort(std::optional<node_ops_id> ops_uuid);
     future<> node_ops_abort_thread();
 public:
     storage_service(abort_source& as, distributed<replica::database>& db,
@@ -240,6 +242,15 @@ private:
         return _batchlog_manager;
     }
 
+    const gms::gossiper& gossiper() const noexcept {
+        return _gossiper;
+    };
+
+    gms::gossiper& gossiper() noexcept {
+        return _gossiper;
+    };
+
+    friend struct node_ops_ctl;
 public:
 
     locator::effective_replication_map_factory& get_erm_factory() noexcept {
@@ -779,7 +790,7 @@ private:
 private:
     std::unordered_set<gms::inet_address> _normal_state_handled_on_boot;
     bool is_normal_state_handled_on_boot(gms::inet_address);
-    future<> wait_for_normal_state_handled_on_boot(std::list<gms::inet_address> nodes, sstring ops, node_ops_id uuid);
+    future<> wait_for_normal_state_handled_on_boot(const std::unordered_set<gms::inet_address>& nodes, sstring ops, node_ops_id uuid);
 };
 
 }

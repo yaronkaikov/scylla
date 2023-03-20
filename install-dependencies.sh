@@ -47,6 +47,7 @@ debian_base_packages=(
     libzstd-dev
     libdeflate-dev
     libabsl-dev
+    librapidxml-dev
     slapd
     ldap-utils
 )
@@ -106,6 +107,7 @@ fedora_packages=(
     curl
     rust
     cargo
+    rapidxml-devel
 
     moreutils
     iproute
@@ -186,21 +188,25 @@ arch_packages=(
     thrift
 )
 
+go_arch() {
+    declare -A local GO_ARCH=(
+        ["x86_64"]=amd64
+        ["aarch64"]=arm64
+        ["s390x"]=s390x
+    )
+    echo ${GO_ARCH["$(arch)"]}
+}
+
 NODE_EXPORTER_VERSION=1.5.0
 declare -A NODE_EXPORTER_CHECKSUM=(
     ["x86_64"]=af999fd31ab54ed3a34b9f0b10c28e9acee9ef5ac5a5d5edfdde85437db7acbb
     ["aarch64"]=e031a539af9a619c06774788b54c23fccc2a852d41437315725a086ccdb0ed16
     ["s390x"]=fc5be2c18cb5a13de56ae2b8e91d3fabb40bf1ece398be690df1cd5c43008747
 )
-declare -A NODE_EXPORTER_ARCH=(
-    ["x86_64"]=amd64
-    ["aarch64"]=arm64
-    ["s390x"]=s390x
-)
 NODE_EXPORTER_DIR=/opt/scylladb/dependencies
 
 node_exporter_filename() {
-    echo "node_exporter-$NODE_EXPORTER_VERSION.linux-${NODE_EXPORTER_ARCH["$(arch)"]}.tar.gz"
+    echo "node_exporter-$NODE_EXPORTER_VERSION.linux-$(go_arch).tar.gz"
 }
 
 node_exporter_fullpath() {
@@ -213,6 +219,27 @@ node_exporter_checksum() {
 
 node_exporter_url() {
     echo "https://github.com/prometheus/node_exporter/releases/download/v$NODE_EXPORTER_VERSION/$(node_exporter_filename)"
+}
+
+MINIO_BINARIES_DIR=/usr/local/bin
+
+minio_server_url() {
+    echo "https://dl.minio.io/server/minio/release/linux-$(go_arch)/minio"
+}
+
+minio_client_url() {
+    echo "https://dl.min.io/client/mc/release/linux-$(go_arch)/mc"
+}
+
+minio_download_jobs() {
+    cfile=$(mktemp)
+    echo $(curl -s "$(minio_server_url).sha256sum" | cut -f1 -d' ') "${MINIO_BINARIES_DIR}/minio" > $cfile
+    echo $(curl -s "$(minio_client_url).sha256sum" | cut -f1 -d' ') "${MINIO_BINARIES_DIR}/mc" >> $cfile
+    sha256sum -c $cfile | fgrep FAILED | sed \
+        -e 's/:.*$//g' \
+        -e "s#${MINIO_BINARIES_DIR}/minio#$(minio_server_url) -o ${MINIO_BINARIES_DIR}/minio#" \
+        -e "s#${MINIO_BINARIES_DIR}/mc#$(minio_client_url) -o ${MINIO_BINARIES_DIR}/mc#"
+    rm -f ${cfile}
 }
 
 print_usage() {
@@ -361,4 +388,13 @@ elif [ "$ID" == "arch" ]; then
         popd > /dev/null || exit 1
     fi
     echo -e "Configure example:\n\t./configure.py\n\tninja release"
+fi
+
+CURL_ARGS=$(minio_download_jobs)
+if [ ! -z "${CURL_ARGS}" ]; then
+    curl -fSL --remove-on-error --parallel --parallel-immediate ${CURL_ARGS}
+    chmod +x "${MINIO_BINARIES_DIR}/minio"
+    chmod +x "${MINIO_BINARIES_DIR}/mc"
+else
+    echo "Minio server and client are up-to-date, skipping download"
 fi

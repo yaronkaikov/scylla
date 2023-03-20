@@ -39,6 +39,7 @@ target_sources(utils
     rate_limiter.cc
     rjson.cc
     runtime.cc
+    to_string.cc
     updateable_value.cc
     utf8.cc
     uuid.cc)
@@ -51,4 +52,5 @@ target_link_libraries(utils
     Seastar::seastar
     xxHash::xxhash
   PRIVATE
+    Boost::regex
     cryptopp)

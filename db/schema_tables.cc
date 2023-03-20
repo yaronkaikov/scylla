@@ -83,15 +83,21 @@ using namespace std::chrono_literals;
 
 static logging::logger diff_logger("schema_diff");
 
-static bool is_extra_durable(const sstring& ks_name, const sstring& cf_name) {
-    return (is_system_keyspace(ks_name) && db::system_keyspace::is_extra_durable(cf_name))
-        || ((ks_name == db::system_distributed_keyspace::NAME || ks_name == db::system_distributed_keyspace::NAME_EVERYWHERE)
-                && db::system_distributed_keyspace::is_extra_durable(cf_name));
-}
-
 
 /** system.schema_* tables used to store keyspace/table/type attributes prior to C* 3.0 */
 namespace db {
+namespace {
+    const auto set_null_sharder = schema_builder::register_static_configurator([](const sstring& ks_name, const sstring& cf_name, schema_static_props& props) {
+        if (ks_name == schema_tables::NAME) {
+            props.use_null_sharder = true;
+        }
+    });
+    const auto set_use_schema_commitlog = schema_builder::register_static_configurator([](const sstring& ks_name, const sstring& cf_name, schema_static_props& props) {
+        if (ks_name == schema_tables::NAME) {
+            props.use_schema_commitlog = true;
+        }
+    });
+}
 
 schema_ctxt::schema_ctxt(const db::config& cfg, std::shared_ptr<data_dictionary::user_types_storage> uts)
     : _extensions(cfg.extensions())
@@ -247,7 +253,6 @@ schema_ptr keyspaces() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -274,7 +279,6 @@ schema_ptr scylla_keyspaces() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -316,7 +320,6 @@ schema_ptr tables() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -358,7 +361,6 @@ schema_ptr scylla_tables(schema_features features) {
         }
 
         sb.with_version(system_keyspace::generate_schema_version(id, offset));
-        sb.with_null_sharder();
         return sb.build();
     };
     static thread_local std::array<std::array<std::array<schema_ptr, 2>, 2>, 2> schemas = [] {
@@ -410,7 +412,6 @@ static schema_ptr columns_schema(const char* columns_table_name) {
         );
     builder.set_gc_grace_seconds(schema_gc_grace);
     builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-    builder.with_null_sharder();
     return builder.build();
 }
 schema_ptr columns() {
@@ -477,7 +478,6 @@ static schema_ptr computed_columns_schema(const char* columns_table_name) {
         );
     builder.set_gc_grace_seconds(schema_gc_grace);
     builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-    builder.with_null_sharder();
     return builder.build();
 }
 
@@ -507,7 +507,6 @@ schema_ptr dropped_columns() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -533,7 +532,6 @@ schema_ptr triggers() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -578,7 +576,6 @@ schema_ptr views() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -605,7 +602,6 @@ schema_ptr indexes() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -632,7 +628,6 @@ schema_ptr types() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -662,7 +657,6 @@ schema_ptr functions() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -692,7 +686,6 @@ schema_ptr aggregates() {
         );
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -723,7 +716,6 @@ schema_ptr scylla_aggregates() {
         
         builder.set_gc_grace_seconds(schema_gc_grace);
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build();
     }();
     return schema;
@@ -743,7 +735,6 @@ schema_ptr scylla_table_schema_history() {
         builder.set_comment("Scylla specific table to store a history of column mappings "
             "for each table schema version upon an CREATE TABLE/ALTER TABLE operations");
         builder.with_version(system_keyspace::generate_schema_version(builder.uuid()));
-        builder.with_null_sharder();
         return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
@@ -1870,7 +1861,7 @@ static std::vector<data_value> read_arg_values(const query::result_set_row& row)
     }
 #endif
 
-static shared_ptr<cql3::functions::user_function> create_func(replica::database& db, const query::result_set_row& row) {
+static seastar::future<shared_ptr<cql3::functions::user_function>> create_func(replica::database& db, const query::result_set_row& row) {
     cql3::functions::function_name name{
             row.get_nonnull<sstring>("keyspace_name"), row.get_nonnull<sstring>("function_name")};
     auto arg_types = read_arg_types(db, row, name.keyspace);
@@ -1894,13 +1885,13 @@ static shared_ptr<cql3::functions::user_function> create_func(replica::database&
             .cfg = cfg,
         };
 
-        return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
+        co_return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
                 std::move(body), language, std::move(return_type),
                 row.get_nonnull<bool>("called_on_null_input"), std::move(ctx));
     } else if (language == "wasm") {
         wasm::context ctx{db.wasm_engine(), name.name, qctx->qp().get_wasm_instance_cache(), db.get_config().wasm_udf_yield_fuel(), db.get_config().wasm_udf_total_fuel()};
-        wasm::precompile(ctx, arg_names, body);
-        return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
+        co_await wasm::precompile(qctx->qp().alien_runner(), ctx, arg_names, body);
+        co_return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
                 std::move(body), language, std::move(return_type),
                 row.get_nonnull<bool>("called_on_null_input"), std::move(ctx));
     } else {
@@ -1974,9 +1965,9 @@ static void drop_cached_func(replica::database& db, const query::result_set_row&
 static future<> merge_functions(distributed<service::storage_proxy>& proxy, schema_result before, schema_result after) {
     auto diff = diff_rows(before, after);
 
-    co_await proxy.local().get_db().invoke_on_all([&] (replica::database& db) {
+    co_await proxy.local().get_db().invoke_on_all(coroutine::lambda([&] (replica::database& db) -> future<> {
         for (const auto& val : diff.created) {
-            cql3::functions::functions::add_function(create_func(db, *val));
+            cql3::functions::functions::add_function(co_await create_func(db, *val));
         }
         for (const auto& val : diff.dropped) {
             cql3::functions::function_name name{
@@ -1987,9 +1978,9 @@ static future<> merge_functions(distributed<service::storage_proxy>& proxy, sche
         }
         for (const auto& val : diff.altered) {
             drop_cached_func(db, *val);
-            cql3::functions::functions::replace_function(create_func(db, *val));
+            cql3::functions::functions::replace_function(co_await create_func(db, *val));
         }
-    });
+    }));
 }
 
 static future<> merge_aggregates(distributed<service::storage_proxy>& proxy, schema_result before, schema_result after, 
@@ -2190,13 +2181,13 @@ std::vector<user_type> create_types_from_schema_partition(
     return create_types(ks, result->rows());
 }
 
-std::vector<shared_ptr<cql3::functions::user_function>> create_functions_from_schema_partition(
+seastar::future<std::vector<shared_ptr<cql3::functions::user_function>>> create_functions_from_schema_partition(
         replica::database& db, lw_shared_ptr<query::result_set> result) {
     std::vector<shared_ptr<cql3::functions::user_function>> ret;
     for (const auto& row : result->rows()) {
-        ret.emplace_back(create_func(db, row));
+        ret.emplace_back(co_await create_func(db, row));
     }
-    return ret;
+    co_return ret;
 }
 
 std::vector<shared_ptr<cql3::functions::user_aggregate>> create_aggregates_from_schema_partition(
@@ -3041,19 +3032,6 @@ static void prepare_builder_from_table_row(const schema_ctxt& ctxt, schema_build
     }
 }
 
-// tables in the "system" keyspace which need to use null sharder
-static const std::unordered_set<sstring>& system_ks_null_shard_tables() {
-    static const std::unordered_set<sstring> tables = {
-        SCYLLA_TABLE_SCHEMA_HISTORY,
-        db::system_keyspace::RAFT,
-        db::system_keyspace::RAFT_SNAPSHOTS,
-        db::system_keyspace::RAFT_SNAPSHOT_CONFIG,
-        db::system_keyspace::GROUP0_HISTORY,
-        db::system_keyspace::DISCOVERY,
-        db::system_keyspace::BROADCAST_KV_STORE,
-    };
-    return tables;
-}
 
 schema_ptr create_table_from_mutations(const schema_ctxt& ctxt, schema_mutations sm, std::optional<table_schema_version> version)
 {
@@ -3149,17 +3127,6 @@ schema_ptr create_table_from_mutations(const schema_ctxt& ctxt, schema_mutations
     if (auto partitioner = sm.partitioner()) {
         builder.with_partitioner(*partitioner);
         builder.with_sharder(smp::count, ctxt.murmur3_partitioner_ignore_msb_bits());
-    }
-
-    if (ks_name == NAME
-            || (ks_name == db::system_keyspace::NAME
-                && system_ks_null_shard_tables().contains(cf_name))) {
-        // Put every schema table on shard 0.
-        builder.with_null_sharder();
-    }
-
-    if (is_extra_durable(ks_name, cf_name)) {
-        builder.set_wait_for_sync_to_commitlog(true);
     }
 
     return builder.build();

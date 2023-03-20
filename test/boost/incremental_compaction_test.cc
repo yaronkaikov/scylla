@@ -231,7 +231,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
 
         shared_sstable make_sstable_with_size(size_t sstable_data_size) {
             static thread_local unsigned gen = 0;
-            auto sst = _env.make_sstable(_cf->schema(), "", gen++, sstable_version_types::md, big);
+            auto sst = _env.make_sstable(_cf->schema(), "/nowhere/in/particular", gen++, sstable_version_types::md, big);
             auto keys = tests::generate_partition_keys(2, _cf->schema(), local_shard_only::yes);
             sstables::test(sst).set_values(keys[0].key(), keys[1].key(), stats_metadata{}, sstable_data_size);
             return sst;
