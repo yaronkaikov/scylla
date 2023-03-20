@@ -74,7 +74,7 @@ Enabling Raft in ScyllaDB 5.2 and further
   In ScyllaDB 5.3 it will become enabled by default.
   In further versions it will be mandatory.
 
-ScyllaDB 5.2 and later comes equipped with a procedure that can setup Raft-based consistent cluster management in an existing cluster. We refer to this as the **internal Raft upgrade procedure** (do not confuse with the :doc:`ScyllaDB version upgrade procedure </upgrade/upgrade-opensource/upgrade-guide-from-5.1-to-5.2/upgrade-guide-from-5.1-to-5.2-generic>`).
+ScyllaDB 5.2 and later comes equipped with a procedure that can setup Raft-based consistent cluster management in an existing cluster. We refer to this as the **internal Raft upgrade procedure** (do not confuse with the `ScyllaDB version upgrade procedure <https://docs.scylladb.com/master/upgrade/upgrade-opensource/upgrade-guide-from-5.1-to-5.2/upgrade-guide-from-5.1-to-5.2-generic.html>`_).
 
 .. warning::
     Once enabled, Raft cannot be disabled on your cluster. The cluster nodes will fail to restart if you remove the Raft feature.
@@ -91,7 +91,7 @@ To enable Raft in an existing cluster in Scylla 5.2 and beyond:
 When all the nodes in the cluster and updated and restarted, the cluster will start the **internal Raft upgrade procedure**.
 **You must then verify** that the internal Raft upgrade procedure has finished successfully. Refer to the :ref:`next section <verify-raft-procedure>`.
 
-You can also enable the ``consistent_cluster_management`` flag while performing :doc:`rolling upgrade from 5.1 to 5.2 </upgrade/upgrade-opensource/upgrade-guide-from-5.1-to-5.2/upgrade-guide-from-5.1-to-5.2-generic>`: update ``scylla.yaml`` before restarting each node. The internal Raft upgrade procedure will start as soon as the last node was upgraded and restarted. As above, this requires :ref:`verifying <verify-raft-procedure>` that this internal procedure successfully finishes.
+You can also enable the ``consistent_cluster_management`` flag while performing `rolling upgrade from 5.1 to 5.2 <https://docs.scylladb.com/master/upgrade/upgrade-opensource/upgrade-guide-from-5.1-to-5.2/upgrade-guide-from-5.1-to-5.2-generic.html>`_: update ``scylla.yaml`` before restarting each node. The internal Raft upgrade procedure will start as soon as the last node was upgraded and restarted. As above, this requires :ref:`verifying <verify-raft-procedure>` that this internal procedure successfully finishes.
 
 Finally, you can enable the ``consistent_cluster_management`` flag when creating a new cluster. This does not use the internal Raft upgrade procedure; instead, Raft is functioning in the cluster and managing schema right from the start.
 
