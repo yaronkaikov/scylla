@@ -1,27 +1,26 @@
 # -*- coding: utf-8 -*-
 import os
-import sys
 import warnings
 from datetime import date
 
 from sphinx_scylladb_theme.utils import multiversion_regex_builder
 from recommonmark.transform import AutoStructify
-
-sys.path.insert(0, os.path.abspath(".."))
+from redirects_cli import cli as redirects_cli
 
 # -- Global variables
 
 # Set the base URL for the documentation site.
-BASE_URL = 'https://docs.scylladb.com'
+BASE_URL = 'https://enterprise.docs.scylladb.com'
 # Build documentation for the following tags and branches.
 TAGS = []
-BRANCHES = ["master", "branch-5.1", "branch-5.2"]
+BRANCHES = ["enterprise"]
 # Set the latest version.
-LATEST_VERSION = "branch-5.1"
+LATEST_VERSION = "enterprise"
 # Set which versions are not released yet.
-UNSTABLE_VERSIONS = ["master", "branch-5.2"]
+UNSTABLE_VERSIONS = ["enterprise"]
 # Set which versions are deprecated.
 DEPRECATED_VERSIONS = [""]
+# Set to enterprise or opensource.
 
 # -- General configuration ------------------------------------------------
 
@@ -42,21 +41,21 @@ extensions = [
 source_suffix = [".rst", ".md"]
 
 # The master toctree document.
-master_doc = "index"
+master_doc = "overview"
 
 # General information about the project.
-project = "ScyllaDB Open Source"
+project = "ScyllaDB Enterprise"
 copyright = str(date.today().year) + ", ScyllaDB. All rights reserved."
 author = u"ScyllaDB Project Contributors"
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'lib', 'lib64','**/_common/*', 'README.md', 'index.md', '.git', '.github', '_utils', 'rst_include', 'venv', 'dev']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'lib', 'lib64','**/_common/*', 'README.md', 'index.md', '.git', '.github', '_utils', 'rst_include', 'venv', 'dev', 'index.rst', 'upgrade/upgrade-opensource/*']
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = "sphinx"
 
-# List of substitutions
+# List of substitutions.
 rst_prolog = """
 .. |mon_root| replace::  `Scylla Monitoring Stack <https://monitoring.docs.scylladb.com>`__
 .. |cql-version| replace:: 3.3.1
@@ -96,29 +95,20 @@ smv_outputdir_format = "{ref.name}"
 # The theme to use for pages.
 html_theme = "sphinx_scylladb_theme"
 
-# These folders are copied to the documentation's HTML output
-html_static_path = ['_static']
-
-# These paths are either relative to html_static_path
-# or fully qualified paths (eg. https://...)
-html_css_files = [
-    'css/custom.css',
-]
-
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for the theme, see the
 # documentation.
 html_theme_options = {
     "conf_py_path": "docs/",
-    "hide_edit_this_page_button": "false",
+    "hide_edit_this_page_button": "true",
     "github_issues_repository": "scylladb/scylladb",
-    "github_repository": "scylladb/scylladb",
+    "github_repository": "scylladb/scylla-enterprise",
     "versions_unstable": UNSTABLE_VERSIONS,
     "versions_deprecated": DEPRECATED_VERSIONS,
     'banner_button_text': 'Register for Free',
     'banner_button_url': 'https://lp.scylladb.com/university-live-2023-03-registration?siteplacement=docs',
     'banner_title_text': 'ScyllaDB University LIVE, FREE Virtual Training Event | March 21',
-    'hide_banner': 'true',
+    'hide_banner': 'false',
     "collapse_navigation": 'true',
 }
 
@@ -137,6 +127,14 @@ html_baseurl = BASE_URL
 # Dictionary of values to pass into the template engine’s context for all pages
 html_context = {"html_baseurl": html_baseurl}
 
+def build_finished(app, exception):
+    version_name = os.getenv("SPHINX_MULTIVERSION_NAME", "")
+    redirect_to = '/overview/index.html'
+    if version_name:
+        redirect_to = "/" + version_name +'/overview.html'
+    out_file = app.outdir +'/index.html'
+    redirects_cli.create(redirect_to=redirect_to,out_file=out_file)
+
 
 # -- Initialize Sphinx ----------------------------------------------
 def setup(sphinx):
@@ -149,3 +147,6 @@ def setup(sphinx):
         'enable_eval_rst': True,
     }, True)
     sphinx.add_transform(AutoStructify)
+
+    # Redirect index.html to overview.html
+    sphinx.connect('build-finished', build_finished)
