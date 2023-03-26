@@ -1438,7 +1438,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             supervisor::notify("starting storage service", true);
-            ss.local().init_messaging_service_part().get();
+            ss.local().init_messaging_service_part(proxy, sys_dist_ks).get();
             auto stop_ss_msg = defer_verbose_shutdown("storage service messaging", [&ss] {
                 ss.local().uninit_messaging_service_part().get();
             });
@@ -1500,7 +1500,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             service::raft_group0 group0_service{
                     stop_signal.as_local_abort_source(), raft_gr.local(), messaging,
-                    gossiper.local(), qp.local(), mm.local(), feature_service.local(), sys_ks.local(), group0_client};
+                    gossiper.local(), qp.local(), mm.local(), feature_service.local(), sys_ks.local(), group0_client, ss.local()};
             group0_service.start().get();
             auto stop_group0_service = defer_verbose_shutdown("group 0 service", [&group0_service] {
                 group0_service.abort().get();
@@ -1654,7 +1654,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 audit::audit::stop_audit().get();
             });
 
-            cql_transport::controller cql_server_ctl(auth_service, mm_notifier, gossiper, qp, service_memory_limiter, sl_controller, lifecycle_notifier, *cfg);
+            scheduling_group_key_config cql_sg_stats_cfg = make_scheduling_group_key_config<cql_transport::cql_sg_stats>();
+            cql_transport::controller cql_server_ctl(auth_service, mm_notifier, gossiper, qp, service_memory_limiter, sl_controller, lifecycle_notifier, *cfg, scheduling_group_key_create(cql_sg_stats_cfg).get0());
 
             ss.local().register_protocol_server(cql_server_ctl);
 

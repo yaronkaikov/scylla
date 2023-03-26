@@ -1089,7 +1089,7 @@ BOOST_AUTO_TEST_CASE(test_empty_configuration) {
 
     server_id id1 = id();
 
-    raft::configuration cfg({});
+    raft::configuration cfg{config_member_set()};
     raft::log log(raft::snapshot_descriptor{.idx = index_t{0}, .config = cfg});
     auto follower = create_follower(id1, std::move(log));
     // Initial state is follower
@@ -1107,7 +1107,7 @@ BOOST_AUTO_TEST_CASE(test_empty_configuration) {
     election_timeout(leader);
     BOOST_CHECK(leader.is_leader());
     // Transitioning to an empty configuration is not supported.
-    BOOST_CHECK_THROW(leader.add_entry(raft::configuration({})), std::invalid_argument);
+    BOOST_CHECK_THROW(leader.add_entry(raft::configuration{config_member_set()}), std::invalid_argument);
     leader.add_entry(config_from_ids({id1, id2}));
 
     communicate(leader, follower);
@@ -2317,4 +2317,42 @@ BOOST_AUTO_TEST_CASE(test_ping_leader) {
     C.tick();
     communicate(A, B, C);
     BOOST_CHECK(C.current_leader());
+}
+
+BOOST_AUTO_TEST_CASE(test_state_change_notifications) {
+    discrete_failure_detector fd;
+
+    server_id id1 = id(), id2 = id();
+
+    raft::configuration cfg(raft::config_member_set{raft::config_member{server_addr_from_id(id1), true},
+                                                    raft::config_member{server_addr_from_id(id2), true}});
+    raft::log log{raft::snapshot_descriptor{.config = cfg}};
+
+    auto fsm = create_follower(id1, std::move(log), fd);
+
+    // Initial state is follower
+    BOOST_CHECK(fsm.is_follower());
+
+    // After election timeout, a follower becomes a candidate
+    election_timeout(fsm);
+    BOOST_CHECK(fsm.is_candidate());
+
+    // Check that state transition was notified
+    auto output = fsm.get_output();
+    BOOST_CHECK(output.state_changed);
+
+    // If nothing happens, the candidate stays this way
+    election_timeout(fsm);
+    BOOST_CHECK(fsm.is_candidate());
+
+    // Check that no state transition is notified
+    output = fsm.get_output();
+    BOOST_CHECK(!output.state_changed);
+
+    // After a favourable reply, we become a leader (quorum is 2)
+    fsm.step(id2, raft::vote_reply{output.term_and_vote->first, true});
+    // Check that state transition is notified again
+    output = fsm.get_output();
+    BOOST_CHECK(output.state_changed);
+    BOOST_CHECK(fsm.is_leader());
 }

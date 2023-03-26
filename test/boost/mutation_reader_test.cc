@@ -21,7 +21,6 @@
 #include <seastar/testing/thread_test_case.hh>
 #include "test/lib/mutation_assertions.hh"
 #include "test/lib/flat_mutation_reader_assertions.hh"
-#include "test/lib/tmpdir.hh"
 #include "test/lib/sstable_utils.hh"
 #include "test/lib/simple_schema.hh"
 #include "test/lib/mutation_source_test.hh"
@@ -670,29 +669,6 @@ SEASTAR_THREAD_TEST_CASE(test_sm_fast_forwarding_combining_reader_with_galloping
     assertions.produces_end_of_stream();
 }
 
-struct sst_factory {
-    sstables::test_env& env;
-    schema_ptr s;
-    sstring path;
-    unsigned gen;
-    uint32_t level;
-
-    sst_factory(sstables::test_env& env, schema_ptr s, const sstring& path, unsigned gen, int level)
-        : env(env)
-        , s(s)
-        , path(path)
-        , gen(gen)
-        , level(level)
-    {}
-
-    sstables::shared_sstable operator()() {
-        auto sst = env.make_sstable(s, path, gen);
-        sst->set_sstable_level(level);
-
-        return sst;
-    }
-};
-
 SEASTAR_TEST_CASE(combined_mutation_reader_test) {
   return sstables::test_env::do_with_async([] (sstables::test_env& env) {
     simple_schema s;
@@ -733,15 +709,18 @@ SEASTAR_TEST_CASE(combined_mutation_reader_test) {
     const mutation expexted_mutation_4 = sstable_level_0_0_mutations[2] + sstable_level_2_0_mutations[1];
     const mutation expexted_mutation_5 = sstable_level_2_1_mutations[0];
 
-    auto tmp = tmpdir();
+    auto sst_factory = [&, s = s.schema()] (uint32_t level) {
+        auto sst = env.make_sstable(s);
+        sst->set_sstable_level(level);
+        return sst;
+    };
 
-    unsigned gen{0};
     std::vector<sstables::shared_sstable> sstable_list = {
-            make_sstable_containing(sst_factory(env, s.schema(), tmp.path().string(), ++gen, 0), std::move(sstable_level_0_0_mutations)),
-            make_sstable_containing(sst_factory(env, s.schema(), tmp.path().string(), ++gen, 1), std::move(sstable_level_1_0_mutations)),
-            make_sstable_containing(sst_factory(env, s.schema(), tmp.path().string(), ++gen, 1), std::move(sstable_level_1_1_mutations)),
-            make_sstable_containing(sst_factory(env, s.schema(), tmp.path().string(), ++gen, 2), std::move(sstable_level_2_0_mutations)),
-            make_sstable_containing(sst_factory(env, s.schema(), tmp.path().string(), ++gen, 2), std::move(sstable_level_2_1_mutations)),
+            make_sstable_containing(sst_factory(0), std::move(sstable_level_0_0_mutations)),
+            make_sstable_containing(sst_factory(1), std::move(sstable_level_1_0_mutations)),
+            make_sstable_containing(sst_factory(1), std::move(sstable_level_1_1_mutations)),
+            make_sstable_containing(sst_factory(2), std::move(sstable_level_2_0_mutations)),
+            make_sstable_containing(sst_factory(2), std::move(sstable_level_2_1_mutations)),
     };
 
     auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::leveled, {});
@@ -1000,10 +979,8 @@ SEASTAR_TEST_CASE(reader_selector_fast_forwarding_test) {
 
 static
 sstables::shared_sstable create_sstable(sstables::test_env& env, schema_ptr s, std::vector<mutation> mutations) {
-    static thread_local auto tmp = tmpdir();
-    static int gen = 0;
     return make_sstable_containing([&] {
-        return env.make_sstable(s, tmp.path().string(), gen++);
+        return env.make_sstable(s);
     }, mutations);
 }
 
@@ -2944,7 +2921,7 @@ SEASTAR_THREAD_TEST_CASE(test_evictable_reader_self_validation) {
     reader_concurrency_semaphore semaphore(reader_concurrency_semaphore::no_limits{}, get_name());
     auto stop_sem = deferred_stop(semaphore);
     simple_schema s;
-    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout);
+    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout, {});
 
     auto pkeys = s.make_pkeys(4);
     std::ranges::sort(pkeys, dht::decorated_key::less_comparator(s.schema()));
@@ -3222,7 +3199,7 @@ SEASTAR_THREAD_TEST_CASE(test_evictable_reader_recreate_before_fast_forward_to) 
     reader_concurrency_semaphore semaphore(reader_concurrency_semaphore::no_limits{}, get_name());
     auto stop_sem = deferred_stop(semaphore);
     simple_schema s;
-    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout);
+    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout, {});
     auto pkeys = s.make_pkeys(6);
     boost::sort(pkeys, dht::decorated_key::less_comparator(s.schema()));
 
@@ -3273,7 +3250,7 @@ SEASTAR_THREAD_TEST_CASE(test_evictable_reader_drop_flags) {
     reader_concurrency_semaphore semaphore(reader_concurrency_semaphore::for_tests{}, get_name(), 1, 0);
     auto stop_sem = deferred_stop(semaphore);
     simple_schema s;
-    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout);
+    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout, {});
 
     auto pkeys = s.make_pkeys(2);
     std::sort(pkeys.begin(), pkeys.end(), [&s] (const auto& pk1, const auto& pk2) {
@@ -3500,7 +3477,7 @@ SEASTAR_THREAD_TEST_CASE(test_evictable_reader_non_monotonic_positions) {
     auto stop_sem = deferred_stop(semaphore);
     simple_schema s;
     auto schema = s.schema();
-    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout);
+    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout, {});
 
     auto pkey = s.make_pkey();
     const auto prange = dht::partition_range::make_open_ended_both_sides();
@@ -3559,7 +3536,7 @@ SEASTAR_THREAD_TEST_CASE(test_evictable_reader_clear_tombstone_in_discontinued_p
     auto stop_sem = deferred_stop(semaphore);
     simple_schema s;
     auto schema = s.schema();
-    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout);
+    auto permit = semaphore.make_tracking_only_permit(s.schema().get(), get_name(), db::no_timeout, {});
 
     auto pkeys = s.make_pkeys(2);
     std::sort(pkeys.begin(), pkeys.end(), [&s] (const auto& pk1, const auto& pk2) {
@@ -3876,19 +3853,15 @@ static future<> do_test_clustering_order_merger_sstable_set(bool reversed) {
             }
         }
 
-        auto tmp = tmpdir();
         time_series_sstable_set sst_set(table_schema);
         mutation merged(table_schema, g._pk);
         std::unordered_set<int64_t> included_gens;
-        int64_t gen = 0;
+        auto sst_factory = env.make_sst_factory(table_schema);
         for (auto& mb: scenario.readers_data) {
-            auto sst_factory = [table_schema, &env, &tmp, gen = ++gen] () {
-                return env.make_sstable(std::move(table_schema), tmp.path().string(), gen,
-                    sstables::sstable::version_types::md, sstables::sstable::format_types::big);
-            };
-
+            sstables::shared_sstable sst;
             if (mb.m) {
-                sst_set.insert(make_sstable_containing(std::move(sst_factory), {*mb.m}));
+                sst = make_sstable_containing(sst_factory, {*mb.m});
+                sst_set.insert(sst);
             } else {
                 // We want to have an sstable that won't return any fragments when we query it
                 // for our partition (not even `partition_start`). For that we create an sstable
@@ -3896,11 +3869,12 @@ static future<> do_test_clustering_order_merger_sstable_set(bool reversed) {
                 auto pk = pkeys[1];
                 assert(!pk.equal(*g._s, g._pk));
 
-                sst_set.insert(make_sstable_containing(std::move(sst_factory), {mutation(table_schema, pk)}));
+                sst = make_sstable_containing(sst_factory, {mutation(table_schema, pk)});
+                sst_set.insert(sst);
             }
 
             if (dist(engine)) {
-                included_gens.insert(gen);
+                included_gens.insert(sst->generation().value());
                 if (mb.m) {
                     merged += *mb.m;
                 }

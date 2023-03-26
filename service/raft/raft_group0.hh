@@ -22,6 +22,7 @@ namespace service {
 
 class migration_manager;
 class raft_group0_client;
+class storage_service;
 
 // Wrapper for `discovery` which persists the learned peers on disk.
 class persistent_discovery {
@@ -74,6 +75,7 @@ class raft_group0 {
     gms::feature_service& _feat;
     db::system_keyspace& _sys_ks;
     raft_group0_client& _client;
+    service::storage_service& _ss;
 
     // Status of leader discovery. Initially there is no group 0,
     // and the variant contains no state. During initial cluster
@@ -111,7 +113,8 @@ public:
         migration_manager& mm,
         gms::feature_service& feat,
         db::system_keyspace& sys_ks,
-        raft_group0_client& client);
+        raft_group0_client& client,
+        storage_service& ss);
 
     // Initialises RPC verbs on all shards.
     // Call after construction but before using the object.
@@ -209,6 +212,22 @@ public:
     // The returned ID is not empty.
     const raft::server_id& load_my_id();
 
+    // Remove the node from raft config, retries raft::commit_status_unknown.
+    // The function can only be called after wait_for_raft() successfully
+    // completes and current state of group0 is not RECOVERY.
+    future<> remove_from_raft_config(raft::server_id id);
+
+    raft_group0_client& client() {
+        return _client;
+    }
+
+    // Return an instance of group 0. Valid only on shard 0,
+    // after boot/upgrade is complete
+    raft::server& group0_server() {
+        return _raft_gr.group0();
+    }
+
+    const raft_address_map& address_map() const;
 private:
     static void init_rpc_verbs(raft_group0& shard0_this);
     static future<> uninit_rpc_verbs(netw::messaging_service& ms);
@@ -285,9 +304,6 @@ private:
     // Make the given server a non-voter in Raft group 0 configuration.
     // Retries on raft::commit_status_unknown.
     future<> make_raft_config_nonvoter(raft::server_id);
-
-    // Remove the node from raft config, retries raft::commit_status_unknown.
-    future<> remove_from_raft_config(raft::server_id id);
 
     // Load the initial Raft <-> IP address map as seen by
     // the gossiper.

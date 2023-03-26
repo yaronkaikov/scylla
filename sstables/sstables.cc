@@ -7,6 +7,7 @@
  */
 
 #include "log.hh"
+#include <concepts>
 #include <vector>
 #include <typeinfo>
 #include <limits>
@@ -187,23 +188,23 @@ future<file> sstable::new_sstable_component_file(const io_error_handler& error_h
   }
 }
 
-const std::unordered_map<sstable::version_types, sstring, enum_hash<sstable::version_types>> sstable::_version_string = {
-    { sstable::version_types::ka , "ka" },
-    { sstable::version_types::la , "la" },
-    { sstable::version_types::mc , "mc" },
-    { sstable::version_types::md , "md" },
-    { sstable::version_types::me , "me" },
+const std::unordered_map<sstable_version_types, sstring, enum_hash<sstable_version_types>> version_string = {
+    { sstable_version_types::ka , "ka" },
+    { sstable_version_types::la , "la" },
+    { sstable_version_types::mc , "mc" },
+    { sstable_version_types::md , "md" },
+    { sstable_version_types::me , "me" },
 };
 
-const std::unordered_map<sstable::format_types, sstring, enum_hash<sstable::format_types>> sstable::_format_string = {
-    { sstable::format_types::big , "big" }
+const std::unordered_map<sstable_format_types, sstring, enum_hash<sstable_format_types>> format_string = {
+    { sstable_format_types::big , "big" }
 };
 
 // This assumes that the mappings are small enough, and called unfrequent
 // enough.  If that changes, it would be adviseable to create a full static
 // reverse mapping, even if it is done at runtime.
-template <typename Map>
-static typename Map::key_type reverse_map(const typename Map::mapped_type& v, const Map& map) {
+template <typename Map, std::equality_comparable_with<typename Map::mapped_type> Value>
+static typename Map::key_type reverse_map(const Value& v, const Map& map) {
     for (auto& [key, value]: map) {
         if (value == v) {
             return key;
@@ -1289,7 +1290,7 @@ future<> sstable::load_first_and_last_position_in_partition() {
     }
 
     auto& sem = _manager.sstable_metadata_concurrency_sem();
-    reader_permit permit = co_await sem.obtain_permit(&*_schema, "sstable::load_first_and_last_position_range", sstable_buffer_size, db::no_timeout);
+    reader_permit permit = co_await sem.obtain_permit(&*_schema, "sstable::load_first_and_last_position_range", sstable_buffer_size, db::no_timeout, {});
     auto first_pos_opt = co_await find_first_position_in_partition(permit, get_first_decorated_key(), false);
     auto last_pos_opt = co_await find_first_position_in_partition(permit, get_last_decorated_key(), true);
 
@@ -1886,7 +1887,7 @@ future<> sstable::generate_summary(const io_priority_class& pc) {
 
         auto s = summary_generator(_schema->get_partitioner(), _components->summary, _manager.config().sstable_summary_ratio());
             auto ctx = make_lw_shared<index_consume_entry_context<summary_generator>>(
-                    *this, sem.make_tracking_only_permit(_schema.get(), "generate-summary", db::no_timeout), s, trust_promoted_index::yes,
+                    *this, sem.make_tracking_only_permit(_schema.get(), "generate-summary", db::no_timeout, {}), s, trust_promoted_index::yes,
                     make_file_input_stream(index_file, 0, index_size, std::move(options)), 0, index_size,
                     (_version >= sstable_version_types::mc
                         ? std::make_optional(get_clustering_values_fixed_lengths(get_serialization_header()))
@@ -2037,9 +2038,9 @@ bool sstable::is_uploaded() const noexcept {
 
 sstring sstable::component_basename(const sstring& ks, const sstring& cf, version_types version, generation_type generation,
                                     format_types format, sstring component) {
-    sstring v = _version_string.at(version);
+    sstring v = fmt::to_string(version);
     sstring g = to_sstring(generation);
-    sstring f = _format_string.at(format);
+    sstring f = fmt::to_string(format);
     switch (version) {
     case sstable::version_types::ka:
         return ks + "-" + cf + "-" + v + "-" + g + "-" + component;
@@ -2396,7 +2397,7 @@ static entry_descriptor make_entry_descriptor(sstring sstdir, sstring fname, sst
                 throw malformed_sstable_exception(seastar::format("invalid path for file {}: {}. Path doesn't match known pattern.", fname, sstdir));
             }
         }
-        version = from_string(match[1].str());
+        version = version_from_string(match[1].str());
         generation = match[2].str();
         format = sstring(match[3].str());
         component = sstring(match[4].str());
@@ -2412,7 +2413,7 @@ static entry_descriptor make_entry_descriptor(sstring sstdir, sstring fname, sst
     } else {
         throw malformed_sstable_exception(seastar::format("invalid version for file {}. Name doesn't match any known version.", fname));
     }
-    return entry_descriptor(sstdir, ks, cf, generation_from_value(boost::lexical_cast<unsigned long>(generation)), version, sstable::format_from_sstring(format), sstable::component_from_sstring(version, component));
+    return entry_descriptor(sstdir, ks, cf, generation_from_value(boost::lexical_cast<unsigned long>(generation)), version, format_from_string(format), sstable::component_from_sstring(version, component));
 }
 
 entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname) {
@@ -2423,19 +2424,19 @@ entry_descriptor entry_descriptor::make_descriptor(sstring sstdir, sstring fname
     return make_entry_descriptor(std::move(sstdir), std::move(fname), &ks, &cf);
 }
 
-sstable::version_types sstable::version_from_sstring(const sstring &s) {
+sstable_version_types version_from_string(std::string_view s) {
     try {
-        return reverse_map(s, _version_string);
+        return reverse_map(s, version_string);
     } catch (std::out_of_range&) {
-        throw std::out_of_range(seastar::format("Unknown sstable version: {}", s.c_str()));
+        throw std::out_of_range(seastar::format("Unknown sstable version: {}", s));
     }
 }
 
-sstable::format_types sstable::format_from_sstring(const sstring &s) {
+sstable_format_types format_from_string(std::string_view s) {
     try {
-        return reverse_map(s, _format_string);
+        return reverse_map(s, format_string);
     } catch (std::out_of_range&) {
-        throw std::out_of_range(seastar::format("Unknown sstable format: {}", s.c_str()));
+        throw std::out_of_range(seastar::format("Unknown sstable format: {}", s));
     }
 }
 
@@ -3030,7 +3031,7 @@ future<bool> sstable::has_partition_key(const utils::hashed_key& hk, const dht::
     std::exception_ptr ex;
     auto sem = reader_concurrency_semaphore(reader_concurrency_semaphore::no_limits{}, "sstables::has_partition_key()");
     try {
-        auto lh_index_ptr = std::make_unique<sstables::index_reader>(s, sem.make_tracking_only_permit(_schema.get(), s->get_filename(), db::no_timeout), default_priority_class(), tracing::trace_state_ptr(), use_caching::yes);
+        auto lh_index_ptr = std::make_unique<sstables::index_reader>(s, sem.make_tracking_only_permit(_schema.get(), s->get_filename(), db::no_timeout, {}), default_priority_class(), tracing::trace_state_ptr(), use_caching::yes);
         present = co_await lh_index_ptr->advance_lower_and_check_if_present(dk);
     } catch (...) {
         ex = std::current_exception();

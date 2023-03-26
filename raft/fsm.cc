@@ -160,6 +160,7 @@ void fsm::reset_election_timeout() {
 
 void fsm::become_leader() {
     assert(!std::holds_alternative<leader>(_state));
+    _output.state_changed = true;
     _state.emplace<leader>(_config.max_log_size, *this);
 
     // The semaphore is not used on the follower, so the limit could
@@ -193,6 +194,9 @@ void fsm::become_follower(server_id leader) {
     if (leader == _my_id) {
         on_internal_error(logger, "fsm cannot become a follower of itself");
     }
+    if (!std::holds_alternative<follower>(_state)) {
+        _output.state_changed = true;
+    }
     // Note that current state should be destroyed only after the new one is
     // assigned. The exchange here guarantis that.
     std::exchange(_state, follower{.current_leader = leader});
@@ -203,6 +207,9 @@ void fsm::become_follower(server_id leader) {
 }
 
 void fsm::become_candidate(bool is_prevote, bool is_leadership_transfer) {
+    if (!std::holds_alternative<candidate>(_state)) {
+        _output.state_changed = true;
+    }
     // When starting a campain we need to reset current leader otherwise
     // disruptive server prevention will stall an election if quorum of nodes
     // start election together since each one will ignore vote requests from others
@@ -304,7 +311,7 @@ future<fsm_output> fsm::poll_output() {
         auto diff = _log.last_idx() - _log.stable_idx();
 
         if (diff > 0 || !_messages.empty() || !_observed.is_equal(*this) || _output.max_read_id_with_quorum ||
-                (is_leader() && leader_state().last_read_id_changed) || _output.snp || !_output.snps_to_drop.empty()) {
+                (is_leader() && leader_state().last_read_id_changed) || _output.snp || !_output.snps_to_drop.empty() || _output.state_changed) {
             break;
         }
         co_await _sm_events.wait();
@@ -1136,45 +1143,35 @@ void fsm::stop() {
 }
 
 std::ostream& operator<<(std::ostream& os, const fsm& f) {
-    os << "current term: " << f._current_term << ", ";
-    os << "current leader: " << f.current_leader() << ", ";
-    os << "len messages: " << f._messages.size() << ", ";
-    os << "voted for: " << f._voted_for << ", ";
-    os << "commit idx:" << f._commit_idx << ", ";
-    // os << "last applied: " << f._last_applied << ", ";
-    os << "log (" << f._log << "), ";
-    os << "observed (current term: " << f._observed._current_term << ", ";
-    os << "voted for: " << f._observed._voted_for << ", ";
-    os << "commit index: " << f._observed._commit_idx << "), ";
-    os << "current time: " << f._clock.now() << ", ";
-    os << "last election time: " << f._last_election_time << ", ";
+    fmt::print(os, "current term: {}, current leader: {}, len messages: {}, voted_for: {}, commit idx: {}, log ({}), ",
+               f._current_term, f.current_leader(), f._messages.size(), f._voted_for, f._commit_idx, f._log);
+    fmt::print(os, "observed (current term: {}, voted for {}, commit index: {}), ",
+               f._observed._current_term, f._observed._voted_for, f._observed._commit_idx);
+    fmt::print(os, "current time: {}, last election time: {}, ",
+               f._clock.now(), f._last_election_time);
     if (f.is_candidate()) {
-        os << "votes (" << f.candidate_state().votes << "), ";
+        fmt::print(os, "votes ({}), ", f.candidate_state().votes);
     }
-    os << "messages: " << f._messages.size() << ", ";
-
+    fmt::print(os, "messages: {}, ", f._messages.size());
     if (std::holds_alternative<leader>(f._state)) {
-        os << "leader, ";
+        fmt::print(os, "leader, ");
     } else if (std::holds_alternative<candidate>(f._state)) {
-        os << "candidate";
+        fmt::print(os, "candidate");
     } else if (std::holds_alternative<follower>(f._state)) {
-        os << "follower";
+        fmt::print(os, "follower");
     }
     if (f.is_leader()) {
-        os << "followers (";
+        fmt::print(os, "followers (");
         for (const auto& [server_id, follower_progress]: f.leader_state().tracker) {
-            os << server_id << ", ";
-            os << follower_progress.next_idx << ", ";
-            os << follower_progress.match_idx << ", ";
+            fmt::print(os, "{}, {}, {}, ", server_id, follower_progress.next_idx, follower_progress.match_idx);
             if (follower_progress.state == follower_progress::state::PROBE) {
-                os << "PROBE, ";
+                fmt::print(os, "PROBE, ");
             } else if (follower_progress.state == follower_progress::state::PIPELINE) {
-                os << "PIPELINE, ";
+                fmt::print(os, "PIPELINE, ");
             }
-            os << follower_progress.in_flight;
-            os << "; ";
+            fmt::print(os, "{}; ", follower_progress.in_flight);
         }
-        os << ")";
+        fmt::print(os, ")");
 
     }
     return os;

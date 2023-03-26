@@ -84,7 +84,7 @@ public:
         return table().get_compaction_strategy();
     }
     reader_permit make_compaction_reader_permit() const override {
-        return _data.semaphore.make_tracking_only_permit(&*schema(), "table_for_tests::table_state", db::no_timeout);
+        return _data.semaphore.make_tracking_only_permit(&*schema(), "table_for_tests::table_state", db::no_timeout, {});
     }
     sstables::sstables_manager& get_sstables_manager() noexcept override {
         return _sstables_manager;
@@ -116,7 +116,7 @@ public:
 table_for_tests::table_for_tests(sstables::sstables_manager& sstables_manager, schema_ptr s, std::optional<sstring> datadir)
     : _data(make_lw_shared<data>())
 {
-    _data->s = s;
+    _data->s = s ? s : make_default_schema();
     _data->cfg = replica::table::config{.compaction_concurrency_semaphore = &_data->semaphore};
     _data->cfg.enable_disk_writes = bool(datadir);
     _data->cfg.datadir = datadir.value_or(sstring());
@@ -144,6 +144,7 @@ namespace sstables {
 std::unique_ptr<db::config> make_db_config(sstring temp_dir) {
     auto cfg = std::make_unique<db::config>();
     cfg->data_file_directories.set({ temp_dir });
+    cfg->host_id = locator::host_id::create_random_id();
     return cfg;
 }
 

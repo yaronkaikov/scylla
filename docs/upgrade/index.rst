@@ -9,6 +9,7 @@ Upgrade ScyllaDB
    ScyllaDB Enterprise <upgrade-enterprise/index>
    ScyllaDB Open Source to ScyllaDB Enterprise <upgrade-to-enterprise/index>
    ScyllaDB AMI <ami-upgrade>
+   ScyllaDB Enterprise <https://enterprise.docs.scylladb.com/enterprise/upgrade/upgrade-enterprise/index.html>
 
 Overview
 ---------
@@ -45,6 +46,8 @@ Procedures for Upgrading ScyllaDB
 * :doc:`Upgrade from ScyllaDB Open Source to Scylla Enterprise <upgrade-to-enterprise/index>`
 
 * :doc:`Upgrade ScyllaDB AMI <ami-upgrade>`
+
+* `Upgrade ScyllaDB Enterprise <https://enterprise.docs.scylladb.com/enterprise/upgrade/upgrade-enterprise/index.html>`_
 
 
 

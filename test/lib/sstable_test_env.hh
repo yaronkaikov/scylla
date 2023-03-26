@@ -18,6 +18,7 @@
 #include "gms/feature_service.hh"
 #include "sstables/version.hh"
 #include "sstables/sstable_directory.hh"
+
 #include "test/lib/tmpdir.hh"
 #include "test/lib/test_services.hh"
 #include "test/lib/log.hh"
@@ -50,16 +51,20 @@ class test_env {
         tmpdir dir;
         std::unique_ptr<db::config> db_config;
         directory_semaphore dir_sem;
-        cache_tracker cache_tracker;
+        ::cache_tracker cache_tracker;
         gms::feature_service feature_service;
         db::nop_large_data_handler nop_ld_handler;
         test_env_sstables_manager mgr;
         reader_concurrency_semaphore semaphore;
-        unsigned generation = 1;
+        unsigned long generation = 1;
 
         impl(test_env_config cfg);
         impl(impl&&) = delete;
         impl(const impl&) = delete;
+
+        unsigned long new_generation() noexcept {
+            return generation++;
+        }
     };
     std::unique_ptr<impl> _impl;
 public:
@@ -72,10 +77,24 @@ public:
         });
     }
 
-    shared_sstable make_sstable(schema_ptr schema, sstring dir, unsigned long generation,
+    unsigned long new_generation() noexcept {
+        return _impl->new_generation();
+    }
+
+    shared_sstable make_sstable(schema_ptr schema, sstring dir, sstables::generation_type generation,
             sstable::version_types v = sstables::get_highest_sstable_version(), sstable::format_types f = sstable::format_types::big,
             size_t buffer_size = default_sstable_buffer_size, gc_clock::time_point now = gc_clock::now()) {
-        return _impl->mgr.make_sstable(std::move(schema), dir, generation_from_value(generation), v, f, now, default_io_error_handler_gen(), buffer_size);
+        return _impl->mgr.make_sstable(std::move(schema), dir, generation, v, f, now, default_io_error_handler_gen(), buffer_size);
+    }
+
+    shared_sstable make_sstable(schema_ptr schema, sstring dir, unsigned long gen_value,
+            sstable::version_types v = sstables::get_highest_sstable_version(), sstable::format_types f = sstable::format_types::big,
+            size_t buffer_size = default_sstable_buffer_size, gc_clock::time_point now = gc_clock::now()) {
+        return make_sstable(std::move(schema), std::move(dir), generation_from_value(gen_value), v, f, buffer_size, now);
+    }
+
+    shared_sstable make_sstable(schema_ptr schema, sstring dir, sstable::version_types v = sstables::get_highest_sstable_version()) {
+        return make_sstable(std::move(schema), std::move(dir), _impl->generation++, std::move(v));
     }
 
     shared_sstable make_sstable(schema_ptr schema, unsigned long generation,
@@ -86,6 +105,23 @@ public:
 
     shared_sstable make_sstable(schema_ptr schema, sstable::version_types v = sstables::get_highest_sstable_version()) {
         return make_sstable(std::move(schema), _impl->generation++, std::move(v));
+    }
+
+    shared_sstable make_sstable(schema_ptr schema, unsigned long gen_value, sstable::version_types v, size_t buffer_size,
+            gc_clock::time_point now = gc_clock::now()) {
+        return make_sstable(std::move(schema), gen_value, v, sstable::format_types::big, buffer_size, now);
+    }
+
+    std::function<shared_sstable()> make_sst_factory(schema_ptr s) {
+        return [this, s = std::move(s)] {
+            return make_sstable(s, new_generation());
+        };
+    }
+
+    std::function<shared_sstable()> make_sst_factory(schema_ptr s, sstable::version_types version) {
+        return [this, s = std::move(s), version] {
+            return make_sstable(s, new_generation(), version);
+        };
     }
 
     struct sst_not_found : public std::runtime_error {
@@ -121,16 +157,24 @@ public:
         return reusable_sst(std::move(schema), _impl->dir.path().native(), generation);
     }
 
+    future<shared_sstable> reusable_sst(schema_ptr schema, shared_sstable sst) {
+        return reusable_sst(std::move(schema), sst->get_storage().prefix(), sst->generation().value(), sst->get_version());
+    }
+
+    future<shared_sstable> reusable_sst(shared_sstable sst) {
+        return reusable_sst(sst->get_schema(), std::move(sst));
+    }
+
     test_env_sstables_manager& manager() { return _impl->mgr; }
     reader_concurrency_semaphore& semaphore() { return _impl->semaphore; }
     db::config& db_config() { return *_impl->db_config; }
     tmpdir& tempdir() noexcept { return _impl->dir; }
 
     reader_permit make_reader_permit(const schema* const s, const char* n, db::timeout_clock::time_point timeout) {
-        return _impl->semaphore.make_tracking_only_permit(s, n, timeout);
+        return _impl->semaphore.make_tracking_only_permit(s, n, timeout, {});
     }
     reader_permit make_reader_permit(db::timeout_clock::time_point timeout = db::no_timeout) {
-        return _impl->semaphore.make_tracking_only_permit(nullptr, "test", timeout);
+        return _impl->semaphore.make_tracking_only_permit(nullptr, "test", timeout, {});
     }
 
     replica::table::config make_table_config() {
@@ -170,6 +214,14 @@ public:
             auto stop = defer([&] { env.stop().get(); });
             return func(env);
         });
+    }
+
+    table_for_tests make_table_for_tests(schema_ptr s, sstring dir) {
+        return table_for_tests(manager(), s, std::move(dir));
+    }
+
+    table_for_tests make_table_for_tests(schema_ptr s = nullptr) {
+        return table_for_tests(manager(), s, tempdir().path().native());
     }
 };
 

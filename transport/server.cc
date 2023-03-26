@@ -72,6 +72,22 @@ namespace cql_transport {
 
 static logging::logger clogger("cql_server");
 
+/**
+ * Skip registering CQL metrics for these SGs - these are internal scheduling groups that are not supposed to handle CQL
+ * requests.
+ */
+static const std::vector<sstring> non_cql_scheduling_classes_names = {
+        "atexit",
+        "background_reclaim",
+        "compaction",
+        "gossip",
+        "main",
+        "mem_compaction",
+        "memtable",
+        "memtable_to_cache",
+        "streaming"
+};
+
 struct cql_frame_error : std::exception {
     const char* what() const throw () override {
         return "bad cql binary frame";
@@ -127,6 +143,7 @@ sstring to_string(cql_binary_opcode op) {
     case cql_binary_opcode::AUTH_SUCCESS:   return "AUTH_SUCCESS";
     case cql_binary_opcode::OPCODES_COUNT:  return "OPCODES_COUNT";
     }
+    return format("Unknown CQL binary opcode {}", static_cast<unsigned>(op));
 }
 
 sstring to_string(const event::status_change::status_type t) {
@@ -171,9 +188,50 @@ event::event_type parse_event_type(const sstring& value)
     }
 }
 
+cql_sg_stats::cql_sg_stats()
+    : _cql_requests_stats(static_cast<uint8_t>(cql_binary_opcode::OPCODES_COUNT))
+{
+    auto& vector_ref = non_cql_scheduling_classes_names;
+    if (std::find(vector_ref.begin(), vector_ref.end(), current_scheduling_group().name()) != vector_ref.end()) {
+        return;
+    }
+    register_metrics();
+}
+
+void cql_sg_stats::register_metrics()
+{
+    namespace sm = seastar::metrics;
+    std::vector<sm::metric_definition> transport_metrics;
+    auto& cur_sg_name = current_scheduling_group().name();
+
+    for (uint8_t i = 0; i < static_cast<uint8_t>(cql_binary_opcode::OPCODES_COUNT); ++i) {
+        cql_binary_opcode opcode = cql_binary_opcode{i};
+
+        transport_metrics.emplace_back(
+                sm::make_counter("cql_requests_count", [this, opcode] { return get_cql_opcode_stats(opcode).count; },
+                                 sm::description("Counts the total number of CQL messages of a specific kind."),
+                                 {{"kind", to_string(opcode)}, {"scheduling_group_name", cur_sg_name}}).set_skip_when_empty()
+        );
+
+        transport_metrics.emplace_back(
+                sm::make_counter("cql_request_bytes", [this, opcode] { return get_cql_opcode_stats(opcode).request_size; },
+                                 sm::description("Counts the total number of received bytes in CQL messages of a specific kind."),
+                                 {{"kind", to_string(opcode)}, {"scheduling_group_name", cur_sg_name}}).set_skip_when_empty()
+        );
+
+        transport_metrics.emplace_back(
+                sm::make_counter("cql_response_bytes", [this, opcode] { return get_cql_opcode_stats(opcode).response_size; },
+                                 sm::description("Counts the total number of sent response bytes for CQL requests of a specific kind."),
+                                 {{"kind", to_string(opcode)}, {"scheduling_group_name", cur_sg_name}}).set_skip_when_empty()
+        );
+    }
+
+    _metrics.add_group("transport", std::move(transport_metrics));
+}
+
 cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& auth_service,
         service::memory_limiter& ml, cql_server_config config, const db::config& db_cfg,
-        qos::service_level_controller& sl_controller, gms::gossiper& g)
+        qos::service_level_controller& sl_controller, gms::gossiper& g, scheduling_group_key stats_key)
     : server("CQLServer", clogger)
     , _query_processor(qp)
     , _config(config)
@@ -181,10 +239,10 @@ cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& au
     , _max_concurrent_requests(db_cfg.max_concurrent_requests_per_shard)
     , _memory_available(ml.get_semaphore())
     , _notifier(std::make_unique<event_notifier>(*this))
-    , _stats(static_cast<uint8_t>(cql_binary_opcode::OPCODES_COUNT))
     , _auth_service(auth_service)
     , _sl_controller(sl_controller)
     , _gossiper(g)
+    , _stats_key(stats_key)
 {
     namespace sm = seastar::metrics;
 
@@ -221,28 +279,6 @@ cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& au
     std::vector<sm::metric_definition> transport_metrics;
     for (auto& m : ls) {
         transport_metrics.emplace_back(std::move(m));
-    }
-
-    for (uint8_t i = 0; i < static_cast<uint8_t>(cql_binary_opcode::OPCODES_COUNT); ++i) {
-        cql_binary_opcode opcode = cql_binary_opcode{i};
-
-        transport_metrics.emplace_back(
-            sm::make_counter("cql_requests_count", [this, opcode] { return _stats.get_cql_opcode_stats(opcode).count; },
-                         sm::description("Counts the total number of CQL messages of a specific kind."),
-                         {{"kind", to_string(opcode)}})
-        );
-
-        transport_metrics.emplace_back(
-            sm::make_counter("cql_request_bytes", [this, opcode] { return _stats.get_cql_opcode_stats(opcode).request_size; },
-                         sm::description("Counts the total number of received bytes in CQL messages of a specific kind."),
-                         {{"kind", to_string(opcode)}})
-        );
-
-        transport_metrics.emplace_back(
-            sm::make_counter("cql_response_bytes", [this, opcode] { return _stats.get_cql_opcode_stats(opcode).response_size; },
-                         sm::description("Counts the total number of sent response bytes for CQL requests of a specific kind."),
-                         {{"kind", to_string(opcode)}})
-        );
     }
 
     sm::label cql_error_label("type");
@@ -382,7 +418,7 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         }
     }
 
-    request_kind_stats& cql_stats = _server._stats.get_cql_opcode_stats(cqlop);
+    cql_sg_stats::request_kind_stats& cql_stats = _server.get_cql_opcode_stats(cqlop);
     tracing::set_request_size(trace_state, fbuf.bytes_left());
     cql_stats.request_size += fbuf.bytes_left();
     ++cql_stats.count;
@@ -679,7 +715,7 @@ future<> cql_server::connection::process_request() {
                 ? get_units(_server._memory_available, mem_estimate, shedding_timeout).then_wrapped([this, length = f.length] (auto f) {
                     try {
                         return make_ready_future<semaphore_units<>>(f.get0());
-                    } catch (semaphore_timed_out sto) {
+                    } catch (semaphore_timed_out& sto) {
                         // Cancel shedding in case no more requests are going to do that on completion
                         if (_pending_requests_gate.get_count() == 0) {
                             _shed_incoming_requests = false;

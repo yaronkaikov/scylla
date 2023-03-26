@@ -133,6 +133,7 @@ namespace qos {
 class mutation_reordered_with_truncate_exception : public std::exception {};
 
 class column_family_test;
+class table_for_tests;
 class database_test;
 
 namespace replica {
@@ -1102,7 +1103,9 @@ public:
 
     friend std::ostream& operator<<(std::ostream& out, const column_family& cf);
     // Testing purposes.
+    // to let test classes access calculate_generation_for_new_table
     friend class ::column_family_test;
+    friend class ::table_for_tests;
 
     friend class distributed_loader;
     friend class table_populator;
@@ -1728,8 +1731,8 @@ public:
     reader_concurrency_semaphore& get_reader_concurrency_semaphore();
 
     // Convenience method to obtain an admitted permit. See reader_concurrency_semaphore::obtain_permit().
-    future<reader_permit> obtain_reader_permit(table& tbl, const char* const op_name, db::timeout_clock::time_point timeout);
-    future<reader_permit> obtain_reader_permit(schema_ptr schema, const char* const op_name, db::timeout_clock::time_point timeout);
+    future<reader_permit> obtain_reader_permit(table& tbl, const char* const op_name, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_ptr);
+    future<reader_permit> obtain_reader_permit(schema_ptr schema, const char* const op_name, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_ptr);
 
     bool is_internal_query() const;
 

@@ -110,6 +110,7 @@ private:
     std::optional<promise<>> _stepdown_promise;
     std::optional<shared_promise<>> _leader_promise;
     std::optional<awaited_conf_change> _non_joint_conf_commit_promise;
+    std::optional<shared_promise<>> _state_change_promise;
     // Index of the last entry applied to `_state_machine`.
     index_t _applied_idx;
     std::list<active_read> _reads;
@@ -265,6 +266,8 @@ private:
     // A helper to wait for a leader to get elected
     future<> wait_for_leader(seastar::abort_source* as);
 
+    future<> wait_for_state_change(seastar::abort_source* as = nullptr) override;
+
     // Get "safe to read" index from a leader
     future<read_barrier_reply> get_read_idx(server_id leader, seastar::abort_source* as);
     // Wait for an entry with a specific term to get committed or
@@ -398,6 +401,18 @@ future<> server_impl::wait_for_leader(seastar::abort_source* as) {
 
     try {
         co_await (as ? _leader_promise->get_shared_future(*as) : _leader_promise->get_shared_future());
+    } catch (abort_requested_exception&) {
+        throw request_aborted();
+    }
+}
+
+future<> server_impl::wait_for_state_change(seastar::abort_source* as) {
+    if (!_state_change_promise) {
+        _state_change_promise.emplace();
+    }
+
+    try {
+        return as ? _state_change_promise->get_shared_future(*as) : _state_change_promise->get_shared_future();
     } catch (abort_requested_exception&) {
         throw request_aborted();
     }
@@ -682,10 +697,10 @@ future<add_entry_reply> server_impl::execute_modify_config(server_id from,
         if (const auto* ex = dynamic_cast<const not_a_leader*>(&e)) {
             co_return add_entry_reply{transient_error{std::current_exception(), ex->leader}};
         }
-        if (const auto* ex = dynamic_cast<const dropped_entry*>(&e)) {
+        if (dynamic_cast<const dropped_entry*>(&e)) {
             co_return add_entry_reply{transient_error{std::current_exception(), {}}};
         }
-        if (const auto* ex = dynamic_cast<const conf_change_in_progress*>(&e)) {
+        if (dynamic_cast<const conf_change_in_progress*>(&e)) {
             co_return add_entry_reply{transient_error{std::current_exception(), {}}};
         }
         throw;
@@ -1060,6 +1075,9 @@ future<> server_impl::io_fiber(index_t last_stable) {
             if (_leader_promise && _fsm->current_leader()) {
                 std::exchange(_leader_promise, std::nullopt)->set_value();
             }
+            if (_state_change_promise && batch.state_changed) {
+                std::exchange(_state_change_promise, std::nullopt)->set_value();
+            }
         }
     } catch (seastar::broken_condition_variable&) {
         // Log fiber is stopped explicitly.
@@ -1409,6 +1427,10 @@ future<> server_impl::abort(sstring reason) {
         _tick_promise->set_exception(stopped_error(*_aborted));
     }
 
+    if (_state_change_promise) {
+        _state_change_promise->set_exception(stopped_error());
+    }
+
     abort_snapshot_transfers();
 
     auto snp_futures = _aborted_snapshot_transfers | boost::adaptors::map_values;
@@ -1638,7 +1660,7 @@ std::unique_ptr<server> create_server(server_id uuid, std::unique_ptr<rpc> rpc,
 }
 
 std::ostream& operator<<(std::ostream& os, const server_impl& s) {
-    os << "[id: " << s._id << ", fsm (" << s._fsm << ")]\n";
+    fmt::print(os, "[id: {}, fsm ()]\n", s._id, s._fsm);
     return os;
 }
 

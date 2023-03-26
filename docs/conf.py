@@ -99,6 +99,15 @@ smv_outputdir_format = "{ref.name}"
 # The theme to use for pages.
 html_theme = "sphinx_scylladb_theme"
 
+# These folders are copied to the documentation's HTML output
+html_static_path = ['_static']
+
+# These paths are either relative to html_static_path
+# or fully qualified paths (eg. https://...)
+html_css_files = [
+    'css/custom.css',
+]
+
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for the theme, see the
 # documentation.
@@ -112,7 +121,7 @@ html_theme_options = {
     'banner_button_text': 'Register for Free',
     'banner_button_url': 'https://lp.scylladb.com/university-live-2023-03-registration?siteplacement=docs',
     'banner_title_text': 'ScyllaDB University LIVE, FREE Virtual Training Event | March 21',
-    'hide_banner': 'false',
+    'hide_banner': 'true',
     "collapse_navigation": 'true',
 }
 

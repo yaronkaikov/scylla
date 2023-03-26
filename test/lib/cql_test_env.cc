@@ -350,7 +350,7 @@ public:
                                       table_name = std::move(table_name)] (replica::database& db) mutable {
           auto& cf = db.find_column_family(ks_name, table_name);
           auto schema = cf.schema();
-          auto permit = db.get_reader_concurrency_semaphore().make_tracking_only_permit(schema.get(), "require_column_has_value()", db::no_timeout);
+          auto permit = db.get_reader_concurrency_semaphore().make_tracking_only_permit(schema.get(), "require_column_has_value()", db::no_timeout, {});
           return cf.find_partition_slow(schema, permit, pkey)
                   .then([schema, ckey, column_name, exp] (replica::column_family::const_mutation_partition_ptr p) {
             assert(p != nullptr);
@@ -697,7 +697,7 @@ public:
             dbcfg.memtable_scheduling_group = scheduling_groups.memtable_scheduling_group;
             dbcfg.memtable_to_cache_scheduling_group = scheduling_groups.memtable_to_cache_scheduling_group;
             dbcfg.gossip_scheduling_group = scheduling_groups.gossip_scheduling_group;
-            dbcfg.sstables_format = sstables::from_string(cfg->sstable_format());
+            dbcfg.sstables_format = sstables::version_from_string(cfg->sstable_format());
 
             auto get_tm_cfg = sharded_parameter([&] {
                 return tasks::task_manager::config {
@@ -731,9 +731,7 @@ public:
             db.invoke_on_all(&replica::database::start, std::ref(sl_controller)).get();
 
             feature_service.invoke_on_all([] (auto& fs) {
-                return seastar::async([&fs] {
-                    fs.enable(fs.supported_feature_set());
-                });
+                return fs.enable(fs.supported_feature_set());
             }).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
@@ -880,7 +878,7 @@ public:
 
             service::raft_group0 group0_service{
                     abort_sources.local(), raft_gr.local(), ms,
-                    gossiper.local(), qp.local(), mm.local(), feature_service.local(), sys_ks.local(), group0_client};
+                    gossiper.local(), qp.local(), mm.local(), feature_service.local(), sys_ks.local(), group0_client, ss.local()};
             group0_service.start().get();
             auto stop_group0_service = defer([&group0_service] {
                 group0_service.abort().get();
@@ -1004,7 +1002,7 @@ future<> do_with_cql_env_thread(std::function<void(cql_test_env&)> func, cql_tes
 }
 
 reader_permit make_reader_permit(cql_test_env& env) {
-    return env.local_db().get_reader_concurrency_semaphore().make_tracking_only_permit(nullptr, "test", db::no_timeout);
+    return env.local_db().get_reader_concurrency_semaphore().make_tracking_only_permit(nullptr, "test", db::no_timeout, {});
 }
 
 cql_test_config raft_cql_test_config() {
