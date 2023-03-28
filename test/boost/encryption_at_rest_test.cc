@@ -130,3 +130,61 @@ SEASTAR_TEST_CASE(test_kmip_provider) {
     );
     co_await test_provider("'key_provider': 'KmipKeyProviderFactory', 'kmip_host': 'kmip_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
 }
+
+/*
+Simple test of KMS provider. Still has some caveats:
+    
+    1.) Uses aws CLI credentials for auth. I.e. you need to have a valid
+        ~/.aws/credentials for the user running the test.
+    2.) I can't figure out a good way to set up a key "everyone" can access. So user needs
+        to have read/encrypt access to the key alias (default "alias/kms_encryption_test")
+        in the scylla AWS account.
+    
+    A "better" solution might be to create dummmy user only for KMS testing with only access
+    to a single key, and no other priviledges. But that seems dangerous as well.
+    
+    For this reason, this test is parameterized with env vars:
+    * ENABLE_KMS_TEST - set to non-zero (0)/false to run
+    * KMS_KEY_ALIAS - default "alias/kms_encryption_test" - set to key alias you have access to.
+    * KMS_AWS_REGION - default us-east-1 - set to whatever region your key is in.
+
+*/
+SEASTAR_TEST_CASE(test_kms_provider) {
+    auto do_kms_test = std::getenv("ENABLE_KMS_TEST");
+
+    if (do_kms_test == nullptr || !strcasecmp(do_kms_test, "0") || !strcasecmp(do_kms_test, "false")) {
+        BOOST_TEST_MESSAGE("Skipping test. Set ENABLE_KMS_TEST=1 to run");
+        co_return;
+    }
+
+    static const std::string default_kms_alias = "alias/kms_encryption_test";
+
+    const char* kms_key_alias = std::getenv("KMS_KEY_ALIAS");
+    if (kms_key_alias == nullptr) {
+        kms_key_alias = default_kms_alias.data();
+    }
+
+    static const std::string default_aws_region = "us-east-1";
+
+    const char* kms_aws_region = std::getenv("KMS_AWS_REGION");
+    if (kms_aws_region == nullptr) {
+        kms_aws_region = default_aws_region.data();
+    }
+
+    tmpdir tmp;
+
+    /**
+     * Note: NOT including any auth stuff here. The provider will pick up AWS credentials
+     * from ~/.aws/credentials
+     */
+    auto yaml = fmt::format(R"foo(
+        kms_hosts:
+            kms_test:
+                master_key: {0}
+                aws_region: {1}
+                )foo"
+        , kms_key_alias, kms_aws_region
+    );
+
+    co_await test_provider("'key_provider': 'KmsKeyProviderFactory', 'kms_host': 'kms_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+}
