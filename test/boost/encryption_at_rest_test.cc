@@ -76,3 +76,26 @@ SEASTAR_TEST_CASE(test_local_file_provider) {
     co_await test_provider(fmt::format("'key_provider': 'LocalFileSystemKeyProviderFactory', 'secret_key_file': '{}', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", keyfile.string()), tmp);
 }
 
+static future<> create_key_file(const fs::path& path, const std::vector<key_info>& key_types) {
+    std::ostringstream ss;
+
+    for (auto& info : key_types) {
+        symmetric_key k(info);
+        ss << info.alg << ":" << info.len << ":" << base64_encode(k.key()) << std::endl;
+    }
+
+    auto s = ss.str();
+    co_await seastar::recursive_touch_directory(fs::path(path).remove_filename().string());
+    co_await write_text_file_fully(path.string(), s);
+}
+
+SEASTAR_TEST_CASE(test_replicated_provider) {
+    tmpdir tmp;
+    auto keyfile = tmp.path() / "secret_key";
+    auto sysdir = tmp.path() / "system_keys";
+    auto syskey = sysdir / "system_key";
+    auto yaml = fmt::format("system_key_directory: {}", sysdir.string());
+
+    co_await create_key_file(syskey, { { "AES/CBC/PKCSPadding", 256 }});
+    co_await test_provider("'key_provider': 'ReplicatedKeyProviderFactory', 'system_key_file': 'system_key', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+}
