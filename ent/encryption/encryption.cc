@@ -828,7 +828,7 @@ future<seastar::shared_ptr<encryption_context>> register_extensions(const db::co
         });
     }
 
-    replicated_key_provider_factory::init();
+    replicated_key_provider_factory::init(exts);
 
     return f.then([ctxt]() -> ::shared_ptr<encryption_context> {
         return ctxt;

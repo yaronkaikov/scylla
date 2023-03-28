@@ -11,6 +11,10 @@
 
 #include "encryption.hh"
 
+namespace db {
+class extensions;
+}
+
 namespace replica {
 class database;
 }
@@ -28,7 +32,7 @@ public:
 
     shared_ptr<key_provider> get_provider(encryption_context&, const options&) override;
 
-    static void init();
+    static void init(db::extensions&);
     static future<> on_started(const ::replica::database&, service::migration_manager&);
 };
 
