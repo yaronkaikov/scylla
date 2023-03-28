@@ -99,3 +99,34 @@ SEASTAR_TEST_CASE(test_replicated_provider) {
     co_await create_key_file(syskey, { { "AES/CBC/PKCSPadding", 256 }});
     co_await test_provider("'key_provider': 'ReplicatedKeyProviderFactory', 'system_key_file': 'system_key', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
 }
+
+SEASTAR_TEST_CASE(test_kmip_provider) {
+    // KMIP relies on a reachable server. We have two servers available for QA.
+    // Make this test optional, since reachability of KMIP server below is not guaranteed.
+    // Run test with ENABLE_KMIP_TEST=1 to actually test anything
+    auto do_kmip_test = std::getenv("ENABLE_KMIP_TEST");
+
+    if (do_kmip_test == nullptr || !strcasecmp(do_kmip_test, "0") || !strcasecmp(do_kmip_test, "false")) {
+        BOOST_TEST_MESSAGE("Skipping test. Set ENABLE_KMIP_TEST=1 to run");
+        co_return;
+    }
+
+    tmpdir tmp;
+
+    // TODO: can we have a better reference to resource dir?
+    auto resourcedir = "./test/resource/certs";
+    // QA test server. Same as used in dtests.
+    auto host = "52.21.171.245";
+    auto yaml = fmt::format(R"foo(
+        kmip_hosts:
+            kmip_test:
+                hosts: {0}
+                certificate: {1}/scylla.pem
+                keyfile: {1}/scylla.pem
+                truststore: {1}/cacert.pem
+                priority_string: SECURE128:+RSA:-VERS-TLS1.0:-ECDHE-ECDSA
+                )foo"
+        , host, resourcedir
+    );
+    co_await test_provider("'key_provider': 'KmipKeyProviderFactory', 'kmip_host': 'kmip_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+}
