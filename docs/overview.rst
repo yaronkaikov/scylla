@@ -75,6 +75,7 @@ You can learn to use ScyllaDB by taking free courses at `ScyllaDB University <ht
   architecture/index
   troubleshooting/index
   kb/index
+  reference/index
   ScyllaDB University <https://university.scylladb.com/>
   faq
   Contribute to ScyllaDB <contribute>
