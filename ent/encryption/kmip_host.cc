@@ -158,6 +158,7 @@ public:
     }
 
     future<> connect();
+    future<> disconnect();
     future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, const key_options& = {});
     future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const std::optional<key_info>& = {});
 
@@ -262,6 +263,7 @@ private:
     host_options& _options;
     output_stream<char> _output;
     input_stream<char> _input;
+    seastar::connected_socket _socket;
     std::optional<temporary_buffer<char>> _in_buffer;
     std::optional<future<>> _pending;
 };
@@ -671,6 +673,12 @@ future<> kmip_host::impl::connect() {
     });
 }
 
+future<> kmip_host::impl::disconnect() {
+    return do_for_each(_options.hosts, [this](const sstring& host) {
+        return clear_connections(host);
+    });
+}
+
 static unsigned from_str(unsigned (*f)(char*, int, int*), const sstring& s, const sstring& what) {
     int found = 0;
     auto res = f(const_cast<char *>(s.c_str()), CODE2STR_FLAG_STR_CASE, &found);
@@ -1050,6 +1058,10 @@ kmip_host::~kmip_host() = default;
 
 future<> kmip_host::connect() {
     return _impl->connect();
+}
+
+future<> kmip_host::disconnect() {
+    return _impl->disconnect();
 }
 
 future<std::tuple<shared_ptr<symmetric_key>, kmip_host::id_type>> kmip_host::get_or_create_key(const key_info& info, const key_options& opts) {

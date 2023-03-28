@@ -56,6 +56,7 @@ public:
     ~kmip_host();
 
     future<> connect();
+    future<> disconnect();
     future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, const key_options& = {});
     future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, std::optional<key_info> = std::nullopt);
 
