@@ -284,7 +284,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Debug',
         'can_have_debug_info': True,
-        'build_seastar_shared_libs': False,
+        'build_seastar_shared_libs': True,
         'default': True,
         'description': 'a mode with no optimizations, with sanitizers, and with additional debug checks enabled, used for testing',
         'advanced_optimizations': False,
@@ -310,7 +310,7 @@ modes = {
         'per_src_extra_cxxflags': {},
         'cmake_build_type': 'Dev',
         'can_have_debug_info': False,
-        'build_seastar_shared_libs': False,
+        'build_seastar_shared_libs': True,
         'default': True,
         'description': 'a mode with no optimizations and no debug checks, optimized for fast build times, used for development',
         'advanced_optimizations': False,
@@ -2272,7 +2272,7 @@ with open(buildfile, 'w') as f:
             f.write('  subdir = $builddir/{mode}/seastar{suffix}\n'.format(**locals()))
             f.write('  target = seastar_testing\n'.format(**locals()))
             f.write('  profile_dep = {profile_dep}\n'.format(**locals()))
-        f.write('build $builddir/{mode}/seastar/apps/iotune/iotune: ninja $builddir/{mode}/seastar/build.ninja | $builddir/{mode}/seastar/libseastar.a\n'
+        f.write('build $builddir/{mode}/seastar/apps/iotune/iotune: ninja $builddir/{mode}/seastar/build.ninja | $builddir/{mode}/seastar/libseastar.{seastar_lib_ext}\n'
                 .format(**locals()))
         f.write('  pool = submodule_pool\n')
         f.write('  subdir = $builddir/{mode}/seastar\n'.format(**locals()))
