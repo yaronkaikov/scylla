@@ -81,14 +81,12 @@ cql3::query_options audit_cf_storage_helper::make_data(const audit_info* audit_i
                                                        bool error) {
     auto time = std::chrono::system_clock::now();
     auto millis_since_epoch = std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch()).count();
-    auto ticks_per_day = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::hours(24)).count();
-    auto date = millis_since_epoch / ticks_per_day * ticks_per_day;
     thread_local static int64_t last_nanos = 0;
     auto time_id = utils::UUID_gen::get_time_UUID(table_helper::make_monotonic_UUID_tp(last_nanos, time));
     std::stringstream consistency_level;
     consistency_level << cl;
     std::vector<cql3::raw_value> values {
-        cql3::raw_value::make_value(timestamp_type->decompose(date)),
+        cql3::raw_value::make_value(timestamp_type->decompose(millis_since_epoch)),
         cql3::raw_value::make_value(inet_addr_type->decompose(node_ip.addr())),
         cql3::raw_value::make_value(uuid_type->decompose(time_id)),
         cql3::raw_value::make_value(utf8_type->decompose(audit_info->category_string())),
