@@ -84,12 +84,12 @@ future<> audit_syslog_storage_helper::write(const audit_info* audit_info,
                                       node_ip,
                                       audit_info->category_string(),
                                       cl,
-                                      audit_info->table(),
+                                      (error ? "true" : "false"),
                                       audit_info->keyspace(),
                                       audit_info->query(),
                                       client_ip,
-                                      username,
-                                      (error ? "true" : "false"));
+                                      audit_info->table(),
+                                      username);
         if (send(_syslog_fd, msg.c_str(), msg.size(), 0) < 0) {
             logger.error("Can't log audit message to syslog. Send failed.");
         }
