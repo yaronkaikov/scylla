@@ -84,7 +84,7 @@ smv_latest_version = LATEST_VERSION
 # Defines the new name for the latest version.
 smv_rename_latest_version = "stable"
 # Whitelist pattern for remotes (set to None to use local branches only)
-smv_remote_whitelist = "None"
+smv_remote_whitelist = r"^origin$"
 # Pattern for released versions
 smv_released_pattern = r"^tags/.*$"
 # Format for versioned output directories inside the build directory
