@@ -62,17 +62,15 @@ reader_concurrency_semaphore* reader_concurrency_semaphore_group::get_or_null(sc
     }
 }
 reader_concurrency_semaphore& reader_concurrency_semaphore_group::add_or_update(scheduling_group sg, size_t shares) {
-    auto result = _semaphores.emplace(
-        std::piecewise_construct,
-        std::forward_as_tuple(sg),
-        std::forward_as_tuple(
+    auto result = _semaphores.try_emplace(
+            sg,
             0,
             _max_concurrent_reads,
             sg.name() + "_read_concurrency_sem",
             _max_queue_length,
             _serialize_limit_multiplier,
             _kill_limit_multiplier
-        ));
+        );
     auto&& it = result.first;
     // since we serialize all group changes this change wait will be queues and no further operations
     // will be executed until this adjustment ends.
