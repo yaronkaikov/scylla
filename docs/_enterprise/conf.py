@@ -13,9 +13,9 @@ from redirects_cli import cli as redirects_cli
 BASE_URL = 'https://enterprise.docs.scylladb.com'
 # Build documentation for the following tags and branches.
 TAGS = []
-BRANCHES = ["enterprise"]
+BRANCHES = ["enterprise", "branch-2022.2"]
 # Set the latest version.
-LATEST_VERSION = "enterprise"
+LATEST_VERSION = "branch-2022.2"
 # Set which versions are not released yet.
 UNSTABLE_VERSIONS = ["enterprise"]
 # Set which versions are deprecated.
@@ -84,7 +84,7 @@ smv_latest_version = LATEST_VERSION
 # Defines the new name for the latest version.
 smv_rename_latest_version = "stable"
 # Whitelist pattern for remotes (set to None to use local branches only)
-smv_remote_whitelist = r"^origin$"
+smv_remote_whitelist = "None"
 # Pattern for released versions
 smv_released_pattern = r"^tags/.*$"
 # Format for versioned output directories inside the build directory
@@ -101,6 +101,7 @@ html_theme = "sphinx_scylladb_theme"
 html_theme_options = {
     "conf_py_path": "docs/",
     "hide_edit_this_page_button": "true",
+    "hide_version_dropdown": UNSTABLE_VERSIONS,
     "github_issues_repository": "scylladb/scylladb",
     "github_repository": "scylladb/scylla-enterprise",
     "versions_unstable": UNSTABLE_VERSIONS,
