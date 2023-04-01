@@ -734,7 +734,6 @@ async def populate_datasets(executable: PathLike, dataset_names: list[str], data
     After this function, there will be a $dataset_dir/$x cluster workdir for each dataset x.
     These cluster workdirs can be copied somewhere for training and restored with start_cluster().
     """
-    await run_checked(["mkdir", "-p", "shlex.quote(dataset_dir}"])
     for t in dataset_names:
         t_dir = fr"{dataset_dir}/{t}"
         if not os.path.exists(t_dir):
