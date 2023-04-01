@@ -1628,9 +1628,12 @@ for mode in modes:
     modes[mode]['has_lto'] = False
 
     if modes[mode]['advanced_optimizations']:
-        # It's normal to have some CFG hash mismatches. They should not be an error.
-        # Maybe we should disable the warning altogether, it's not very valuable.
-        modes[mode]['lib_cflags'] += ' -Wno-error=backend-plugin'
+        # When building with PGO, -Wbackend-plugin generates a warning for every
+        # function which changed its control flow graph since the profile was
+        # taken.
+        # We allow stale profiles, so these warnings are just noise to us.
+        # Let's silence them.
+        modes[mode]['lib_cflags'] += ' -Wno-backend-plugin'
 
         if args.lto:
             modes[mode]['has_lto'] = True
