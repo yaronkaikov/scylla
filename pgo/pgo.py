@@ -452,13 +452,10 @@ async def start_cluster(executable: PathLike, addrs: list[str], cpusets: Optiona
     procs = []
     seed = addrs[0]
     try:
-        proc = await start_node(executable=executable, addr=seed, seed=seed, cluster_workdir=workdir, cluster_name=cluster_name, extra_opts=extra_opts+cpuset_args[0])
-        procs.append(proc)
-        await wait_for_node(proc, seed, timeout)
-        for i in range(1, len(addrs)):
+        for i in range(0, len(addrs)):
             proc = await start_node(executable, addr=addrs[i], seed=seed, cluster_workdir=workdir, cluster_name=cluster_name, extra_opts=extra_opts+cpuset_args[i])
             procs.append(proc)
-        await clean_gather(*[wait_for_node(p, a, timeout) for (p, a) in zip(procs, addrs)])
+            await wait_for_node(proc, addrs[i], timeout)
     except:
         await stop_cluster(procs, addrs)
         raise
