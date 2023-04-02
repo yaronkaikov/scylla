@@ -122,7 +122,11 @@ class large_data_handler;
 class system_keyspace;
 class table_selector;
 
-future<> system_keyspace_make(db::system_keyspace& sys_ks, distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, sharded<service::raft_group_registry>& raft_gr, db::config& cfg, db::table_selector&);
+future<> system_keyspace_make(db::system_keyspace& sys_ks, distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, sharded<service::raft_group_registry>& raft_gr, db::config& cfg, system_table_load_phase phase);
+
+namespace view {
+class view_update_generator;
+}
 
 }
 
@@ -433,7 +437,12 @@ private:
     // Ensures that concurrent updates to sstable set will work correctly
     seastar::named_semaphore _sstable_set_mutation_sem = {1, named_semaphore_exception_factory{"sstable set mutation"}};
     mutable row_cache _cache; // Cache covers only sstables.
-    std::optional<int64_t> _sstable_generation = {};
+    // FIXME: until we use uuid for sstables generation (#10459)
+    // _sstable_generation keeps track of the highest
+    // generation number in the table so that newly created sstables
+    // will use numeric generation numbers larger than this one.
+    // Initialized when the table is populated via update_sstables_known_generation.
+    std::optional<sstables::generation_type> _sstable_generation = {};
 
     db::replay_position _highest_rp;
     db::replay_position _flush_rp;
@@ -533,6 +542,8 @@ public:
                        const std::vector<sstables::shared_sstable>& new_sstables,
                        const std::vector<sstables::shared_sstable>& old_sstables);
     };
+
+    static sstables::generation_type make_new_generation(std::optional<sstables::generation_type> prev = std::nullopt);
 private:
     using compaction_group_ptr = std::unique_ptr<compaction_group>;
     std::vector<std::unique_ptr<compaction_group>> make_compaction_groups();
@@ -565,20 +576,11 @@ private:
     future<> update_cache(compaction_group& cg, lw_shared_ptr<memtable> m, std::vector<sstables::shared_sstable> ssts);
     struct merge_comparator;
 
-    // update the sstable generation, making sure that new new sstables don't overwrite this one.
-    void update_sstables_known_generation(sstables::generation_type generation) {
-        if (!_sstable_generation) {
-            _sstable_generation = 1;
-        }
-        _sstable_generation = std::max<uint64_t>(*_sstable_generation, sstables::generation_value(generation) / smp::count + 1);
-    }
+    // update the sstable generation, making sure (in calculate_generation_for_new_table)
+    // that new new sstables don't overwrite this one.
+    void update_sstables_known_generation(std::optional<sstables::generation_type> generation);
 
-    sstables::generation_type calculate_generation_for_new_table() {
-        assert(_sstable_generation);
-        // FIXME: better way of ensuring we don't attempt to
-        // overwrite an existing table.
-        return sstables::generation_from_value((*_sstable_generation)++ * smp::count + this_shard_id());
-    }
+    sstables::generation_type calculate_generation_for_new_table();
 private:
     void rebuild_statistics();
 
@@ -658,6 +660,10 @@ public:
     // to issue disk operations safely.
     void mark_ready_for_writes() {
         update_sstables_known_generation(sstables::generation_from_value(0));
+    }
+
+    bool is_ready_for_writes() const {
+        return _sstable_generation.has_value();
     }
 
     // Creates a mutation reader which covers all data sources for this column family.
@@ -1023,12 +1029,12 @@ public:
     void remove_view(view_ptr v);
     void clear_views();
     const std::vector<view_ptr>& views() const;
-    future<row_locker::lock_holder> push_view_replica_updates(const schema_ptr& s, const frozen_mutation& fm, db::timeout_clock::time_point timeout,
+    future<row_locker::lock_holder> push_view_replica_updates(shared_ptr<db::view::view_update_generator> gen, const schema_ptr& s, const frozen_mutation& fm, db::timeout_clock::time_point timeout,
             tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem) const;
-    future<row_locker::lock_holder> push_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout,
+    future<row_locker::lock_holder> push_view_replica_updates(shared_ptr<db::view::view_update_generator> gen, const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout,
             tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem) const;
     future<row_locker::lock_holder>
-    stream_view_replica_updates(const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout,
+    stream_view_replica_updates(shared_ptr<db::view::view_update_generator> gen, const schema_ptr& s, mutation&& m, db::timeout_clock::time_point timeout,
             std::vector<sstables::shared_sstable>& excluded_sstables) const;
 
     void add_coordinator_read_latency(utils::estimated_histogram::duration latency);
@@ -1048,6 +1054,7 @@ public:
 
     // Reader's schema must be the same as the base schema of each of the views.
     future<> populate_views(
+            shared_ptr<db::view::view_update_generator> gen,
             std::vector<db::view::view_and_base>,
             dht::token base_token,
             flat_mutation_reader_v2&&,
@@ -1064,10 +1071,10 @@ public:
     size_t estimate_read_memory_cost() const;
 
 private:
-    future<row_locker::lock_holder> do_push_view_replica_updates(schema_ptr s, mutation m, db::timeout_clock::time_point timeout, mutation_source source,
+    future<row_locker::lock_holder> do_push_view_replica_updates(shared_ptr<db::view::view_update_generator> gen, schema_ptr s, mutation m, db::timeout_clock::time_point timeout, mutation_source source,
             tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem, const io_priority_class& io_priority, query::partition_slice::option_set custom_opts) const;
     std::vector<view_ptr> affected_views(const schema_ptr& base, const mutation& update) const;
-    future<> generate_and_propagate_view_updates(const schema_ptr& base,
+    future<> generate_and_propagate_view_updates(shared_ptr<db::view::view_update_generator> gen, const schema_ptr& base,
             reader_permit permit,
             std::vector<db::view::view_and_base>&& views,
             mutation&& m,
@@ -1328,6 +1335,7 @@ private:
     db::timeout_semaphore _view_update_concurrency_sem{max_memory_pending_view_updates()};
 
     cache_tracker _row_cache_tracker;
+    seastar::shared_ptr<db::view::view_update_generator> _view_update_generator;
 
     inheriting_concrete_execution_stage<
             future<>,
@@ -1378,7 +1386,6 @@ private:
     scheduling_group _default_read_concurrency_group;
     noncopyable_function<future<>()> _unsubscribe_qos_configuration_change;
 
-    rust::Box<wasmtime::Engine> _wasm_engine;
     utils::cross_shard_barrier _stop_barrier;
 
     db::rate_limiter _rate_limiter;
@@ -1395,10 +1402,6 @@ public:
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
     future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, db::timeout_clock::time_point timeout);
 
-    wasmtime::Engine& wasm_engine() {
-        return *_wasm_engine;
-    }
-
     drain_progress get_drain_progress() const noexcept {
         return _drain_progress;
     }
@@ -1408,13 +1411,16 @@ public:
     void plug_system_keyspace(db::system_keyspace& sys_ks) noexcept;
     void unplug_system_keyspace() noexcept;
 
+    void plug_view_update_generator(db::view::view_update_generator& generator) noexcept;
+    void unplug_view_update_generator() noexcept;
+
 private:
     future<> flush_non_system_column_families();
     future<> flush_system_column_families();
 
     using system_keyspace = bool_class<struct system_keyspace_tag>;
     future<> create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm, locator::effective_replication_map_factory& erm_factory, system_keyspace system);
-    friend future<> db::system_keyspace_make(db::system_keyspace& sys_ks, distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, sharded<service::raft_group_registry>& raft_gr, db::config& cfg, db::table_selector&);
+    friend future<> db::system_keyspace_make(db::system_keyspace& sys_ks, distributed<database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, sharded<service::raft_group_registry>& raft_gr, db::config& cfg, system_table_load_phase);
     void setup_metrics();
     void setup_scylla_memory_diagnostics_producer();
     reader_concurrency_semaphore& read_concurrency_sem();
@@ -1502,7 +1508,7 @@ public:
     const service::migration_notifier& get_notifier() const { return _mnotifier; }
 
     void add_column_family(keyspace& ks, schema_ptr schema, column_family::config cfg);
-    void before_schema_keyspace_init();
+    void maybe_init_schema_commitlog();
     future<> add_column_family_and_make_directory(schema_ptr schema);
 
     /* throws no_such_column_family if missing */

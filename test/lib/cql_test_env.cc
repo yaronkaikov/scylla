@@ -771,8 +771,12 @@ public:
                                                      std::chrono::duration_cast<std::chrono::milliseconds>(cql3::prepared_statements_cache::entry_expiry));
             auth_prep_cache_config.refresh = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
 
+            std::optional<wasm::startup_context> wasm_ctx;
+            if (cfg->enable_user_defined_functions() && cfg->check_experimental(db::experimental_features_t::feature::UDF)) {
+                wasm_ctx.emplace(*cfg, dbcfg);
+            }
 
-            qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notif), std::ref(mm), qp_mcfg, std::ref(cql_config), auth_prep_cache_config, std::ref(group0_client)).get();
+            qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notif), std::ref(mm), qp_mcfg, std::ref(cql_config), auth_prep_cache_config, std::ref(group0_client), wasm_ctx).get();
             auto stop_qp = defer([&qp] { qp.stop().get(); });
 
             sys_ks.invoke_on_all([&snitch] (auto& sys_ks) {
@@ -800,7 +804,9 @@ public:
                 std::ref(sl_controller)).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
-            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, db::table_selector::all()).get();
+            for (const auto p: all_system_table_load_phases) {
+                replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, p).get();
+            }
 
             auto& ks = db.local().find_keyspace(db::system_keyspace::NAME);
             parallel_for_each(ks.metadata()->cf_meta_data(), [&ks] (auto& pair) {
@@ -840,7 +846,7 @@ public:
                 raft_gr.invoke_on_all(&service::raft_group_registry::drain_on_shutdown).get();
             });
 
-            view_update_generator.start(std::ref(db)).get();
+            view_update_generator.start(std::ref(db), std::ref(proxy)).get();
             view_update_generator.invoke_on_all(&db::view::view_update_generator::start).get();
             auto stop_view_update_generator = defer([&view_update_generator] {
                 view_update_generator.stop().get();
@@ -918,7 +924,7 @@ public:
             });
 
             sharded<db::view::view_builder> view_builder;
-            view_builder.start(std::ref(db), std::ref(sys_ks), std::ref(sys_dist_ks), std::ref(mm_notif)).get();
+            view_builder.start(std::ref(db), std::ref(sys_ks), std::ref(sys_dist_ks), std::ref(mm_notif), std::ref(view_update_generator)).get();
             view_builder.invoke_on_all([&mm] (db::view::view_builder& vb) {
                 return vb.start(mm.local());
             }).get();

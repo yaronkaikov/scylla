@@ -308,7 +308,7 @@ void incremental_compaction_strategy::sort_run_bucket_by_first_key(size_bucket_t
 }
 
 compaction_descriptor
-incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input, schema_ptr schema, const ::io_priority_class& iop, reshape_mode mode) {
+incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input, schema_ptr schema, const ::io_priority_class& iop, reshape_mode mode) const {
     size_t offstrategy_threshold = std::max(schema->min_compaction_threshold(), 4);
     size_t max_sstables = std::max(schema->max_compaction_threshold(), int(offstrategy_threshold));
 
@@ -371,7 +371,7 @@ incremental_compaction_strategy::get_cleanup_compaction_jobs(table_state& t, std
 }
 
 std::unique_ptr<compaction_backlog_tracker::impl>
-incremental_compaction_strategy::make_backlog_tracker() {
+incremental_compaction_strategy::make_backlog_tracker() const {
     return std::make_unique<incremental_backlog_tracker>(_options);
 }
 

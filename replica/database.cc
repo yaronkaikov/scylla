@@ -15,6 +15,7 @@
 #include "db/system_distributed_keyspace.hh"
 #include "db/commitlog/commitlog.hh"
 #include "db/config.hh"
+#include "db/extensions.hh"
 #include "utils/to_string.hh"
 #include "cql3/functions/functions.hh"
 #include "cql3/functions/user_function.hh"
@@ -46,6 +47,7 @@
 #include "timeout_config.hh"
 #include "service/storage_proxy.hh"
 #include "db/operation_type.hh"
+#include "db/view/view_update_generator.hh"
 
 #include "utils/human_readable.hh"
 #include "utils/fb_utilities.hh"
@@ -392,7 +394,6 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _reader_concurrency_semaphores_group(max_memory_concurrent_reads(), max_count_concurrent_reads, max_inactive_queue_length(),
         _cfg.reader_concurrency_semaphore_serialize_limit_multiplier,
         _cfg.reader_concurrency_semaphore_kill_limit_multiplier)
-    , _wasm_engine(wasmtime::create_engine(cfg.wasm_udf_memory_limit()))
     , _stop_barrier(std::move(barrier))
     , _update_memtable_flush_static_shares_action([this, &cfg] { return _memtable_controller.update_static_shares(cfg.memtable_flush_static_shares()); })
     , _memtable_flush_static_shares_observer(cfg.memtable_flush_static_shares.observe(_update_memtable_flush_static_shares_action.make_observer()))
@@ -932,7 +933,7 @@ static bool is_system_table(const schema& s) {
         || s.ks_name() == db::system_distributed_keyspace::NAME_EVERYWHERE;
 }
 
-void database::before_schema_keyspace_init() {
+void database::maybe_init_schema_commitlog() {
     assert(this_shard_id() == 0);
 
     if (!_feat.schema_commitlog && !_cfg.force_schema_commit_log()) {
@@ -1989,7 +1990,11 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
 
     row_locker::lock_holder lock;
     if (!cf.views().empty()) {
-        auto lock_f = co_await coroutine::as_future(cf.push_view_replica_updates(s, m, timeout, std::move(tr_state), get_reader_concurrency_semaphore()));
+        if (!_view_update_generator) {
+            co_await coroutine::return_exception(std::runtime_error("view update generator not plugged to push updates"));
+        }
+
+        auto lock_f = co_await coroutine::as_future(cf.push_view_replica_updates(_view_update_generator, s, m, timeout, std::move(tr_state), get_reader_concurrency_semaphore()));
         if (lock_f.failed()) {
             auto ex = lock_f.get_exception();
             if (is_timeout_exception(ex)) {
@@ -2216,8 +2221,9 @@ schema_ptr database::find_indexed_table(const sstring& ks_name, const sstring& i
 
 future<> database::close_tables(table_kind kind_to_close) {
     auto b = defer([this] { _stop_barrier.abort(); });
-    co_await coroutine::parallel_for_each(_column_families, [kind_to_close](auto& val_pair) -> future<> {
-        table_kind k = is_system_table(*val_pair.second->schema()) ? table_kind::system : table_kind::user;
+    co_await coroutine::parallel_for_each(_column_families, [this, kind_to_close](auto& val_pair) -> future<> {
+        auto& s = val_pair.second->schema();
+        table_kind k = is_system_table(*s) || _cfg.extensions().is_extension_internal_keyspace(s->ks_name()) ? table_kind::system : table_kind::user;
         if (k == kind_to_close) {
             co_await val_pair.second->stop();
         }
@@ -2741,9 +2747,10 @@ future<> database::clear_snapshot(sstring tag, std::vector<sstring> keyspace_nam
 }
 
 future<> database::flush_non_system_column_families() {
-    auto non_system_cfs = get_column_families() | boost::adaptors::filtered([] (auto& uuid_and_cf) {
+    auto non_system_cfs = get_column_families() | boost::adaptors::filtered([this] (auto& uuid_and_cf) {
         auto cf = uuid_and_cf.second;
-        return !is_system_keyspace(cf->schema()->ks_name());
+        auto& ks = cf->schema()->ks_name();
+        return !is_system_keyspace(ks) && !_cfg.extensions().is_extension_internal_keyspace(ks);
     });
     // count CFs first
     auto total_cfs = boost::distance(non_system_cfs);
@@ -2762,9 +2769,10 @@ future<> database::flush_non_system_column_families() {
 }
 
 future<> database::flush_system_column_families() {
-    auto system_cfs = get_column_families() | boost::adaptors::filtered([] (auto& uuid_and_cf) {
+    auto system_cfs = get_column_families() | boost::adaptors::filtered([this] (auto& uuid_and_cf) {
         auto cf = uuid_and_cf.second;
-        return is_system_keyspace(cf->schema()->ks_name());
+        auto& ks = cf->schema()->ks_name();
+        return is_system_keyspace(ks) || _cfg.extensions().is_extension_internal_keyspace(ks);
     });
     dblog.info("Flushing system tables");
     return parallel_for_each(system_cfs, [] (auto&& uuid_and_cf) {
@@ -2810,6 +2818,14 @@ void database::unplug_system_keyspace() noexcept {
     _large_data_handler->unplug_system_keyspace();
 }
 
+void database::plug_view_update_generator(db::view::view_update_generator& generator) noexcept {
+    _view_update_generator = generator.shared_from_this();
+}
+
+void database::unplug_view_update_generator() noexcept {
+    _view_update_generator = nullptr;
+}
+
 } // namespace replica
 
 template <typename T>
@@ -2847,6 +2863,10 @@ flat_mutation_reader_v2 make_multishard_streaming_reader(distributed<replica::da
             _contexts[shard].semaphore = &cf.streaming_read_concurrency_semaphore();
 
             return cf.make_streaming_reader(std::move(schema), std::move(permit), *_contexts[shard].range, slice, fwd_mr);
+        }
+        virtual const dht::partition_range* get_read_range() const override {
+            const auto shard = this_shard_id();
+            return _contexts[shard].range.get();
         }
         virtual void update_read_range(lw_shared_ptr<const dht::partition_range> range) override {
             const auto shard = this_shard_id();

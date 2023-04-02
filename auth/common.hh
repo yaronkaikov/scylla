@@ -31,8 +31,6 @@ namespace replica {
 class database;
 }
 
-class timeout_config;
-
 class database;
 
 namespace service {

@@ -13,6 +13,7 @@
 #include "distributed_loader.hh"
 #include "replica/database.hh"
 #include "db/config.hh"
+#include "db/extensions.hh"
 #include "db/system_keyspace.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "db/schema_tables.hh"
@@ -55,8 +56,8 @@ bool is_system_keyspace(std::string_view name) {
     return system_keyspaces.contains(name);
 }
 
-bool is_load_prio_keyspace(const sstring& name) {
-    return load_prio_keyspaces.contains(name);
+bool is_load_prio_keyspace(std::string_view name) {
+    return load_prio_keyspaces.contains(sstring(name));
 }
 
 static const std::unordered_set<std::string_view> internal_keyspaces = {
@@ -285,13 +286,6 @@ distributed_loader::reshard(sharded<sstables::sstable_directory>& dir, sharded<r
     co_await run_resharding_jobs(dir, std::move(destinations), db, ks_name, table_name, std::move(creator), iop);
 }
 
-future<sstables::generation_type>
-highest_generation_seen(sharded<sstables::sstable_directory>& directory) {
-    return directory.map_reduce0(std::mem_fn(&sstables::sstable_directory::highest_generation_seen), sstables::generation_from_value(0), [] (sstables::generation_type a, sstables::generation_type b) {
-        return std::max(a, b);
-    });
-}
-
 future<sstables::sstable::version_types>
 highest_version_seen(sharded<sstables::sstable_directory>& dir, sstables::sstable_version_types system_version) {
     using version = sstables::sstable_version_types;
@@ -411,9 +405,9 @@ distributed_loader::make_sstables_available(sstables::sstable_directory& dir, sh
     co_return new_sstables.size();
 }
 
-sstables::shared_sstable make_sstable(replica::table& table, fs::path dir, int64_t generation_value) {
+sstables::shared_sstable make_sstable(replica::table& table, fs::path dir, sstables::generation_type generation_value) {
     auto& sstm = table.get_sstables_manager();
-    return sstm.make_sstable(table.schema(), dir.native(), sstables::generation_from_value(generation_value), sstm.get_highest_supported_format(), sstables::sstable_format_types::big, gc_clock::now(), &error_handler_gen_for_upload_dir);
+    return sstm.make_sstable(table.schema(), dir.native(), generation_value, sstm.get_highest_supported_format(), sstables::sstable_format_types::big, gc_clock::now(), &error_handler_gen_for_upload_dir);
 }
 
 future<>
@@ -445,24 +439,27 @@ distributed_loader::process_upload_dir(distributed<replica::database>& db, distr
         process_sstable_dir(directory, flags).get();
 
         auto generation = highest_generation_seen(directory).get0();
-        auto shard_generation_base = sstables::generation_value(generation) / smp::count + 1;
+        auto shard_generation_base = generation.value_or(replica::table::make_new_generation()).value() / smp::count + 1;
 
         // We still want to do our best to keep the generation numbers shard-friendly.
         // Each destination shard will manage its own generation counter.
-        std::vector<std::atomic<int64_t>> shard_gen(smp::count);
+        std::vector<std::atomic<sstables::generation_type::int_t>> shard_gen(smp::count);
         for (shard_id s = 0; s < smp::count; ++s) {
             shard_gen[s].store(shard_generation_base * smp::count + s, std::memory_order_relaxed);
         }
 
-        reshard(directory, db, ks, cf, [&global_table, upload, &shard_gen] (shard_id shard) mutable {
-            // we need generation calculated by instance of cf at requested shard
+        // we need generation calculated by instance of cf at requested shard
+        auto new_generation_for_shard = [&] (shard_id shard) {
             auto gen = shard_gen[shard].fetch_add(smp::count, std::memory_order_relaxed);
-            return make_sstable(*global_table, upload, gen);
+            return sstables::generation_type(gen);
+        };
+
+        reshard(directory, db, ks, cf, [&] (shard_id shard) mutable {
+            return make_sstable(*global_table, upload, new_generation_for_shard(shard));
         }, service::get_local_streaming_priority()).get();
 
-        reshape(directory, db, sstables::reshape_mode::strict, ks, cf, [global_table, upload, &shard_gen] (shard_id shard) {
-            auto gen = shard_gen[shard].fetch_add(smp::count, std::memory_order_relaxed);
-            return make_sstable(*global_table, upload, gen);
+        reshape(directory, db, sstables::reshape_mode::strict, ks, cf, [&] (shard_id shard) {
+            return make_sstable(*global_table, upload, new_generation_for_shard(shard));
         }, [] (const sstables::shared_sstable&) { return true; }, service::get_local_streaming_priority()).get();
 
         // Move to staging directory to avoid clashes with future uploads. Unique generation number ensures no collisions.
@@ -560,7 +557,7 @@ class table_populator {
     fs::path _base_path;
     std::unordered_map<sstring, lw_shared_ptr<sharded<sstables::sstable_directory>>> _sstable_directories;
     sstables::sstable_version_types _highest_version = sstables::oldest_writable_sstable_format;
-    sstables::generation_type _highest_generation = sstables::generation_from_value(0);
+    std::optional<sstables::generation_type> _highest_generation;
 
 public:
     table_populator(distributed<replica::database>& db, sstring ks, sstring cf)
@@ -658,7 +655,11 @@ future<> table_populator::start_subdir(sstring subdir) {
     auto generation = co_await highest_generation_seen(directory);
 
     _highest_version = std::max(sst_version, _highest_version);
-    _highest_generation = std::max(generation, _highest_generation);
+    if (generation) {
+        _highest_generation = _highest_generation ?
+            std::max(*generation, *_highest_generation) :
+            *generation;
+    }
 }
 
 sstables::shared_sstable make_sstable(replica::table& table, fs::path dir, sstables::generation_type generation, sstables::sstable_version_types v) {
@@ -730,6 +731,16 @@ future<> distributed_loader::populate_keyspace(distributed<replica::database>& d
     co_await coroutine::parallel_for_each(ks.metadata()->cf_meta_data() | boost::adaptors::map_values, [&] (schema_ptr s) -> future<> {
         auto uuid = s->id();
         lw_shared_ptr<replica::column_family> cf = column_families[uuid];
+
+        // System tables (from system and system_schema keyspaces) are loaded in two phases.
+        // The populate_keyspace function can be called in the second phase for tables that
+        // were already populated in the first phase.
+        // This check protects from double-populating them, since every populated cf
+        // is marked as ready_for_writes.
+        if (cf->is_ready_for_writes()) {
+            co_return;
+        }
+
         sstring cfname = cf->schema()->cf_name();
         auto sstdir = ks.column_family_directory(ksdir, cfname, uuid);
         dblog.info("Keyspace {}: Reading CF {} id={} version={}", ks_name, cfname, uuid, s->version());
@@ -764,34 +775,37 @@ future<> distributed_loader::populate_keyspace(distributed<replica::database>& d
     });
 }
 
-future<> distributed_loader::init_system_keyspace(sharded<db::system_keyspace>& sys_ks, distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, sharded<service::raft_group_registry>& raft_gr, db::config& cfg, db::table_selector& tables) {
+future<> distributed_loader::init_system_keyspace(sharded<db::system_keyspace>& sys_ks, distributed<replica::database>& db, distributed<service::storage_service>& ss, sharded<gms::gossiper>& g, sharded<service::raft_group_registry>& raft_gr, db::config& cfg, system_table_load_phase phase) {
     population_started = true;
 
-    return seastar::async([&sys_ks, &db, &ss, &cfg, &g, &raft_gr, &tables] {
-        sys_ks.invoke_on_all([&db, &ss, &cfg, &g, &raft_gr, &tables] (auto& sys_ks) {
-            return sys_ks.make(db, ss, g, raft_gr, cfg, tables);
+    return seastar::async([&sys_ks, &db, &ss, &cfg, &g, &raft_gr, phase] {
+        sys_ks.invoke_on_all([&db, &ss, &cfg, &g, &raft_gr, phase] (auto& sys_ks) {
+            return sys_ks.make(db, ss, g, raft_gr, cfg, phase);
         }).get();
 
         const auto& cfg = db.local().get_config();
         for (auto& data_dir : cfg.data_file_directories()) {
             for (auto ksname : system_keyspaces) {
-                if (!tables.contains_keyspace(ksname)) {
-                    continue;
+                if (db.local().has_keyspace(ksname)) {
+                    distributed_loader::populate_keyspace(db, data_dir, sstring(ksname)).get();
                 }
-                distributed_loader::populate_keyspace(db, data_dir, sstring(ksname)).get();
             }
         }
 
-        db.invoke_on_all([&tables] (replica::database& db) {
+        db.invoke_on_all([] (replica::database& db) {
             for (auto ksname : system_keyspaces) {
-                if (!tables.contains_keyspace(ksname)) {
+                if (!db.has_keyspace(ksname)) {
                     continue;
                 }
                 auto& ks = db.find_keyspace(ksname);
                 for (auto& pair : ks.metadata()->cf_meta_data()) {
                     auto cfm = pair.second;
                     auto& cf = db.find_column_family(cfm);
-                    cf.mark_ready_for_writes();
+                    // During phase2 some tables may have already been
+                    // marked as 'ready for writes' at phase1.
+                    if (!cf.is_ready_for_writes()) {
+                        cf.mark_ready_for_writes();
+                    }
                 }
                 // for system keyspaces, we only do this post all population, and
                 // only as a consistency measure.
@@ -851,7 +865,7 @@ future<> distributed_loader::init_non_system_keyspaces(distributed<replica::data
                  * in open-source version. But essential for enterprise.
                  * Do _not_ remove or refactor away.
                  */
-                if (prio_only != is_load_prio_keyspace(ks_name)) {
+                if (prio_only != cfg.extensions().is_extension_internal_keyspace(ks_name)) {
                     continue;
                 }
 

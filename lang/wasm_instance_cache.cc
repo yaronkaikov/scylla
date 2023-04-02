@@ -291,11 +291,4 @@ inline std::ostream& operator<<(std::ostream& out, const seastar::scheduling_gro
     return out << sg.name();
 }
 
-template <>
-struct equal_to<seastar::scheduling_group> {
-    bool operator()(seastar::scheduling_group& sg1, seastar::scheduling_group& sg2) const noexcept {
-        return sg1 == sg2;
-    }
-};
-
 }

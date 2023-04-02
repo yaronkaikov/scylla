@@ -15,6 +15,7 @@ import subprocess
 import tarfile
 import pathlib
 import shutil
+import sys
 
 
 RELOC_PREFIX='scylla'
@@ -71,6 +72,8 @@ ap.add_argument('--mode', dest='mode', default='release',
                 help='Build mode (debug/release) to use')
 ap.add_argument('--stripped', action='store_true',
                 help='use stripped binaries')
+ap.add_argument('--print-libexec', action='store_true',
+                help='print libexec executables and exit script')
 
 args = ap.parse_args()
 
@@ -90,6 +93,11 @@ executables_distrocmd = [
                 '/usr/bin/lsblk']
 
 executables = executables_scylla + executables_distrocmd
+
+if args.print_libexec:
+    for exec in executables:
+        print(f'libexec/{os.path.basename(exec)}')
+    sys.exit(0)
 
 output = args.dest
 
@@ -156,14 +164,7 @@ ar.reloc_add('ORIGIN')
 ar.reloc_add('licenses')
 ar.reloc_add('swagger-ui')
 ar.reloc_add('api')
-def exclude_submodules(tarinfo):
-    if tarinfo.name in ('scylla/tools/jmx',
-                        'scylla/tools/java',
-                        'scylla/tools/python3',
-                        'scylla/tools/cqlsh'):
-        return None
-    return tarinfo
-ar.reloc_add('tools', filter=exclude_submodules)
+ar.reloc_add('tools/scyllatop')
 ar.reloc_add('scylla-gdb.py')
 ar.reloc_add('build/debian/debian', arcname='debian')
 ar.reloc_add('build/node_exporter', arcname='node_exporter')

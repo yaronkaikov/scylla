@@ -1027,18 +1027,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }
             view_hints_dir_initializer.ensure_created_and_verified().get();
 
-            static sharded<wasm::instance_cache> wasm_instance_cache;
-            auto udf_enabled = cfg->enable_user_defined_functions() && cfg->check_experimental(db::experimental_features_t::feature::UDF);
-            std::any stop_udf_cache_handlers;
-            std::shared_ptr<wasm::alien_thread_runner> alien_runner;
-            if (udf_enabled) {
-                supervisor::notify("starting wasm udf cache");
-                size_t max_cache_size = dbcfg.available_memory * cfg->wasm_cache_memory_fraction();
-                wasm_instance_cache.start(max_cache_size, cfg->wasm_cache_instance_size_limit(), std::chrono::milliseconds(cfg->wasm_cache_timeout_in_ms())).get();
-                stop_udf_cache_handlers = defer_verbose_shutdown("udf cache", [] {
-                    wasm_instance_cache.stop().get();
-                });
-                alien_runner = std::make_shared<wasm::alien_thread_runner>();
+            std::optional<wasm::startup_context> wasm_ctx;
+            if (cfg->enable_user_defined_functions() && cfg->check_experimental(db::experimental_features_t::feature::UDF)) {
+                wasm_ctx.emplace(*cfg, dbcfg);
             }
 
             auto get_tm_cfg = sharded_parameter([&] {
@@ -1093,8 +1084,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // done only by shard 0, so we'll no longer face race conditions as
             // described here: https://github.com/scylladb/scylla/issues/1014
             supervisor::notify("loading system sstables");
-            auto system_keyspace_sel = db::table_selector::all_in_keyspace(db::system_keyspace::NAME);
-            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, *system_keyspace_sel).get();
+            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, system_table_load_phase::phase1).get();
 
             smp::invoke_on_all([blocked_reactor_notify_ms] {
                 engine().update_blocked_reactor_notify_ms(blocked_reactor_notify_ms);
@@ -1170,17 +1160,11 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                                                      std::chrono::duration_cast<std::chrono::milliseconds>(cql3::prepared_statements_cache::entry_expiry));
             auth_prep_cache_config.refresh = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
 
-            qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config), std::move(auth_prep_cache_config), std::ref(group0_client)).get();
+            qp.start(std::ref(proxy), std::ref(forward_service), std::move(local_data_dict), std::ref(mm_notifier), std::ref(mm), qp_mcfg, std::ref(cql_config), std::move(auth_prep_cache_config), std::ref(group0_client), std::move(wasm_ctx)).get();
             extern sharded<cql3::query_processor>* hack_query_processor_for_encryption;
             hack_query_processor_for_encryption = &qp;
             // #293 - do not stop anything
             // engine().at_exit([&qp] { return qp.stop(); });
-            if (udf_enabled) {
-                qp.invoke_on_all([&] (cql3::query_processor& qp) {
-                    qp.set_wasm_instance_cache(&wasm_instance_cache.local());
-                    qp.set_alien_runner(alien_runner);
-                }).get();
-            }
             sstables::init_metrics().get();
 
             // FIXME -- this sys_ks start should really be up above, where its instance
@@ -1198,22 +1182,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             bm.start(std::ref(qp), std::ref(sys_ks), bm_cfg).get();
 
-            if (raft_gr.local().is_enabled()) {
-                auto my_raft_id = raft::server_id{cfg->host_id.uuid()};
-                supervisor::notify("starting Raft Group Registry service");
-                raft_gr.invoke_on_all([my_raft_id] (service::raft_group_registry& raft_gr) {
-                    return raft_gr.start(my_raft_id);
-                }).get();
-            } else {
-                if (cfg->check_experimental(db::experimental_features_t::feature::BROADCAST_TABLES)) {
-                    startlog.error("Bad configuration: RAFT feature has to be enabled if BROADCAST_TABLES is enabled");
-                    throw bad_configuration_error();
-                }
-            }
-
-
-            group0_client.init().get();
-
             db::sstables_format_selector sst_format_selector(gossiper.local(), feature_service, db);
 
             sst_format_selector.start().get();
@@ -1226,14 +1194,31 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // since some features affect storage.
             db::system_keyspace::enable_features_on_startup(feature_service).get();
 
-            db.local().before_schema_keyspace_init();
+            db.local().maybe_init_schema_commitlog();
 
             // Init schema tables only after enable_features_on_startup()
             // because table construction consults enabled features.
             // Needs to be before system_keyspace::setup(), which writes to schema tables.
             supervisor::notify("loading system_schema sstables");
-            auto schema_keyspace_sel = db::table_selector::all_in_keyspace(db::schema_tables::NAME);
-            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, *schema_keyspace_sel).get();
+            replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, system_table_load_phase::phase2).get();
+
+            if (raft_gr.local().is_enabled()) {
+                if (!db.local().uses_schema_commitlog()) {
+                    startlog.error("Bad configuration: consistent_cluster_management requires schema commit log to be enabled");
+                    throw bad_configuration_error();
+                }
+                auto my_raft_id = raft::server_id{cfg->host_id.uuid()};
+                supervisor::notify("starting Raft Group Registry service");
+                raft_gr.invoke_on_all([my_raft_id] (service::raft_group_registry& raft_gr) {
+                    return raft_gr.start(my_raft_id);
+                }).get();
+            } else {
+                if (cfg->check_experimental(db::experimental_features_t::feature::BROADCAST_TABLES)) {
+                    startlog.error("Bad configuration: RAFT feature has to be enabled if BROADCAST_TABLES is enabled");
+                    throw bad_configuration_error();
+                }
+            }
+            group0_client.init().get();
 
             // schema migration, if needed, is also done on shard 0
             db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
@@ -1293,7 +1278,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             replica::distributed_loader::init_non_system_keyspaces(db, proxy, sys_ks).get();
 
             supervisor::notify("starting view update generator");
-            view_update_generator.start(std::ref(db)).get();
+            view_update_generator.start(std::ref(db), std::ref(proxy)).get();
 
             supervisor::notify("starting commit log");
             auto cl = db.local().commitlog();
@@ -1627,7 +1612,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             static sharded<db::view::view_builder> view_builder;
             if (cfg->view_building()) {
                 supervisor::notify("starting the view builder");
-                view_builder.start(std::ref(db), std::ref(sys_ks), std::ref(sys_dist_ks), std::ref(mm_notifier)).get();
+                view_builder.start(std::ref(db), std::ref(sys_ks), std::ref(sys_dist_ks), std::ref(mm_notifier), std::ref(view_update_generator)).get();
                 view_builder.invoke_on_all([&mm] (db::view::view_builder& vb) { 
                     return vb.start(mm.local());
                 }).get();
