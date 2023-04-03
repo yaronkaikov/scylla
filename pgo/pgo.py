@@ -399,7 +399,6 @@ async def start_node(executable: PathLike, cluster_workdir: PathLike, addr: str,
         os.path.realpath(executable),
         f"--workdir={scylla_workdir}",
         "--ring-delay-ms=0",
-        "--skip-wait-for-gossip-to-settle=0",
         "--developer-mode=yes",
         "--memory=1G",
         "--unsafe-bypass-fsync=1",
@@ -448,7 +447,7 @@ async def start_cluster(executable: PathLike, addrs: list[str], cpusets: Optiona
     else:
         cpuset_args = [["--smp=2", "--overprovisioned"] for i in range(len(addrs))]
 
-    timeout = 30
+    timeout = 300
     procs = []
     seed = addrs[0]
     try:
