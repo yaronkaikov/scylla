@@ -1032,6 +1032,7 @@ scylla_core = (['message/messaging_service.cc',
                 'tombstone_gc.cc',
                 'utils/disk-error-handler.cc',
                 'utils/hashers.cc',
+                'utils/aws_sigv4.cc',
                 'duration.cc',
                 'vint-serialization.cc',
                 'utils/arch/powerpc/crc32-vpmsum/crc32_wrapper.cc',
@@ -1351,7 +1352,6 @@ deps['test/boost/reusable_buffer_test'] = [
 ]
 deps['test/boost/utf8_test'] = ['utils/utf8.cc', 'test/boost/utf8_test.cc']
 deps['test/boost/small_vector_test'] = ['test/boost/small_vector_test.cc']
-deps['test/boost/multishard_mutation_query_test'] += ['test/boost/test_table.cc']
 deps['test/boost/vint_serialization_test'] = ['test/boost/vint_serialization_test.cc', 'vint-serialization.cc', 'bytes.cc']
 deps['test/boost/linearizing_input_stream_test'] = [
     "test/boost/linearizing_input_stream_test.cc",
@@ -2121,6 +2121,8 @@ with open(buildfile, 'w') as f:
                     local_libs += ' ' + maybe_static(args.staticboost, '-lboost_unit_test_framework')
                 if binary not in tests_not_using_seastar_test_framework:
                     local_libs += f' {seastar_testing_libs}'
+                else:
+                    local_libs += ' ' + '-lgnutls'
                 # Our code's debugging information is huge, and multiplied
                 # by many tests yields ridiculous amounts of disk space.
                 # So we strip the tests by default; The user can very

@@ -67,6 +67,7 @@
 #include "service/raft/raft_group0_client.hh"
 #include "service/raft/raft_group0.hh"
 #include "init.hh"
+#include "utils/fb_utilities.hh"
 
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -512,6 +513,7 @@ public:
                 data_dir_path = cfg->data_file_directories()[0];
             }
             cfg->commitlog_directory.set(data_dir_path + "/commitlog.dir");
+            cfg->schema_commitlog_directory.set(cfg->commitlog_directory() + "/schema");
             cfg->hints_directory.set(data_dir_path + "/hints.dir");
             cfg->view_hints_directory.set(data_dir_path + "/view_hints.dir");
             cfg->num_tokens.set(256);
@@ -523,6 +525,7 @@ public:
             }
             create_directories((data_dir_path + "/system").c_str());
             create_directories(cfg->commitlog_directory().c_str());
+            create_directories(cfg->schema_commitlog_directory().c_str());
             create_directories(cfg->hints_directory().c_str());
             create_directories(cfg->view_hints_directory().c_str());
             for (unsigned i = 0; i < smp::count; ++i) {
@@ -561,6 +564,8 @@ public:
 
             sharded<locator::shared_token_metadata> token_metadata;
             locator::token_metadata::config tm_cfg;
+            tm_cfg.topo_cfg.this_host_id = cfg->host_id;
+            tm_cfg.topo_cfg.this_endpoint = utils::fb_utilities::get_broadcast_address();
             tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
             token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg).get();
             auto stop_token_metadata = defer([&token_metadata] { token_metadata.stop().get(); });
