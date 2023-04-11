@@ -257,7 +257,7 @@ incremental_compaction_strategy::get_major_compaction_job(table_state& t, std::v
     if (candidates.empty()) {
         return compaction_descriptor();
     }
-    return compaction_descriptor(std::move(candidates), service::get_local_compaction_priority(), 0, _fragment_size);
+    return make_major_compaction_job(std::move(candidates), 0, _fragment_size);
 }
 
 int64_t incremental_compaction_strategy::estimated_pending_compactions(table_state& t) const {
