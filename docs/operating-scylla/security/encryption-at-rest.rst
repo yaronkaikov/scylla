@@ -68,6 +68,7 @@ Table keys are used for encrypting SSTables. Depending on your key provider, thi
 
 * Replicated Key Provider - encrypted_keys table
 * KMIP Key Provider - KMIP server
+* KMS Key Provider - AWS
 * Local Key Provider - in a local file with multiple keys. You can provide your own key or Scylla can make one for you.
 
 Key Providers
@@ -91,6 +92,9 @@ When encrypting the system tables or SSTables, you need to state which provider 
    * - KMIP Key Provider 
      - KmipKeyProviderFactory
      - External key management server (available from 2019.1.3)
+   * - KMS Key Provider
+     - KmsKeyProviderFactory
+     - Uses key(s) provided by the AWS KMS service.
 
 Cipher Algorithms
 =================
@@ -134,7 +138,7 @@ This procedure demonstrates how to encrypt a new table.
 
 **Before you Begin**
 
-* Make sure to `Set the KMIP Host`_ if you are using KMIP.
+* Make sure to `Set the KMIP Host`_ if you are using KMIP, or the the :ref:`KMS Host <encryption-at-rest-set-kms>` if you are using AWS KMS.
 
 * If you want to make your own key, use the procedure in `Create Encryption Keys`_ and skip to step 3. If you do not create your own key, Scylla will create one for you in the ``secret_key_file`` path. If you are not creating your own key, start with step 1.  
 
@@ -298,6 +302,7 @@ Create Encryption Keys
 Depending on your key provider, you will either have the option of allowing Scylla to generate an encryption key, or you will have to provide one:
 
 * KMIP Key Provider - you don't need to generate any key yourself
+* KMS Key Provider - you must generate a key yourself in AWS
 * Replicated Key Provider - you must generate a system key yourself
 * Local Key Provider - If you do not generate your own secret key, Scylla will create one for you
 
@@ -439,9 +444,21 @@ Once this encryption is enabled, it is used for all system data.
          key_provider: KmipKeyProviderFactory
          kmip_host:  yourkmipServerIP.com
 
-   Where: 
+   Where ``kmip_host`` is the address for your KMIP server.
 
-   * ``kmip_host`` - is the address for your KMIP server
+   Example for KMS:
+
+   .. code-block:: none
+
+      system_info_encryption:
+         enabled: True
+         cipher_algorithm: AES/CBC/PKCS5Padding
+         secret_key_strength: 128  
+         key_provider: KmsKeyProviderFactory
+         kms_host: myScylla
+
+   Where ``kms_host`` is the unique name of the KMS host specified in the scylla.yaml file.
+
 
 #. Do not close the yaml file. Change the system key directory location according to your settings. 
 
@@ -529,6 +546,54 @@ If you are using :term:`KMIP <Key Management Interoperability Protocol (KMIP)>` 
 
 .. include:: /rst_include/scylla-commands-restart-index.rst
  
+.. _encryption-at-rest-set-kms:
+
+Set the KMS Host
+=================
+
+If you are using AWS KMS to encrypt tables or system information, add the KMS information to the ``scylla.yaml`` configuration file. 
+
+#. Edit the ``scylla.yaml`` file located in ``/etc/scylla/`` to add the following in KMS host(s) section:
+
+   .. code-block:: yaml
+
+       kms_hosts:
+         <name>:
+             endpoint: http(s)://<host>(:port) (optional if `aws_region` is specified)
+             aws_region: <aws region> (optional if `endpoint` is specified)
+             aws_access_key_id: <aws access key id> (optional)
+             aws_secret_access_key: <aws secret access key> (optional)
+             master_key: <named KMS key for encrypting data keys> (required)
+             certificate: <identifying certificate> (optional)
+             keyfile: <identifying key> (optional)
+             truststore: <truststore for SSL connection> (optional)
+             priority_string: <KMS TLS priority string> (optional)
+      #   <name>:
+   
+   Where:
+
+   * ``<name>`` - The cluster name.
+   * ``endpoint`` - The explicit KMS host endpoint. If not provided, ``aws_region`` is used for connection.
+   * ``aws_region`` - An AWS region. If not provided, ``endpoint`` is used for connection.
+   * ``aws_access_key_id`` - AWS access key used for authentication. If not specified, the provider reads it from your AWS credentials.
+   * ``aws_secret_access_key`` - AWS secret access key used for authentication. If not specified, the provider reads it from your AWS credentials.
+   * ``master_key`` - The ID or alias of your AWS KMS key. The key must be generated with an appropriate access policy so that the AWS user has permissions to read the key and encrypt data using that key. This parameter is required.
+   * ``certificate`` - The name of the certificate and the path used to identify yourself to the KMS server.
+   * ``keyfile`` - The name of the key for the certificate. It is generated together with the certificate.
+   * ``truststore`` - The location and key for the truststore to present to the KMS server.
+   * ``priority_string`` - The KMS TLS priority string.
+
+   .. note::
+
+      Not that either ``endpoint`` or ``aws_region`` must be set (one of them is required for connection).
+
+#. Save the file. 
+#. Drain the node with :doc:`nodetool drain </operating-scylla/nodetool-commands/drain>`
+#. Restart the scylla-server service.
+
+.. include:: /rst_include/scylla-commands-restart-index.rst
+
+
 When a Key is Lost
 ==================
 
