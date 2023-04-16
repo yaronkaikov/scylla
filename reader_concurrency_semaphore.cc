@@ -138,7 +138,7 @@ private:
     reader_resources _base_resources;
     bool _base_resources_consumed = false;
     reader_resources _resources;
-    reader_permit::state _state = reader_permit::state::active_unused;
+    reader_permit::state _state = reader_permit::state::active;
     uint64_t _used_branches = 0;
     bool _marked_as_used = false;
     uint64_t _blocked_branches = 0;
@@ -174,14 +174,14 @@ private:
     }
     void on_permit_active() {
         if (_used_branches) {
-            _state = reader_permit::state::active_used;
+            _state = reader_permit::state::active_need_cpu;
             on_permit_used();
             if (_blocked_branches) {
-                _state = reader_permit::state::active_blocked;
+                _state = reader_permit::state::active_await;
                 on_permit_blocked();
             }
         } else {
-            _state = reader_permit::state::active_unused;
+            _state = reader_permit::state::active;
         }
     }
 
@@ -308,7 +308,7 @@ public:
     }
 
     void on_admission() {
-        assert(_state != reader_permit::state::active_blocked);
+        assert(_state != reader_permit::state::active_await);
         on_permit_active();
         consume(_base_resources);
         _base_resources_consumed = true;
@@ -326,7 +326,7 @@ public:
     }
 
     void on_register_as_inactive() {
-        assert(_state == reader_permit::state::active_unused || _state == reader_permit::state::active_used || _state == reader_permit::state::waiting_for_memory);
+        assert(_state == reader_permit::state::active || _state == reader_permit::state::active_need_cpu || _state == reader_permit::state::waiting_for_memory);
         on_permit_inactive(reader_permit::state::inactive);
     }
 
@@ -386,11 +386,11 @@ public:
 
     void mark_used() noexcept {
         ++_used_branches;
-        if (!_marked_as_used && _state == reader_permit::state::active_unused) {
-            _state = reader_permit::state::active_used;
+        if (!_marked_as_used && _state == reader_permit::state::active) {
+            _state = reader_permit::state::active_need_cpu;
             on_permit_used();
             if (_blocked_branches && !_marked_as_blocked) {
-                _state = reader_permit::state::active_blocked;
+                _state = reader_permit::state::active_await;
                 on_permit_blocked();
             }
         }
@@ -406,15 +406,15 @@ public:
             if (_marked_as_blocked) {
                 on_permit_unblocked();
             }
-            _state = reader_permit::state::active_unused;
+            _state = reader_permit::state::active;
             on_permit_unused();
         }
     }
 
     void mark_blocked() noexcept {
         ++_blocked_branches;
-        if (_blocked_branches == 1 && _state == reader_permit::state::active_used) {
-            _state = reader_permit::state::active_blocked;
+        if (_blocked_branches == 1 && _state == reader_permit::state::active_need_cpu) {
+            _state = reader_permit::state::active_await;
             on_permit_blocked();
         }
     }
@@ -423,7 +423,7 @@ public:
         assert(_blocked_branches);
         --_blocked_branches;
         if (_marked_as_blocked && !_blocked_branches) {
-            _state = reader_permit::state::active_used;
+            _state = reader_permit::state::active_need_cpu;
             on_permit_unblocked();
         }
     }
@@ -639,14 +639,14 @@ std::ostream& operator<<(std::ostream& os, reader_permit::state s) {
         case reader_permit::state::waiting_for_execution:
             os << "waiting_for_execution";
             break;
-        case reader_permit::state::active_unused:
-            os << "active/unused";
+        case reader_permit::state::active:
+            os << "active";
             break;
-        case reader_permit::state::active_used:
-            os << "active/used";
+        case reader_permit::state::active_need_cpu:
+            os << "active/need_cpu";
             break;
-        case reader_permit::state::active_blocked:
-            os << "active/blocked";
+        case reader_permit::state::active_await:
+            os << "active/await";
             break;
         case reader_permit::state::inactive:
             os << "inactive";
@@ -870,6 +870,10 @@ reader_permit::impl& reader_concurrency_semaphore::wait_queue::front() {
     }
 }
 
+const reader_permit::impl& reader_concurrency_semaphore::wait_queue::front() const {
+    return const_cast<wait_queue&>(*this).front();
+}
+
 namespace {
 
 struct stop_execution_loop {
@@ -983,16 +987,9 @@ reader_concurrency_semaphore::inactive_read_handle reader_concurrency_semaphore:
     permit->on_register_as_inactive();
     if (_blessed_permit == &*permit) {
         _blessed_permit = nullptr;
-        // No need to call maybe_admit_waiters() here.
-        // If there are waiters, the reader is going to be evicted below,
-        // triggering a call to maybe_admit_waiters() as its resources are
-        // released.
+        maybe_admit_waiters();
     }
-    // Implies _inactive_reads.empty(), we don't queue new readers before
-    // evicting all inactive reads.
-    // Checking the _wait_list covers the count resources only, so check memory
-    // separately.
-    if (_wait_list.empty() && _resources.memory > 0) {
+    if (!should_evict_inactive_read()) {
       try {
         permit->aux_data().ir.emplace(std::move(reader));
         permit->unlink();
@@ -1208,7 +1205,7 @@ void reader_concurrency_semaphore::evict_readers_in_background() {
     // This is safe since stop() closes _gate;
     (void)with_gate(_close_readers_gate, [this] {
         return repeat([this] {
-            if (_wait_list.empty() || _inactive_reads.empty()) {
+            if (_inactive_reads.empty() || !should_evict_inactive_read()) {
                 _evicting = false;
                 return make_ready_future<stop_iteration>(stop_iteration::yes);
             }
@@ -1262,6 +1259,17 @@ reader_concurrency_semaphore::can_admit_read(const reader_permit::impl& permit) 
     }
 
     return {can_admit::yes, reason::all_ok};
+}
+
+bool reader_concurrency_semaphore::should_evict_inactive_read() const noexcept {
+    if (_resources.memory < 0 || _resources.count < 0) {
+        return true;
+    }
+    if (_wait_list.empty()) {
+        return false;
+    }
+    const auto r = can_admit_read(_wait_list.front()).why;
+    return r == reason::memory_resources || r == reason::count_resources;
 }
 
 future<> reader_concurrency_semaphore::do_wait_admission(reader_permit::impl& permit) {
@@ -1379,9 +1387,9 @@ void reader_concurrency_semaphore::dequeue_permit(reader_permit::impl& permit) {
         case reader_permit::state::evicted:
             --_stats.inactive_reads;
             break;
-        case reader_permit::state::active_unused:
-        case reader_permit::state::active_used:
-        case reader_permit::state::active_blocked:
+        case reader_permit::state::active:
+        case reader_permit::state::active_need_cpu:
+        case reader_permit::state::active_await:
             on_internal_error_noexcept(rcslog, format("reader_concurrency_semaphore::dequeue_permit(): unrecognized queued state: {}", permit.get_state()));
     }
     permit.unlink();

@@ -220,7 +220,7 @@ const node* topology::update_node(node* node, std::optional<host_id> opt_id, std
         }
     }
     if (opt_st) {
-        changed = node->get_state() != *opt_st;
+        changed |= node->get_state() != *opt_st;
     }
 
     if (!changed) {
@@ -493,6 +493,14 @@ std::weak_ordering topology::compare_endpoints(const inet_address& address, cons
     int d2 = ((same_dc2 << 2) | (same_rack2 << 1) | same_node2) ^ 7;
 
     return d1 <=> d2;
+}
+
+void topology::for_each_node(std::function<void(const node*)> func) const {
+    for (const auto& np : _nodes) {
+        if (np) {
+            func(np.get());
+        }
+    }
 }
 
 } // namespace locator

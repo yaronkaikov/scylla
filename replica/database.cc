@@ -2186,7 +2186,7 @@ std::ostream& operator<<(std::ostream& os, operation_type op_type) {
 std::ostream&
 operator<<(std::ostream& os, const exploded_clustering_prefix& ecp) {
     // Can't pass to_hex() to transformed(), since it is overloaded, so wrap:
-    auto enhex = [] (auto&& x) { return to_hex(x); };
+    auto enhex = [] (auto&& x) { return fmt_hex(x); };
     fmt::print(os, "prefix{{{}}}", fmt::join(ecp._v | boost::adaptors::transformed(enhex), ":"));
     return os;
 }
@@ -2811,9 +2811,11 @@ database::as_data_dictionary() const {
 void database::plug_system_keyspace(db::system_keyspace& sys_ks) noexcept {
     _compaction_manager.plug_system_keyspace(sys_ks);
     _large_data_handler->plug_system_keyspace(sys_ks);
+    _user_sstables_manager->plug_system_keyspace(sys_ks);
 }
 
 void database::unplug_system_keyspace() noexcept {
+    _user_sstables_manager->unplug_system_keyspace();
     _compaction_manager.unplug_system_keyspace();
     _large_data_handler->unplug_system_keyspace();
 }

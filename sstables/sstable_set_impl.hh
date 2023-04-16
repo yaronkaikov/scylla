@@ -30,7 +30,7 @@ public:
     virtual std::vector<shared_sstable> select(const dht::partition_range& range) const = 0;
     virtual std::vector<sstable_run> select_sstable_runs(const std::vector<shared_sstable>& sstables) const;
     virtual lw_shared_ptr<const sstable_list> all() const = 0;
-    virtual void for_each_sstable(std::function<void(const shared_sstable&)> func) const = 0;
+    virtual stop_iteration for_each_sstable_until(std::function<stop_iteration(const shared_sstable&)> func) const = 0;
     virtual void insert(shared_sstable sst) = 0;
     virtual void erase(shared_sstable sst) = 0;
     virtual size_t size() const noexcept = 0;
@@ -95,7 +95,7 @@ public:
     virtual std::vector<shared_sstable> select(const dht::partition_range& range) const override;
     virtual std::vector<sstable_run> select_sstable_runs(const std::vector<shared_sstable>& sstables) const override;
     virtual lw_shared_ptr<const sstable_list> all() const override;
-    virtual void for_each_sstable(std::function<void(const shared_sstable&)> func) const override;
+    virtual stop_iteration for_each_sstable_until(std::function<stop_iteration(const shared_sstable&)> func) const override;
     virtual void insert(shared_sstable sst) override;
     virtual void erase(shared_sstable sst) override;
     virtual size_t size() const noexcept override;
@@ -109,19 +109,20 @@ private:
 
     schema_ptr _schema;
     schema_ptr _reversed_schema; // == _schema->make_reversed();
+    bool _enable_optimized_twcs_queries;
     // s.min_position() -> s, ordered using _schema
     lw_shared_ptr<container_t> _sstables;
     // s.max_position().reversed() -> s, ordered using _reversed_schema; the set of values is the same as in _sstables
     lw_shared_ptr<container_t> _sstables_reversed;
 
 public:
-    time_series_sstable_set(schema_ptr schema);
+    time_series_sstable_set(schema_ptr schema, bool enable_optimized_twcs_queries);
     time_series_sstable_set(const time_series_sstable_set& s);
 
     virtual std::unique_ptr<sstable_set_impl> clone() const override;
     virtual std::vector<shared_sstable> select(const dht::partition_range& range = query::full_partition_range) const override;
     virtual lw_shared_ptr<const sstable_list> all() const override;
-    virtual void for_each_sstable(std::function<void(const shared_sstable&)> func) const override;
+    virtual stop_iteration for_each_sstable_until(std::function<stop_iteration(const shared_sstable&)> func) const override;
     virtual void insert(shared_sstable sst) override;
     virtual void erase(shared_sstable sst) override;
     virtual size_t size() const noexcept override;
@@ -161,7 +162,7 @@ public:
     virtual std::vector<shared_sstable> select(const dht::partition_range& range = query::full_partition_range) const override;
     virtual std::vector<sstable_run> select_sstable_runs(const std::vector<shared_sstable>& sstables) const override;
     virtual lw_shared_ptr<const sstable_list> all() const override;
-    virtual void for_each_sstable(std::function<void(const shared_sstable&)> func) const override;
+    virtual stop_iteration for_each_sstable_until(std::function<stop_iteration(const shared_sstable&)> func) const override;
     virtual void insert(shared_sstable sst) override;
     virtual void erase(shared_sstable sst) override;
     virtual size_t size() const noexcept override;

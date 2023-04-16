@@ -162,7 +162,14 @@ sstable_set::all() const {
 }
 
 void sstable_set::for_each_sstable(std::function<void(const shared_sstable&)> func) const {
-    return _impl->for_each_sstable(std::move(func));
+    _impl->for_each_sstable_until([func = std::move(func)] (const shared_sstable& sst) {
+        func(sst);
+        return stop_iteration::no;
+    });
+}
+
+stop_iteration sstable_set::for_each_sstable_until(std::function<stop_iteration(const shared_sstable&)> func) const {
+    return _impl->for_each_sstable_until(std::move(func));
 }
 
 void
@@ -315,10 +322,13 @@ lw_shared_ptr<const sstable_list> partitioned_sstable_set::all() const {
     return _all;
 }
 
-void partitioned_sstable_set::for_each_sstable(std::function<void(const shared_sstable&)> func) const {
+stop_iteration partitioned_sstable_set::for_each_sstable_until(std::function<stop_iteration(const shared_sstable&)> func) const {
     for (auto& sst : *_all) {
-        func(sst);
+        if (func(sst)) {
+            return stop_iteration::yes;
+        }
     }
+    return stop_iteration::no;
 }
 
 void partitioned_sstable_set::insert(shared_sstable sst) {
@@ -420,9 +430,10 @@ public:
     }
 };
 
-time_series_sstable_set::time_series_sstable_set(schema_ptr schema)
+time_series_sstable_set::time_series_sstable_set(schema_ptr schema, bool enable_optimized_twcs_queries)
     : _schema(std::move(schema))
     , _reversed_schema(_schema->make_reversed())
+    , _enable_optimized_twcs_queries(enable_optimized_twcs_queries)
     , _sstables(make_lw_shared<container_t>(position_in_partition::less_compare(*_schema)))
     , _sstables_reversed(make_lw_shared<container_t>(position_in_partition::less_compare(*_reversed_schema)))
 {}
@@ -430,6 +441,7 @@ time_series_sstable_set::time_series_sstable_set(schema_ptr schema)
 time_series_sstable_set::time_series_sstable_set(const time_series_sstable_set& s)
     : _schema(s._schema)
     , _reversed_schema(s._reversed_schema)
+    , _enable_optimized_twcs_queries(s._enable_optimized_twcs_queries)
     , _sstables(make_lw_shared(*s._sstables))
     , _sstables_reversed(make_lw_shared(*s._sstables_reversed))
 {}
@@ -451,10 +463,13 @@ time_series_sstable_set::size() const noexcept {
     return _sstables->size();
 }
 
-void time_series_sstable_set::for_each_sstable(std::function<void(const shared_sstable&)> func) const {
+stop_iteration time_series_sstable_set::for_each_sstable_until(std::function<stop_iteration(const shared_sstable&)> func) const {
     for (auto& entry : *_sstables) {
-        func(entry.second);
+        if (func(entry.second)) {
+            return stop_iteration::yes;
+        }
     }
+    return stop_iteration::no;
 }
 
 // O(log n)
@@ -671,7 +686,7 @@ std::unique_ptr<sstable_set_impl> leveled_compaction_strategy::make_sstable_set(
 }
 
 std::unique_ptr<sstable_set_impl> time_window_compaction_strategy::make_sstable_set(schema_ptr schema) const {
-    return std::make_unique<time_series_sstable_set>(std::move(schema));
+    return std::make_unique<time_series_sstable_set>(std::move(schema), _options.enable_optimized_twcs_queries);
 }
 
 sstable_set make_partitioned_sstable_set(schema_ptr schema, bool use_level_metadata) {
@@ -899,7 +914,7 @@ time_series_sstable_set::create_single_key_sstable_reader(
     //    TWCS sstables will usually pass this condition.
     // 4. The optimized query path must be enabled.
     using sst_entry = std::pair<position_in_partition, shared_sstable>;
-    if (!cf->get_config().enable_optimized_twcs_queries
+    if (!_enable_optimized_twcs_queries
             || schema->has_static_columns()
             || std::any_of(_sstables->begin(), _sstables->end(),
                 [] (const sst_entry& e) {
@@ -1022,12 +1037,13 @@ lw_shared_ptr<const sstable_list> compound_sstable_set::all() const {
     return ret;
 }
 
-void compound_sstable_set::for_each_sstable(std::function<void(const shared_sstable&)> func) const {
+stop_iteration compound_sstable_set::for_each_sstable_until(std::function<stop_iteration(const shared_sstable&)> func) const {
     for (auto& set : _sets) {
-        set->for_each_sstable([&func] (const shared_sstable& sst) {
-            func(sst);
-        });
+        if (set->for_each_sstable_until([&func] (const shared_sstable& sst) { return func(sst); })) {
+            return stop_iteration::yes;
+        }
     }
+    return stop_iteration::no;
 }
 
 void compound_sstable_set::insert(shared_sstable sst) {
@@ -1219,7 +1235,7 @@ flat_mutation_reader_v2 sstable_set::make_crawling_reader(
         tracing::trace_state_ptr trace_ptr,
         read_monitor_generator& monitor_generator) const {
     std::vector<flat_mutation_reader_v2> readers;
-    _impl->for_each_sstable([&] (const shared_sstable& sst) mutable {
+    for_each_sstable([&] (const shared_sstable& sst) mutable {
         readers.emplace_back(sst->make_crawling_reader(schema, permit, pc, trace_ptr, monitor_generator(sst)));
     });
     return make_combined_reader(schema, std::move(permit), std::move(readers), streamed_mutation::forwarding::no, mutation_reader::forwarding::no);

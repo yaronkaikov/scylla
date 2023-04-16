@@ -63,6 +63,7 @@
 #include "db/rate_limiter.hh"
 #include "db/operation_type.hh"
 #include "utils/serialized_action.hh"
+#include "compaction/compaction_fwd.hh"
 #include "service/qos/qos_configuration_change_subscriber.hh"
 #include "compaction/compaction_manager.hh"
 #include "utils/disk-error-handler.hh"
@@ -97,10 +98,6 @@ class compaction_data;
 class sstable_set;
 class directory_semaphore;
 
-}
-
-namespace compaction {
-class table_state;
 }
 
 namespace ser {
@@ -388,8 +385,6 @@ public:
         // for easy access from `table` member functions:
         utils::updateable_value<bool> reversed_reads_auto_bypass_cache{false};
         utils::updateable_value<bool> enable_optimized_reversed_reads{true};
-        // Can be updated by a schema change:
-        bool enable_optimized_twcs_queries{true};
         uint32_t tombstone_warn_threshold{0};
         unsigned x_log2_compaction_groups{0};
     };
@@ -554,7 +549,7 @@ private:
     // Select a compaction group from a given key.
     compaction_group& compaction_group_for_key(partition_key_view key, const schema_ptr& s) const noexcept;
     // Select a compaction group from a given sstable based on its token range.
-    compaction_group& compaction_group_for_sstable(const sstables::shared_sstable& sst) noexcept;
+    compaction_group& compaction_group_for_sstable(const sstables::shared_sstable& sst) const noexcept;
     // Returns a list of all compaction groups.
     const std::vector<std::unique_ptr<compaction_group>>& compaction_groups() const noexcept;
     // Safely iterate through compaction groups, while performing async operations on them.
@@ -583,9 +578,6 @@ private:
     sstables::generation_type calculate_generation_for_new_table();
 private:
     void rebuild_statistics();
-
-    // Called on schema change.
-    void update_optimized_twcs_queries_flag();
 private:
     mutation_source_opt _virtual_reader;
     std::optional<noncopyable_function<future<>(const frozen_mutation&)>> _virtual_writer;
@@ -1044,6 +1036,10 @@ public:
         return _index_manager;
     }
 
+    const secondary_index::secondary_index_manager& get_index_manager() const noexcept {
+        return _index_manager;
+    }
+
     sstables::sstables_manager& get_sstables_manager() noexcept {
         return _sstables_manager;
     }
@@ -1129,6 +1125,15 @@ public:
     compaction::table_state& as_table_state() const noexcept;
     // Safely iterate through table states, while performing async operations on them.
     future<> parallel_foreach_table_state(std::function<future<>(compaction::table_state&)> action);
+
+    // Add sst to or remove it from the sstables_requiring_cleanup set.
+    bool update_sstable_cleanup_state(const sstables::shared_sstable& sst, compaction::owned_ranges_ptr owned_ranges_ptr);
+
+    // Returns true if the sstable requries cleanup.
+    bool requires_cleanup(const sstables::shared_sstable& sst) const;
+
+    // Returns true if any of the sstables requries cleanup.
+    bool requires_cleanup(const sstables::sstable_set& set) const;
 
     friend class compaction_group;
 };

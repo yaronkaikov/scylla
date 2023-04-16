@@ -69,7 +69,7 @@ class distributed_loader {
     static future<> reshape(sharded<sstables::sstable_directory>& dir, sharded<replica::database>& db, sstables::reshape_mode mode,
             sstring ks_name, sstring table_name, sstables::compaction_sstable_creator_fn creator, std::function<bool (const sstables::shared_sstable&)> filter, io_priority_class iop);
     static future<> reshard(sharded<sstables::sstable_directory>& dir, sharded<replica::database>& db, sstring ks_name, sstring table_name, sstables::compaction_sstable_creator_fn creator,
-            io_priority_class iop);
+            io_priority_class iop, compaction::owned_ranges_ptr owned_ranges_ptr = nullptr);
     static future<> process_sstable_dir(sharded<sstables::sstable_directory>& dir, sstables::sstable_directory::process_flags flags);
     static future<> lock_table(sharded<sstables::sstable_directory>& dir, sharded<replica::database>& db, sstring ks_name, sstring cf_name);
     static future<size_t> make_sstables_available(sstables::sstable_directory& dir,
@@ -99,7 +99,7 @@ public:
     // Each entry contains a vector of sstables for this shard.
     // The table UUID is returned too.
     static future<std::tuple<table_id, std::vector<std::vector<sstables::shared_sstable>>>>
-            get_sstables_from_upload_dir(distributed<replica::database>& db, sstring ks, sstring cf);
+            get_sstables_from_upload_dir(distributed<replica::database>& db, sstring ks, sstring cf, sstables::sstable_open_config cfg);
     static future<> process_upload_dir(distributed<replica::database>& db, distributed<db::system_distributed_keyspace>& sys_dist_ks,
             distributed<db::view::view_update_generator>& view_update_generator, sstring ks_name, sstring cf_name);
 };
