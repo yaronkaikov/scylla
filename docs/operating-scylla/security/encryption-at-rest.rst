@@ -2,11 +2,6 @@
 Encryption at Rest
 ==================
 
-:label-tip:`ScyllaDB Enterprise`
-
-.. versionadded:: 2019.1.1
-.. versionchanged:: 2019.1.3
-
 Introduction
 =============
 
