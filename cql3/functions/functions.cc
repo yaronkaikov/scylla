@@ -204,7 +204,7 @@ std::optional<function_name> functions::used_by_user_function(const ut_name& use
 lw_shared_ptr<column_specification>
 functions::make_arg_spec(const sstring& receiver_ks, const sstring& receiver_cf,
         const function& fun, size_t i) {
-    auto&& name = boost::lexical_cast<std::string>(fun.name());
+    auto&& name = fmt::to_string(fun.name());
     std::transform(name.begin(), name.end(), name.begin(), ::tolower);
     return make_lw_shared<column_specification>(receiver_ks,
                                    receiver_cf,
@@ -216,7 +216,7 @@ inline
 shared_ptr<function>
 make_to_json_function(data_type t) {
     return make_native_scalar_function<true>("tojson", utf8_type, {t},
-            [t](const std::vector<bytes_opt>& parameters) -> bytes_opt {
+            [t](std::span<const bytes_opt> parameters) -> bytes_opt {
         return utf8_type->decompose(to_json_string(*t, parameters[0]));
     });
 }
@@ -225,7 +225,7 @@ inline
 shared_ptr<function>
 make_from_json_function(data_dictionary::database db, const sstring& keyspace, data_type t) {
     return make_native_scalar_function<true>("fromjson", t, {utf8_type},
-            [keyspace, t](const std::vector<bytes_opt>& parameters) -> bytes_opt {
+            [keyspace, t](std::span<const bytes_opt> parameters) -> bytes_opt {
         try {
             rjson::value json_value = rjson::parse(utf8_type->to_string(parameters[0].value()));
             bytes_opt parsed_json_value;

@@ -249,11 +249,14 @@ static constexpr std::string_view multipart_upload_complete_trailer =
 unsigned prepare_multipart_upload_parts(const utils::chunked_vector<sstring>& etags) {
     unsigned ret = multipart_upload_complete_header.size();
 
-    unsigned nr = 0;
+    unsigned nr = 1;
     for (auto& etag : etags) {
-        if (etags.empty()) {
+        if (etag.empty()) {
+            // 0 here means some part failed to upload, see comment in upload_part()
+            // Caller checks it an aborts the multipart upload altogether
             return 0;
         }
+        // length of the format string - four braces + length of the etag + length of the number
         ret += multipart_upload_complete_entry.size() - 4 + etag.size() + format("{}", nr).size();
         nr++;
     }
@@ -266,7 +269,7 @@ future<> dump_multipart_upload_parts(output_stream<char> out, const utils::chunk
     try {
         co_await out.write(multipart_upload_complete_header.data(), multipart_upload_complete_header.size());
 
-        unsigned nr = 0;
+        unsigned nr = 1;
         for (auto& etag : etags) {
             assert(!etag.empty());
             co_await out.write(format(multipart_upload_complete_entry.data(), etag, nr));
@@ -302,7 +305,7 @@ future<> client::upload_sink::upload_part(unsigned part_number, memory_data_sink
     s3l.trace("PUT part {} {} bytes in {} buffers (upload id {})", part_number, bufs.size(), bufs.buffers().size(), _upload_id);
     auto req = http::request::make("PUT", _client->_host, _object_name);
     req._headers["Content-Length"] = format("{}", bufs.size());
-    req.query_parameters["partNumber"] = format("{}", part_number);
+    req.query_parameters["partNumber"] = format("{}", part_number + 1);
     req.query_parameters["uploadId"] = _upload_id;
     req.write_body("bin", bufs.size(), [this, part_number, bufs = std::move(bufs)] (output_stream<char>&& out_) mutable -> future<> {
         auto out = std::move(out_);
@@ -344,7 +347,7 @@ future<> client::upload_sink::upload_part(unsigned part_number, memory_data_sink
 future<> client::upload_sink::abort_upload() {
     s3l.trace("DELETE upload {}", _upload_id);
     auto req = http::request::make("DELETE", _client->_host, _object_name);
-    req.query_parameters["uploadId"] = std::move(_upload_id);
+    req.query_parameters["uploadId"] = std::exchange(_upload_id, ""); // now upload_started() returns false
     co_await _http.make_request(std::move(req), ignore_reply, http::reply::status_type::no_content);
 }
 
@@ -366,7 +369,7 @@ future<> client::upload_sink::finalize_upload() {
 
     s3l.trace("POST upload completion {} parts (upload id {})", _part_etags.size(), _upload_id);
     auto req = http::request::make("POST", _client->_host, _object_name);
-    req.query_parameters["uploadId"] = std::move(_upload_id);
+    req.query_parameters["uploadId"] = std::exchange(_upload_id, ""); // now upload_started() returns false
     req.write_body("xml", parts_xml_len, [this] (output_stream<char>&& out) -> future<> {
         return dump_multipart_upload_parts(std::move(out), _part_etags);
     });

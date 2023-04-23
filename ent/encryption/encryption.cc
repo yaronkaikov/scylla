@@ -541,7 +541,7 @@ public:
                     ccs.emplace_back(c);
                 }
             }
-            opts["components"] = std::to_string(ccs);
+            opts["components"] = fmt::to_string(fmt::join(ccs, ", "));
         } else {
             opts["components"] = "Data";
         }

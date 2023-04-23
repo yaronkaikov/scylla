@@ -1334,6 +1334,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 api::unset_server_snitch(ctx).get();
             });
             api::set_server_storage_proxy(ctx, ss).get();
+            auto stop_sp_api = defer_verbose_shutdown("storage proxy API", [&ctx] {
+                api::unset_server_storage_proxy(ctx).get();
+            });
             api::set_server_load_sstable(ctx, sys_ks).get();
             auto stop_cf_api = defer_verbose_shutdown("column family API", [&ctx] {
                 api::unset_server_load_sstable(ctx).get();
@@ -1491,7 +1494,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             service::raft_group0 group0_service{
                     stop_signal.as_local_abort_source(), raft_gr.local(), messaging,
-                    gossiper.local(), qp.local(), mm.local(), feature_service.local(), sys_ks.local(), group0_client, ss.local()};
+                    gossiper.local(), qp.local(), mm.local(), feature_service.local(), sys_ks.local(), group0_client, ss.local(), cdc_generation_service.local()};
             group0_service.start().get();
             auto stop_group0_service = defer_verbose_shutdown("group 0 service", [&group0_service] {
                 group0_service.abort().get();

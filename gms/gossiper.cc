@@ -18,7 +18,6 @@
 #include "gms/gossiper.hh"
 #include "gms/feature_service.hh"
 #include "gms/application_state.hh"
-#include "gms/failure_detector.hh"
 #include "gms/i_failure_detection_event_listener.hh"
 #include "gms/i_endpoint_state_change_subscriber.hh"
 #include "message/messaging_service.hh"
@@ -1471,7 +1470,7 @@ sstring gossiper::get_rpc_address(const inet_address& endpoint) const {
             return v->value;
         }
     }
-    return boost::lexical_cast<std::string>(endpoint);
+    return fmt::to_string(endpoint);
 }
 
 void gossiper::update_timestamp_for_nodes(const std::map<inet_address, endpoint_state>& map) {

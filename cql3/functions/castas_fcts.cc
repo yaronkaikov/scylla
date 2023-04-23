@@ -35,7 +35,7 @@ public:
     virtual void print(std::ostream& os) const override {
         os << "cast(" << _arg_types[0]->name() << " as " << _return_type->name() << ")";
     }
-    virtual bytes_opt execute(const std::vector<bytes_opt>& parameters) override {
+    virtual bytes_opt execute(std::span<const bytes_opt> parameters) override {
         auto from_type = arg_types()[0];
         auto to_type = return_type();
 
@@ -109,7 +109,7 @@ static data_value castas_fctn_from_integer_to_decimal(data_value from) {
 template<typename FromType>
 static data_value castas_fctn_from_float_to_decimal(data_value from) {
     auto val_from = value_cast<FromType>(from);
-    return big_decimal(boost::lexical_cast<std::string>(val_from));
+    return big_decimal(fmt::to_string(val_from));
 }
 
 template<typename FromType>

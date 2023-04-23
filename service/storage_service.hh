@@ -11,35 +11,29 @@
 
 #pragma once
 
+#include <seastar/core/shared_future.hh>
 #include "gms/i_endpoint_state_change_subscriber.hh"
 #include "service/endpoint_lifecycle_subscriber.hh"
 #include "locator/abstract_replication_strategy.hh"
 #include "inet_address_vectors.hh"
 #include <seastar/core/distributed.hh>
 #include <seastar/core/condition-variable.hh>
-#include "dht/i_partitioner.hh"
 #include "dht/token_range_endpoints.hh"
 #include <seastar/core/sleep.hh>
 #include "gms/application_state.hh"
+#include "gms/feature.hh"
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/gate.hh>
 #include "utils/fb_utilities.hh"
 #include "replica/database_fwd.hh"
-#include "db/schema_features.hh"
-#include "streaming/stream_state.hh"
 #include "streaming/stream_reason.hh"
 #include <seastar/core/distributed.hh>
 #include "utils/disk-error-handler.hh"
 #include "service/migration_listener.hh"
-#include "protocol_server.hh"
-#include "gms/feature_service.hh"
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/rwlock.hh>
-#include "sstables/version.hh"
-#include "sstables/shared_sstable.hh"
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/lowres_clock.hh>
-#include "locator/snitch_base.hh"
 #include "cdc/generation_id.hh"
 #include "raft/raft.hh"
 #include "repair/id.hh"
@@ -51,6 +45,7 @@ class node_ops_cmd_response;
 class node_ops_info;
 enum class node_ops_cmd : uint32_t;
 class repair_service;
+class protocol_server;
 
 namespace cql3 { class query_processor; }
 
@@ -779,13 +774,13 @@ private:
     future<> _raft_state_monitor = make_ready_future<>();
     // This fibers monitors raft state and start/stops the topology change
     // coordinator fiber
-    future<> raft_state_monitor_fiber(raft::server&, sharded<db::system_distributed_keyspace>& sys_dist_ks);
+    future<> raft_state_monitor_fiber(raft::server&, cdc::generation_service&, sharded<db::system_distributed_keyspace>& sys_dist_ks);
 
      // State machine that is responsible for topology change
     topology_state_machine _topology_state_machine;
 
     future<> _topology_change_coordinator = make_ready_future<>();
-    future<> topology_change_coordinator_fiber(raft::server&, raft::term_t, sharded<db::system_distributed_keyspace>&, abort_source&);
+    future<> topology_change_coordinator_fiber(raft::server&, raft::term_t, cdc::generation_service&, sharded<db::system_distributed_keyspace>&, abort_source&);
 
     // Those futures hold results of streaming for various operations
     std::optional<shared_future<>> _bootstrap_result;
@@ -800,12 +795,16 @@ private:
     future<> raft_removenode(locator::host_id host_id);
     future<> raft_replace(raft::server&, raft::server_id, gms::inet_address);
     future<> raft_rebuild(sstring source_dc);
+    future<> update_topology_with_local_metadata(raft::server&);
 
     // This is called on all nodes for each new command received through raft
-    future<> topology_transition(storage_proxy& proxy, gms::inet_address, std::vector<canonical_mutation>);
+    // raft_group0_client::_read_apply_mutex must be held
+    future<> topology_transition(storage_proxy& proxy, cdc::generation_service&, gms::inet_address, std::vector<canonical_mutation>);
     // load topology state machine snapshot into memory
-    future<> topology_state_load();
+    // raft_group0_client::_read_apply_mutex must be held
+    future<> topology_state_load(cdc::generation_service&);
     // Applies received raft snapshot to local state machine persistent storage
+    // raft_group0_client::_read_apply_mutex must be held
     future<> merge_topology_snapshot(raft_topology_snapshot snp);
 };
 
