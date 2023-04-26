@@ -2,11 +2,6 @@
 Encryption at Rest
 ==================
 
-:label-tip:`ScyllaDB Enterprise`
-
-.. versionadded:: 2019.1.1
-.. versionchanged:: 2019.1.3
-
 Introduction
 =============
 
@@ -113,8 +108,6 @@ The following cipher_algorithims are available for use with Scylla using `OpenSS
      - 128, 192, or 256
    * - Blowfish/CBC/PKCS5Padding    
      - 32-448
-   * - DES/CBC/PKCS5Padding
-     - 56
    * - DESede/CBC/PKCS5Padding
      - 112 or 168
    * - RC2/CBC/PKCS5Padding
@@ -275,14 +268,14 @@ To encrypt an existing table named test in keyspace ks:
    ;
 
 
-To change the cipher algorithm from AES/ECB/PKCS5Padding to DES/CBC/PKCS5Padding and to change the key strength from 128 to 56 on an existing table:
+To change the cipher algorithm from AES/ECB/PKCS5Padding to DESede/CBC/PKCS5Padding and to change the key strength from 128 to 112 on an existing table:
 
 .. code-block:: cql
   
    ALTER TABLE ks.test WITH
      scylla_encryption_options = { 
-        'cipher_algorithm' : 'DES/CBC/PKCS5Padding', 
-        'secret_key_strength' : 56,  
+        'cipher_algorithm' : 'DESede/CBC/PKCS5Padding', 
+        'secret_key_strength' : 112,  
         'key_provider': 'LocalFileSystemKeyProviderFactory',  
         'secret_key_file': '/etc/scylla/encryption_keys/data_encryption_keys'
      }
