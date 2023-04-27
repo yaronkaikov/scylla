@@ -67,6 +67,7 @@ fedora_packages=(
     systemd-devel
     abseil-cpp-devel
     git
+    git-lfs
     python
     sudo
     java-1.8.0-openjdk-headless

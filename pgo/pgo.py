@@ -399,7 +399,6 @@ async def start_node(executable: PathLike, cluster_workdir: PathLike, addr: str,
         os.path.realpath(executable),
         f"--workdir={scylla_workdir}",
         "--ring-delay-ms=0",
-        "--skip-wait-for-gossip-to-settle=0",
         "--developer-mode=yes",
         "--memory=1G",
         "--unsafe-bypass-fsync=1",
@@ -448,17 +447,14 @@ async def start_cluster(executable: PathLike, addrs: list[str], cpusets: Optiona
     else:
         cpuset_args = [["--smp=2", "--overprovisioned"] for i in range(len(addrs))]
 
-    timeout = 30
+    timeout = 300
     procs = []
     seed = addrs[0]
     try:
-        proc = await start_node(executable=executable, addr=seed, seed=seed, cluster_workdir=workdir, cluster_name=cluster_name, extra_opts=extra_opts+cpuset_args[0])
-        procs.append(proc)
-        await wait_for_node(proc, seed, timeout)
-        for i in range(1, len(addrs)):
+        for i in range(0, len(addrs)):
             proc = await start_node(executable, addr=addrs[i], seed=seed, cluster_workdir=workdir, cluster_name=cluster_name, extra_opts=extra_opts+cpuset_args[i])
             procs.append(proc)
-        await clean_gather(*[wait_for_node(p, a, timeout) for (p, a) in zip(procs, addrs)])
+            await wait_for_node(proc, addrs[i], timeout)
     except:
         await stop_cluster(procs, addrs)
         raise
@@ -737,7 +733,6 @@ async def populate_datasets(executable: PathLike, dataset_names: list[str], data
     After this function, there will be a $dataset_dir/$x cluster workdir for each dataset x.
     These cluster workdirs can be copied somewhere for training and restored with start_cluster().
     """
-    await run_checked(["mkdir", "-p", "shlex.quote(dataset_dir}"])
     for t in dataset_names:
         t_dir = fr"{dataset_dir}/{t}"
         if not os.path.exists(t_dir):
