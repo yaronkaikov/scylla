@@ -29,6 +29,7 @@
 #include <seastar/core/coroutine.hh>
 #include "utils/UUID_gen.hh"
 #include "service/migration_manager.hh"
+#include "service/tablet_allocator.hh"
 #include "compaction/compaction_manager.hh"
 #include "message/messaging_service.hh"
 #include "service/raft/raft_address_map.hh"
@@ -131,6 +132,7 @@ public:
     static std::atomic<bool> active;
 private:
     sharded<replica::database>& _db;
+    sharded<service::storage_proxy>& _proxy;
     sharded<cql3::query_processor>& _qp;
     sharded<auth::service>& _auth_service;
     sharded<db::view::view_builder>& _view_builder;
@@ -185,6 +187,7 @@ private:
 public:
     single_node_cql_env(
             sharded<replica::database>& db,
+            sharded<service::storage_proxy>& proxy,
             sharded<cql3::query_processor>& qp,
             sharded<auth::service>& auth_service,
             sharded<db::view::view_builder>& view_builder,
@@ -198,6 +201,7 @@ public:
             sharded<service::raft_group_registry>& group0_registry,
             sharded<db::system_keyspace>& sys_ks)
             : _db(db)
+            , _proxy(proxy)
             , _qp(qp)
             , _auth_service(auth_service)
             , _view_builder(view_builder)
@@ -296,9 +300,7 @@ public:
     }
 
     virtual future<> create_table(std::function<schema(std::string_view)> schema_maker) override {
-        auto id = table_id(utils::UUID_gen::get_time_UUID());
         schema_builder builder(make_lw_shared<schema>(schema_maker(ks_name)));
-        builder.set_uuid(id);
         auto s = builder.build(schema_builder::compact_storage::no);
         auto group0_guard = co_await _mm.local().start_group0_operation();
         auto ts = group0_guard.write_timestamp();
@@ -437,6 +439,10 @@ public:
         return _sys_ks;
     }
 
+    virtual sharded<service::storage_proxy>& get_storage_proxy() override {
+        return _proxy;
+    }
+
     virtual future<> refresh_client_state() override {
         return _core_local.invoke_on_all([] (core_local_state& state) {
             return state.client_state.maybe_update_per_service_level_params();
@@ -546,7 +552,7 @@ public:
             distributed<service::migration_manager> mm;
             sharded<service::storage_service> ss;
             distributed<db::batchlog_manager> bm;
-            distributed<service::storage_proxy>& proxy = service::get_storage_proxy();
+            sharded<service::storage_proxy> proxy;
 
             auto notify_set = init_configurables
                 ? configurable::init_all(*cfg, init_configurables->extensions, service_set(
@@ -762,6 +768,12 @@ public:
             mm.start(std::ref(mm_notif), std::ref(feature_service), std::ref(ms), std::ref(proxy), std::ref(gossiper), std::ref(group0_client), std::ref(sys_ks)).get();
             auto stop_mm = defer([&mm] { mm.stop().get(); });
 
+            distributed<service::tablet_allocator> the_tablet_allocator;
+            the_tablet_allocator.start(std::ref(mm_notif), std::ref(db)).get();
+            auto stop_tablet_allocator = defer([&] {
+                the_tablet_allocator.stop().get();
+            });
+
             cql3::query_processor::memory_config qp_mcfg;
             if (cfg_in.qp_mcfg) {
                 qp_mcfg = *cfg_in.qp_mcfg;
@@ -808,6 +820,10 @@ public:
                 std::ref(snitch),
                 std::ref(sl_controller)).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
+
+            ss.invoke_on_all([&] (service::storage_service& ss) {
+                ss.set_query_processor(qp.local());
+            }).get();
 
             for (const auto p: all_system_table_load_phases) {
                 replica::distributed_loader::init_system_keyspace(sys_ks, db, ss, gossiper, raft_gr, *cfg, p).get();
@@ -954,7 +970,7 @@ public:
 
             notify_set.notify_all(configurable::system_state::started).get();
 
-            single_node_cql_env env(db, qp, auth_service, view_builder, view_update_generator, mm_notif, mm, std::ref(sl_controller), bm, gossiper, group0_client, raft_gr, sys_ks);
+            single_node_cql_env env(db, proxy, qp, auth_service, view_builder, view_update_generator, mm_notif, mm, std::ref(sl_controller), bm, gossiper, group0_client, raft_gr, sys_ks);
             env.start().get();
             auto stop_env = defer([&env] { env.stop().get(); });
 

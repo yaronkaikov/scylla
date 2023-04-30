@@ -38,6 +38,16 @@ public:
         : _fragments(std::move(fragments)), _size_bytes(size_bytes)
     { }
 
+    fragmented_temporary_buffer(const char* str, size_t size)
+    {
+        *this = allocate_to_fit(size);
+        size_t pos = 0;
+        for (auto& frag : _fragments) {
+            std::memcpy(frag.get_write(), str + pos, frag.size());
+            pos += frag.size();
+        }
+    }
+
     explicit operator view() const noexcept;
 
     istream get_istream() const noexcept;
@@ -167,9 +177,6 @@ public:
         bool operator==(const iterator& other) const noexcept {
             return _left == other._left;
         }
-        bool operator!=(const iterator& other) const noexcept {
-            return !(*this == other);
-        }
     };
 
     using const_iterator = iterator;
@@ -267,10 +274,6 @@ public:
             other_fragment.remove_prefix(length);
         }
         return this_it == end() && other_it == other.end();
-    }
-
-    bool operator!=(const fragmented_temporary_buffer::view& other) const noexcept {
-        return !(*this == other);
     }
 };
 static_assert(FragmentRange<fragmented_temporary_buffer::view>);

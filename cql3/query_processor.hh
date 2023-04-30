@@ -452,13 +452,6 @@ private:
     future<::shared_ptr<untyped_result_set>> execute_paged_internal(::shared_ptr<internal_query_state> state);
 
     /*!
-     * \brief iterate over all results using paging
-     */
-    future<> for_each_cql_result(
-            ::shared_ptr<cql3::internal_query_state> state,
-            std::function<stop_iteration(const cql3::untyped_result_set_row&)>&& f);
-
-    /*!
      * \brief iterate over all results using paging, accept a function that returns a future
      */
     future<> for_each_cql_result(
@@ -541,6 +534,7 @@ public:
     virtual void on_update_function(const sstring& ks_name, const sstring& function_name) override;
     virtual void on_update_aggregate(const sstring& ks_name, const sstring& aggregate_name) override;
     virtual void on_update_view(const sstring& ks_name, const sstring& view_name, bool columns_changed) override;
+    virtual void on_update_tablet_metadata() override;
 
     virtual void on_drop_keyspace(const sstring& ks_name) override;
     virtual void on_drop_column_family(const sstring& ks_name, const sstring& cf_name) override;

@@ -17,6 +17,7 @@
 #include "exceptions/exceptions.hh"
 #include "locator/abstract_replication_strategy.hh"
 #include "replica/database.hh"
+#include "compaction/compaction_manager.hh"
 #include "data_dictionary/data_dictionary.hh"
 #include "gms/feature_service.hh"
 
@@ -96,7 +97,7 @@ tombstone_gc_state::get_gc_before_for_range_result tombstone_gc_state::get_gc_be
                 auto r = locator::token_metadata::interval_to_range(x.first);
                 min = std::min(x.second, min);
                 max = std::max(x.second, max);
-                if (++hits == 1 && r.contains(range, dht::tri_compare)) {
+                if (++hits == 1 && r.contains(range, dht::operator<=>)) {
                     contains_all = true;
                 }
             }
@@ -166,9 +167,8 @@ static bool needs_repair_before_gc(const replica::database& db, sstring ks_name)
     // need to run repair even if tombstone_gc mode = repair.
     auto& ks = db.find_keyspace(ks_name);
     auto& rs = ks.get_replication_strategy();
-    auto erm = ks.get_effective_replication_map();
     bool needs_repair = rs.get_type() != locator::replication_strategy_type::local
-            && erm->get_replication_factor() != 1;
+            && rs.get_replication_factor(db.get_token_metadata()) != 1;
     return needs_repair;
 }
 

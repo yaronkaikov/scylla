@@ -479,7 +479,7 @@ SEASTAR_TEST_CASE(test_merging_creates_a_table_even_if_keyspace_was_recreated) {
             {
                 auto group0_guard = mm.start_group0_operation().get();
                 const auto ts = group0_guard.write_timestamp();
-                auto muts = e.migration_manager().local().prepare_keyspace_drop_announcement("ks", ts);
+                auto muts = e.migration_manager().local().prepare_keyspace_drop_announcement("ks", ts).get0();
                 boost::copy(muts, std::back_inserter(all_muts));
                 mm.announce(muts, std::move(group0_guard)).get();
             }
@@ -525,6 +525,7 @@ public:
     int update_function_count = 0;
     int update_aggregate_count = 0;
     int update_view_count = 0;
+    int update_tablets = 0;
     int drop_keyspace_count = 0;
     int drop_column_family_count = 0;
     int drop_user_type_count = 0;
@@ -547,6 +548,7 @@ public:
     virtual void on_update_function(const sstring&, const sstring&) override { ++update_function_count; }
     virtual void on_update_aggregate(const sstring&, const sstring&) override { ++update_aggregate_count; }
     virtual void on_update_view(const sstring&, const sstring&, bool) override { ++update_view_count; }
+    virtual void on_update_tablet_metadata() override { ++update_tablets; }
     virtual void on_drop_keyspace(const sstring&) override { ++drop_keyspace_count; }
     virtual void on_drop_column_family(const sstring&, const sstring&) override { ++drop_column_family_count; }
     virtual void on_drop_user_type(const sstring&, const sstring&) override { ++drop_user_type_count; }
@@ -779,7 +781,7 @@ future<> test_schema_digest_does_not_change_with_disabled_features(sstring data_
             // with highest timestamp will win and be sent to other nodes.
             // Thus, system_distributed.* tables are officially not taken into account,
             // which makes it less likely that this test case would need to be needlessly regenerated.
-            auto actual = calculate_schema_digest(service::get_storage_proxy(), sf, std::not_fn(&is_internal_keyspace)).get0();
+            auto actual = calculate_schema_digest(e.get_storage_proxy(), sf, std::not_fn(&is_internal_keyspace)).get0();
             if (regenerate) {
                 std::cout << format("        utils::UUID(\"{}\"),", actual) << "\n";
             } else {

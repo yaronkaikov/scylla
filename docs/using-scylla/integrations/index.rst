@@ -19,6 +19,8 @@ Scylla Integrations and Connectors
    sink-kafka-connector
    integration-ansible
    integration-databricks
+   integration-jaeger
+   integration-mindsdb
 
 .. panel-box::
   :title: Scylla Integrations
@@ -45,6 +47,8 @@ Scylla Integrations and Connectors
   * :doc:`Integrate Scylla with Spring <integration-spring>`
   * :doc:`Install Scylla with Ansible <integration-ansible>`
   * :doc:`Integrate Scylla with Databricks <integration-databricks>`
+  * :doc:`Integrate Scylla with Jaeger Server <integration-jaeger>`
+  * :doc:`Integrate Scylla with MindsDB <integration-mindsdb>`
 
 .. panel-box::
   :title: Scylla Connectors

@@ -1129,7 +1129,6 @@ void sstable::do_write_simple(component_type type, const io_priority_class& pc,
     options.buffer_size = sstable_buffer_size;
     options.io_priority_class = pc;
     auto w = make_component_file_writer(type, std::move(options)).get0();
-    std::exception_ptr eptr;
     write_component(_version, w);
     w.close();
 }
@@ -2341,7 +2340,7 @@ future<> sstable::filesystem_storage::change_state(const sstable& sst, sstring t
         co_return; // Already there
     }
 
-    sstlog.info("Moving sstable {} to {} in {}", sst.get_filename(), to, path);
+    sstlog.info("Moving sstable {} to {}", sst.get_filename(), path);
     co_await move(sst, path.native(), std::move(new_generation), delay_commit);
 }
 

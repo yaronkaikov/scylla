@@ -48,7 +48,8 @@ sharder::token_for_next_shard(const token& t, shard_id shard, unsigned spans) co
 }
 
 std::ostream& operator<<(std::ostream& out, const decorated_key& dk) {
-    return out << "{key: " << dk._key << ", token:" << dk._token << "}";
+    fmt::print(out, "{{key: {}, token: {}}}", dk._key, dk._token);
+    return out;
 }
 
 std::ostream& operator<<(std::ostream& out, partition_ranges_view v) {
@@ -94,7 +95,7 @@ decorated_key::equal(const schema& s, const decorated_key& other) const {
 
 std::strong_ordering
 decorated_key::tri_compare(const schema& s, const decorated_key& other) const {
-    auto r = dht::tri_compare(_token, other._token);
+    auto r = _token <=> other._token;
     if (r != 0) {
         return r;
     } else {
@@ -104,7 +105,7 @@ decorated_key::tri_compare(const schema& s, const decorated_key& other) const {
 
 std::strong_ordering
 decorated_key::tri_compare(const schema& s, const ring_position& other) const {
-    auto r = dht::tri_compare(_token, other.token());
+    auto r = _token <=> other.token();
     if (r != 0) {
         return r;
     } else if (other.has_key()) {
@@ -278,7 +279,7 @@ std::strong_ordering ring_position::tri_compare(const schema& s, const ring_posi
 }
 
 std::strong_ordering token_comparator::operator()(const token& t1, const token& t2) const {
-    return tri_compare(t1, t2);
+    return t1 <=> t2;
 }
 
 bool ring_position::equal(const schema& s, const ring_position& other) const {
@@ -290,7 +291,7 @@ bool ring_position::less_compare(const schema& s, const ring_position& other) co
 }
 
 std::strong_ordering ring_position_tri_compare(const schema& s, ring_position_view lh, ring_position_view rh) {
-    auto token_cmp = tri_compare(*lh._token, *rh._token);
+    auto token_cmp = *lh._token <=> *rh._token;
     if (token_cmp != 0) {
         return token_cmp;
     }
@@ -311,7 +312,7 @@ std::strong_ordering ring_position_tri_compare(const schema& s, ring_position_vi
 }
 
 std::strong_ordering ring_position_comparator_for_sstables::operator()(ring_position_view lh, sstables::decorated_key_view rh) const {
-    auto token_cmp = tri_compare(*lh._token, rh.token());
+    auto token_cmp = *lh._token <=> rh.token();
     if (token_cmp != 0) {
         return token_cmp;
     }
@@ -457,28 +458,22 @@ dht::token_range_vector split_token_range_msb(unsigned most_significant_bits) {
     uint64_t number_of_ranges = 1 << most_significant_bits;
     ret.reserve(number_of_ranges);
     assert(most_significant_bits < 64);
-    uint8_t log2_shift = (64 - most_significant_bits);
-    uint64_t unbiased_key = 0;
-    dht::token token;
-    for (uint64_t i = 0; i < number_of_ranges; ) {
+    dht::token prev_last_token;
+    for (uint64_t i = 0; i < number_of_ranges; i++) {
         std::optional<dht::token_range::bound> start_bound;
         std::optional<dht::token_range::bound> end_bound;
         if (i == 0) {
             start_bound = dht::token_range::bound(dht::minimum_token(), true);
         } else {
-            start_bound = dht::token_range::bound(token, true);
-        }
-        if (++i < number_of_ranges) {
-            unbiased_key = i << log2_shift;
-            token = dht::bias(unbiased_key);
+            auto token = dht::next_token(prev_last_token);
             if (compaction_group_of(most_significant_bits, token) != i) {
                 on_fatal_internal_error(logger, format("split_token_range_msb: inconsistent end_bound compaction group: index={} msbits={} token={} compaction_group_of={}",
-                        i, most_significant_bits, token, compaction_group_of(most_significant_bits, token)));
+                                                       i, most_significant_bits, token, compaction_group_of(most_significant_bits, token)));
             }
-            end_bound = dht::token_range::bound(token, false);
-        } else {
-            end_bound = dht::token_range::bound(dht::maximum_token(), true);
+            start_bound = dht::token_range::bound(prev_last_token, false);
         }
+        prev_last_token = dht::last_token_of_compaction_group(most_significant_bits, i);
+        end_bound = dht::token_range::bound(prev_last_token, true);
         ret.emplace_back(std::move(start_bound), std::move(end_bound));
     }
     return ret;

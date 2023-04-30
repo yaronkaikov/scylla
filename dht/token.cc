@@ -40,7 +40,7 @@ maximum_token() noexcept {
     return max_token;
 }
 
-std::strong_ordering tri_compare(const token& t1, const token& t2) {
+std::strong_ordering operator<=>(const token& t1, const token& t2) {
     if (t1._kind < t2._kind) {
             return std::strong_ordering::less;
     } else if (t1._kind > t2._kind) {
@@ -280,6 +280,16 @@ compaction_group_of(unsigned most_significant_bits, const token& t) {
             return adjusted >> (64 - most_significant_bits);
     }
     __builtin_unreachable();
+}
+
+token last_token_of_compaction_group(unsigned most_significant_bits, size_t group) {
+    uint64_t n;
+    if (group == ((1ul << most_significant_bits) - 1)) {
+        n = std::numeric_limits<uint64_t>::max();
+    } else {
+        n = ((uint64_t(group) + 1) << (64 - most_significant_bits)) - 1;
+    }
+    return bias(n);
 }
 
 } // namespace dht

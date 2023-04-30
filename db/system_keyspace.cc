@@ -51,7 +51,7 @@
 #include "db/view/build_progress_virtual_reader.hh"
 #include "db/schema_tables.hh"
 #include "index/built_indexes_virtual_reader.hh"
-#include "utils/generation-number.hh"
+#include "gms/generation-number.hh"
 #include "db/virtual_table.hh"
 #include "service/storage_service.hh"
 #include "protocol_server.hh"
@@ -68,6 +68,7 @@
 #include "sstables/open_info.hh"
 #include "sstables/generation_type.hh"
 #include "cdc/generation.hh"
+#include "replica/tablets.hh"
 
 using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
 
@@ -85,6 +86,7 @@ namespace {
             system_keyspace::BROADCAST_KV_STORE,
             system_keyspace::TOPOLOGY,
             system_keyspace::CDC_GENERATIONS_V3,
+            system_keyspace::TABLETS,
         };
         if (ks_name == system_keyspace::NAME && system_ks_null_shard_tables.contains(cf_name)) {
             props.use_null_sharder = true;
@@ -101,6 +103,7 @@ namespace {
             system_keyspace::BROADCAST_KV_STORE,
             system_keyspace::TOPOLOGY,
             system_keyspace::CDC_GENERATIONS_V3,
+            system_keyspace::TABLETS,
         };
         if (ks_name == system_keyspace::NAME && extra_durable_tables.contains(cf_name)) {
             props.wait_for_sync_to_commitlog = true;
@@ -112,7 +115,8 @@ namespace {
             system_keyspace::RAFT_SNAPSHOTS,
             system_keyspace::RAFT_SNAPSHOT_CONFIG,
             system_keyspace::GROUP0_HISTORY,
-            system_keyspace::DISCOVERY
+            system_keyspace::DISCOVERY,
+            system_keyspace::TABLETS,
         };
         if (ks_name == system_keyspace::NAME && raft_tables.contains(cf_name)) {
             props.use_schema_commitlog = true;
@@ -1080,6 +1084,11 @@ schema_ptr system_keyspace::sstables_registry() {
             .with_version(generate_schema_version(id))
             .build();
     }();
+    return schema;
+}
+
+schema_ptr system_keyspace::tablets() {
+    static thread_local auto schema = replica::make_tablets_schema();
     return schema;
 }
 
@@ -2889,6 +2898,10 @@ std::vector<schema_ptr> system_keyspace::all_tables(const db::config& cfg) {
         if (cfg.check_experimental(db::experimental_features_t::feature::BROADCAST_TABLES)) {
             r.insert(r.end(), {broadcast_kv_store()});
         }
+
+        if (cfg.check_experimental(db::experimental_features_t::feature::TABLETS)) {
+            r.insert(r.end(), {tablets()});
+        }
     }
     if (cfg.check_experimental(db::experimental_features_t::feature::KEYSPACE_STORAGE_OPTIONS)) {
         r.insert(r.end(), {sstables_registry()});
@@ -3074,25 +3087,21 @@ future<> system_keyspace::update_compaction_history(utils::UUID uuid, sstring ks
     });
 }
 
-future<> system_keyspace::get_compaction_history(compaction_history_consumer&& f) {
-    return do_with(compaction_history_consumer(std::move(f)),
-            [this](compaction_history_consumer& consumer) mutable {
-        sstring req = format("SELECT * from system.{}", COMPACTION_HISTORY);
-        return _qp.local().query_internal(req, [&consumer] (const cql3::untyped_result_set::row& row) mutable {
-            compaction_history_entry entry;
-            entry.id = row.get_as<utils::UUID>("id");
-            entry.ks = row.get_as<sstring>("keyspace_name");
-            entry.cf = row.get_as<sstring>("columnfamily_name");
-            entry.compacted_at = row.get_as<int64_t>("compacted_at");
-            entry.bytes_in = row.get_as<int64_t>("bytes_in");
-            entry.bytes_out = row.get_as<int64_t>("bytes_out");
-            if (row.has("rows_merged")) {
-                entry.rows_merged = row.get_map<int32_t, int64_t>("rows_merged");
-            }
-            return consumer(std::move(entry)).then([] {
-                return stop_iteration::no;
-            });
-        });
+future<> system_keyspace::get_compaction_history(compaction_history_consumer consumer) {
+    sstring req = format("SELECT * from system.{}", COMPACTION_HISTORY);
+    co_await _qp.local().query_internal(req, [&consumer] (const cql3::untyped_result_set::row& row) mutable -> future<stop_iteration> {
+        compaction_history_entry entry;
+        entry.id = row.get_as<utils::UUID>("id");
+        entry.ks = row.get_as<sstring>("keyspace_name");
+        entry.cf = row.get_as<sstring>("columnfamily_name");
+        entry.compacted_at = row.get_as<int64_t>("compacted_at");
+        entry.bytes_in = row.get_as<int64_t>("bytes_in");
+        entry.bytes_out = row.get_as<int64_t>("bytes_out");
+        if (row.has("rows_merged")) {
+            entry.rows_merged = row.get_map<int32_t, int64_t>("rows_merged");
+        }
+        co_await consumer(std::move(entry));
+        co_return stop_iteration::no;
     });
 }
 
@@ -3120,16 +3129,16 @@ future<> system_keyspace::get_repair_history(::table_id table_id, repair_history
 future<int> system_keyspace::increment_and_get_generation() {
     auto req = format("SELECT gossip_generation FROM system.{} WHERE key='{}'", LOCAL, LOCAL);
     auto rs = co_await _qp.local().execute_internal(req, cql3::query_processor::cache_internal::yes);
-    int generation;
+    gms::generation_type generation;
     if (rs->empty() || !rs->one().has("gossip_generation")) {
         // seconds-since-epoch isn't a foolproof new generation
         // (where foolproof is "guaranteed to be larger than the last one seen at this ip address"),
         // but it's as close as sanely possible
-        generation = utils::get_generation_number();
+        generation = gms::get_generation_number();
     } else {
         // Other nodes will ignore gossip messages about a node that have a lower generation than previously seen.
-        int stored_generation = rs->one().template get_as<int>("gossip_generation") + 1;
-        int now = utils::get_generation_number();
+        auto stored_generation = gms::generation_type(rs->one().template get_as<int>("gossip_generation") + 1);
+        auto now = gms::get_generation_number();
         if (stored_generation >= now) {
             slogger.warn("Using stored Gossip Generation {} as it is greater than current system time {}."
                         "See CASSANDRA-3654 if you experience problems", stored_generation, now);
@@ -3139,7 +3148,7 @@ future<int> system_keyspace::increment_and_get_generation() {
         }
     }
     req = format("INSERT INTO system.{} (key, gossip_generation) VALUES ('{}', ?)", LOCAL, LOCAL);
-    co_await _qp.local().execute_internal(req, {generation}, cql3::query_processor::cache_internal::yes);
+    co_await _qp.local().execute_internal(req, {generation.value()}, cql3::query_processor::cache_internal::yes);
     co_await force_blocking_flush(LOCAL);
     co_return generation;
 }
@@ -3551,16 +3560,15 @@ future<service::topology> system_keyspace::load_topology_state() {
                     host_id, repl_state));
             }
 
-            if (!row.has("new_cdc_generation_data_uuid")) {
-                on_fatal_internal_error(slogger, format(
-                    "load_topology_state: node {} has replication state ({}) but missing CDC generation data UUID",
-                    host_id, repl_state));
+            utils::UUID new_cdc_gen_uuid;
+            if (row.has("new_cdc_generation_data_uuid")) {
+                new_cdc_gen_uuid = row.get_as<utils::UUID>("new_cdc_generation_data_uuid");
             }
 
             ring_slice = service::ring_slice {
                 .state = repl_state,
                 .tokens = std::move(tokens),
-                .new_cdc_generation_data_uuid = row.get_as<utils::UUID>("new_cdc_generation_data_uuid"),
+                .new_cdc_generation_data_uuid = new_cdc_gen_uuid,
             };
         }
 

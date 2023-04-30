@@ -156,6 +156,7 @@ public:
     static constexpr auto TOPOLOGY = "topology";
     static constexpr auto SSTABLES_REGISTRY = "sstables";
     static constexpr auto CDC_GENERATIONS_V3 = "cdc_generations_v3";
+    static constexpr auto TABLETS = "tablets";
 
     struct v3 {
         static constexpr auto BATCHES = "batches";
@@ -239,6 +240,7 @@ public:
     static schema_ptr topology();
     static schema_ptr sstables_registry();
     static schema_ptr cdc_generations_v3();
+    static schema_ptr tablets();
 
     static table_schema_version generate_schema_version(table_id table_id, uint16_t offset = 0);
 
@@ -321,7 +323,7 @@ public:
     future<> update_compaction_history(utils::UUID uuid, sstring ksname, sstring cfname, int64_t compacted_at, int64_t bytes_in, int64_t bytes_out,
                                        std::unordered_map<int32_t, int64_t> rows_merged);
     using compaction_history_consumer = noncopyable_function<future<>(const compaction_history_entry&)>;
-    future<> get_compaction_history(compaction_history_consumer&& f);
+    future<> get_compaction_history(compaction_history_consumer f);
 
     struct repair_history_entry {
         tasks::task_id id;

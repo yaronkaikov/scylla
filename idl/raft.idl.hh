@@ -6,6 +6,10 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#include "raft/raft.hh"
+
+#include "idl/utils.idl.hh"
+
 namespace raft {
 
 struct snapshot_descriptor {

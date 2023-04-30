@@ -66,20 +66,14 @@ static seastar::metrics::label keyspace_label("ks");
 
 using namespace std::chrono_literals;
 
-sstables::generation_type table::make_new_generation(std::optional<sstables::generation_type> prev) {
-    auto prev_value = prev.value_or(sstables::generation_type(0)).value();
-    auto next_value = prev_value - prev_value % smp::count + smp::count + this_shard_id();
-    tlogger.trace("new_generation {} -> {}", prev_value, next_value);
-    return sstables::generation_type(next_value);
-}
-
 void table::update_sstables_known_generation(std::optional<sstables::generation_type> generation) {
     auto gen = generation.value_or(sstables::generation_type(0)).value();
-    auto normalized_generation = gen - gen % smp::count + this_shard_id();
-    if (!_sstable_generation || normalized_generation > _sstable_generation->value()) {
-        _sstable_generation.emplace(normalized_generation);
-        tlogger.debug("{}.{} updated highest known generation to {}", schema()->ks_name(), schema()->cf_name(), *_sstable_generation);
+    if (_sstable_generation_generator) {
+        _sstable_generation_generator->update_known_generation(gen);
+    } else {
+        _sstable_generation_generator.emplace(gen);
     }
+    tlogger.debug("{}.{} updated highest known generation to {}", schema()->ks_name(), schema()->cf_name(), gen);
 }
 
 sstables::generation_type table::calculate_generation_for_new_table() {
@@ -87,9 +81,9 @@ sstables::generation_type table::calculate_generation_for_new_table() {
     // overwrite an existing table.
     // See https://github.com/scylladb/scylladb/issues/10459
     // for uuid-based sstable generation
-    auto ret = make_new_generation(_sstable_generation);
+    assert(_sstable_generation_generator);
+    auto ret = std::invoke(*_sstable_generation_generator);
     tlogger.debug("{}.{} new sstable generation {}", schema()->ks_name(), schema()->cf_name(), ret);
-    _sstable_generation = ret;
     return ret;
 }
 
@@ -525,6 +519,7 @@ void table::enable_off_strategy_trigger() {
 std::vector<std::unique_ptr<compaction_group>> table::make_compaction_groups() {
     std::vector<std::unique_ptr<compaction_group>> ret;
     auto&& ranges = dht::split_token_range_msb(_x_log2_compaction_groups);
+    ret.reserve(ranges.size());
     tlogger.debug("Created {} compaction groups for {}.{}", ranges.size(), _schema->ks_name(), _schema->cf_name());
     for (auto&& range : ranges) {
         ret.emplace_back(std::make_unique<compaction_group>(*this, std::move(range)));
@@ -940,7 +935,6 @@ table::try_flush_memtable_to_sstable(compaction_group& cg, lw_shared_ptr<memtabl
 
 void
 table::start() {
-    // FIXME: add option to disable automatic compaction.
     start_compaction();
 }
 
@@ -1526,9 +1520,11 @@ static inline unsigned get_x_log2_compaction_groups(unsigned x_log2_compaction_g
 }
 
 table::table(schema_ptr schema, config config, lw_shared_ptr<const storage_options> sopts, db::commitlog* cl, compaction_manager& compaction_manager,
-        sstables::sstables_manager& sst_manager, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker)
+        sstables::sstables_manager& sst_manager, cell_locker_stats& cl_stats, cache_tracker& row_cache_tracker,
+        locator::effective_replication_map_ptr erm)
     : _schema(std::move(schema))
     , _config(std::move(config))
+    , _erm(std::move(erm))
     , _storage_opts(std::move(sopts))
     , _view_stats(format("{}_{}_view_replica_update", _schema->ks_name(), _schema->cf_name()),
                          keyspace_label(_schema->ks_name()),
@@ -1552,6 +1548,10 @@ table::table(schema_ptr schema, config config, lw_shared_ptr<const storage_optio
         tlogger.warn("Writes disabled, column family no durable.");
     }
     set_metrics();
+}
+
+void table::update_effective_replication_map(locator::effective_replication_map_ptr erm) {
+    _erm = std::move(erm);
 }
 
 partition_presence_checker
@@ -2210,9 +2210,9 @@ table::cache_hit_rate table::get_hit_rate(const gms::gossiper& gossiper, gms::in
             float f = -1.0f; // missing state means old node
             if (state) {
                 sstring me = format("{}.{}", _schema->ks_name(), _schema->cf_name());
-                auto i = state->value.find(me);
+                auto i = state->value().find(me);
                 if (i != sstring::npos) {
-                    f = strtof(&state->value[i + me.size() + 1], nullptr);
+                    f = strtof(&state->value()[i + me.size() + 1], nullptr);
                 } else {
                     f = 0.0f; // empty state means that node has rebooted
                 }

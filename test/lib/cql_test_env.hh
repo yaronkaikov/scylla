@@ -178,6 +178,8 @@ public:
 
     virtual sharded<db::system_keyspace>& get_system_keyspace() = 0;
 
+    virtual sharded<service::storage_proxy>& get_storage_proxy() = 0;
+
     data_dictionary::database data_dictionary();
 
     virtual sharded<qos::service_level_controller>& service_level_controller_service() = 0;

@@ -103,7 +103,7 @@ with_column_family(schema_ptr s, replica::column_family::config cfg, sstables::s
         auto cm = make_lw_shared<compaction_manager>(tm, compaction_manager::for_testing_tag{});
         auto cl_stats = make_lw_shared<cell_locker_stats>();
         auto s_opts = make_lw_shared<replica::storage_options>();
-        auto cf = make_lw_shared<replica::column_family>(s, cfg, s_opts, replica::column_family::no_commitlog(), *cm, sm, *cl_stats, *tracker);
+        auto cf = make_lw_shared<replica::column_family>(s, cfg, s_opts, replica::column_family::no_commitlog(), *cm, sm, *cl_stats, *tracker, nullptr);
         cf->mark_ready_for_writes();
         co_await func(*cf);
         co_await cf->stop();
@@ -3480,3 +3480,15 @@ SEASTAR_THREAD_TEST_CASE(test_compactor_detach_state) {
         check(stop_at, false);
     }
 };
+
+SEASTAR_TEST_CASE(test_tracing_format) {
+    // scylla-dtest/tools/cdc_utils.py::CDCTraceInfoMatcher matches the
+    // formatted token with "{key: pk(.*?), token:(.*)}", so let's make
+    // sure we don't break it
+    dht::token token{dht::token_kind::key, 42};
+    int8_t bytes[] = {0x01, 0x03, 0x00};
+    dht::decorated_key key{token, partition_key::from_bytes(bytes)};
+    std::string formatted = fmt::to_string(key);
+    BOOST_CHECK_EQUAL(formatted, "{key: pk{0103}, token: 42}");
+    return make_ready_future();
+ }

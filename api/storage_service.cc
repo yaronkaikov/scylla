@@ -619,7 +619,7 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
 
     ss::describe_any_ring.set(r, [&ctx, &ss](std::unique_ptr<http::request> req) {
         // Find an arbitrary non-system keyspace.
-        auto keyspaces = ctx.db.local().get_non_local_strategy_keyspaces();
+        auto keyspaces = ctx.db.local().get_non_local_vnode_based_strategy_keyspaces();
         if (keyspaces.empty()) {
             throw std::runtime_error("No keyspace provided and no non system kespace exist");
         }
@@ -655,8 +655,8 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
 
     ss::get_current_generation_number.set(r, [&g](std::unique_ptr<http::request> req) {
         gms::inet_address ep(utils::fb_utilities::get_broadcast_address());
-        return g.get_current_generation_number(ep).then([](int res) {
-            return make_ready_future<json::json_return_type>(res);
+        return g.get_current_generation_number(ep).then([](gms::generation_type res) {
+            return make_ready_future<json::json_return_type>(res.value());
         });
     });
 

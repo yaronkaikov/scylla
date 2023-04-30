@@ -110,6 +110,8 @@ fedora_packages=(
     cargo
     rapidxml-devel
     rust-std-static-wasm32-wasi
+    wabt
+    binaryen
 
     moreutils
     iproute
