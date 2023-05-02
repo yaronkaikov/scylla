@@ -25,6 +25,7 @@ TARGET_PATH=pgo/profiles/profile.profdata.xz
 ninja build/release/scylla
 
 # Profiles are stored in version control, so we want very strong compression.
+mkdir -p $(dirname "$TARGET_PATH")
 xz --compress -9 --stdout "$BUILD_PATH" >"$TARGET_PATH"
 
 echo "Profile $TARGET_PATH regenerated. You can now stage, commit, and push it."
