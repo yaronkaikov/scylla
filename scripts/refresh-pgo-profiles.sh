@@ -16,11 +16,6 @@ if [ "$PROJECT_BASE" != "$WORKING_DIR" ]; then
     exit 1
 fi
 
-if ! git lfs >/dev/null; then
-    echo "Error: $SCRIPT_PATH has to be run with "git lfs" installed" >2
-    exit 1
-fi
-
 BUILD_PATH=build/release-pgo/profiles/merged.profdata
 TARGET_PATH=pgo/profiles/profile.profdata.xz
 ./configure.py --mode=release --pgo --cspgo --use-profile=
