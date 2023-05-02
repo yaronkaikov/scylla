@@ -16,7 +16,7 @@ if [ "$PROJECT_BASE" != "$WORKING_DIR" ]; then
     exit 1
 fi
 
-BUILD_PATH=build/release-pgo/profiles/merged.profdata
+BUILD_PATH=build/release-cs-pgo/profiles/merged.profdata
 TARGET_PATH=pgo/profiles/profile.profdata.xz
 ./configure.py --mode=release --pgo --cspgo --use-profile=
 
