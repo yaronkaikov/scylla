@@ -451,8 +451,8 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
     auto action = "TrentService."s + std::string(target);
 
     auto now = db_clock::now();
-    auto lt_now = fmt::localtime(db_clock::to_time_t(now));
-    auto timestamp = fmt::format(ISO_8601_BASIC, lt_now);
+    auto t_now = fmt::gmtime(db_clock::to_time_t(now));
+    auto timestamp = fmt::format(ISO_8601_BASIC, t_now);
 
     // see https://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
     // see AWS SDK.
@@ -511,7 +511,7 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
 
     kms_log.trace("Canonical request: {}", canonicalRequestString);
 
-    auto simpleDate = fmt::format(SIMPLE_DATE_FORMAT_STR, lt_now);
+    auto simpleDate = fmt::format(SIMPLE_DATE_FORMAT_STR, t_now);
     auto serviceName = "kms";
 
     std::stringstream stringToSignStream;
