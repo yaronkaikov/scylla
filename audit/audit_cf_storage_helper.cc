@@ -38,12 +38,12 @@ audit_cf_storage_helper::audit_cf_storage_helper(cql3::query_processor& qp)
                        "event_time,"
                        "category,"
                        "consistency,"
-                       "table_name,"
+                       "error,"
                        "keyspace_name,"
                        "operation,"
                        "source,"
-                       "username,"
-                       "error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       "table_name,"
+                       "username) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                        KEYSPACE_NAME, TABLE_NAME))
     , _dummy_query_state(service::client_state::for_internal_calls(), empty_service_permit())
 {
@@ -91,12 +91,12 @@ cql3::query_options audit_cf_storage_helper::make_data(const audit_info* audit_i
         cql3::raw_value::make_value(uuid_type->decompose(time_id)),
         cql3::raw_value::make_value(utf8_type->decompose(audit_info->category_string())),
         cql3::raw_value::make_value(utf8_type->decompose(sstring(consistency_level.str()))),
-        cql3::raw_value::make_value(utf8_type->decompose(audit_info->table())),
+        cql3::raw_value::make_value(boolean_type->decompose(error)),
         cql3::raw_value::make_value(utf8_type->decompose(audit_info->keyspace())),
         cql3::raw_value::make_value(utf8_type->decompose(audit_info->query())),
         cql3::raw_value::make_value(inet_addr_type->decompose(client_ip.addr())),
+        cql3::raw_value::make_value(utf8_type->decompose(audit_info->table())),
         cql3::raw_value::make_value(utf8_type->decompose(username)),
-        cql3::raw_value::make_value(boolean_type->decompose(error)),
     };
     return cql3::query_options(cql3::default_cql_config, db::consistency_level::ONE, std::nullopt, std::move(values), false, cql3::query_options::specific_options::DEFAULT);
 }

@@ -499,19 +499,34 @@ query_processor::execute_direct_without_checking_exception_message(const sstring
 #endif
     tracing::trace(query_state.get_trace_state(), "Processing a statement");
     return cql_statement->check_access(*this, query_state.get_client_state()).then_wrapped([this, cql_statement, warnings = std::move(warnings), &query_state, &options] (auto&& access_future) mutable {
-      bool failed = access_future.failed();
-      return audit::inspect(cql_statement, query_state, options, failed).then([this, cql_statement, warnings = std::move(warnings), &query_state, &options, access_future = std::move(access_future)] () mutable {
         if (access_future.failed()) {
-            std::rethrow_exception(access_future.get_exception());
+            return audit::inspect(cql_statement, query_state, options, true).then([cql_statement, access_future = std::move(access_future)] () mutable -> ::shared_ptr<result_message> {
+                std::rethrow_exception(access_future.get_exception());
+            });
         }
-        return process_authorized_statement(std::move(cql_statement), query_state, options).then(
-                [warnings = std::move(warnings)] (::shared_ptr<result_message> m) {
-                    for (const auto& w : warnings) {
-                        m->add_warning(w);
-                    }
-                    return make_ready_future<::shared_ptr<result_message>>(m);
+        return process_authorized_statement(cql_statement, query_state, options).then_wrapped(
+                [cql_statement, warnings = std::move(warnings), &query_state, &options] (future<::shared_ptr<result_message>> mfut) {
+            ::shared_ptr<result_message> m;
+            if (!mfut.failed()) {
+                m = mfut.get0();
+            } else {
+                return audit::inspect(cql_statement, query_state, options, true).then([cql_statement, mfut = std::move(mfut)] () mutable -> ::shared_ptr<result_message> {
+                    std::rethrow_exception(mfut.get_exception());
                 });
-      });
+            }
+
+            bool is_error = true;
+            if (m.get()) {
+                is_error = m->is_exception();
+                for (const auto& w : warnings) {
+                    m->add_warning(w);
+                }
+            }
+
+            return audit::inspect(cql_statement, query_state, options, is_error).then([cql_statement, m] {
+                return make_ready_future<::shared_ptr<result_message>>(m);
+            });
+        });
     });
 }
 
