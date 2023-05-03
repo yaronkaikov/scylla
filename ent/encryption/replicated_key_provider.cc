@@ -38,6 +38,7 @@
 #include "replica/distributed_loader.hh"
 #include "schema/schema_builder.hh"
 #include "db/system_keyspace.hh"
+#include "db/extensions.hh"
 #include "locator/everywhere_replication_strategy.hh"
 
 namespace encryption {
@@ -428,8 +429,8 @@ shared_ptr<key_provider> replicated_key_provider_factory::get_provider(encryptio
     return p;
 }
 
-void replicated_key_provider_factory::init() {
-    replica::distributed_loader::mark_keyspace_as_load_prio(KSNAME);
+void replicated_key_provider_factory::init(db::extensions& exts) {
+    exts.add_extension_internal_keyspace(KSNAME);
 }
 
 future<> replicated_key_provider_factory::on_started(const ::replica::database& db, service::migration_manager& mm) {

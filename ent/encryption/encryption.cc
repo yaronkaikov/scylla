@@ -397,7 +397,15 @@ public:
         return replicated_key_provider_factory::on_started(get_database().local(), get_migration_manager().local());
     }
     future<> stop() override {
-        co_return;
+        return smp::invoke_on_all([this]() -> future<> {
+            for (auto&& [id, h] : _per_thread_kmip_host_cache[this_shard_id()]) {
+                co_await h->disconnect();
+            }
+            _per_thread_provider_cache[this_shard_id()].clear();
+            _per_thread_system_key_cache[this_shard_id()].clear();
+            _per_thread_kmip_host_cache[this_shard_id()].clear();
+            _per_thread_kms_host_cache[this_shard_id()].clear();
+        });
     }
 };
 
@@ -823,7 +831,7 @@ future<seastar::shared_ptr<encryption_context>> register_extensions(const db::co
         });
     }
 
-    replicated_key_provider_factory::init();
+    replicated_key_provider_factory::init(exts);
 
     return f.then([ctxt]() -> ::shared_ptr<encryption_context> {
         return ctxt;
