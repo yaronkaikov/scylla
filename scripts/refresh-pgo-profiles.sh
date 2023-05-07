@@ -17,7 +17,7 @@ if [ "$PROJECT_BASE" != "$WORKING_DIR" ]; then
 fi
 
 BUILD_PATH=build/release-cs-pgo/profiles/merged.profdata
-TARGET_PATH=pgo/profiles/profile.profdata.xz
+TARGET_PATH=pgo/profiles/$(uname -m)/profile.profdata.xz
 ./configure.py --mode=release --pgo --cspgo --use-profile=
 
 # ninja "$BUILD_PATH" would avoid a build step, but let's do it voluntarily

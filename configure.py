@@ -1672,7 +1672,7 @@ for mode in modes:
             # which extracts the default profile from an archive in pgo/profiles,
             # (stored in git LFS) to build/
 
-            default_profile_archive_path = "pgo/profiles/profile.profdata.xz"
+            default_profile_archive_path = f"pgo/profiles/{arch}/profile.profdata.xz"
             default_profile_filename = pathlib.Path(default_profile_archive_path).stem
 
             # We are checking whether the profile archive is compressed,

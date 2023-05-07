@@ -1,4 +1,4 @@
 *.cc diff=cpp
 *.hh diff=cpp
 *.svg binary
-pgo/profiles/profile.profdata.xz filter=lfs diff=lfs merge=lfs -text
+pgo/profiles/** filter=lfs diff=lfs merge=lfs -text
