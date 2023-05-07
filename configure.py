@@ -515,6 +515,7 @@ scylla_tests = set([
     'test/boost/exceptions_fallback_test',
     'test/boost/s3_test',
     'test/boost/locator_topology_test',
+    'test/boost/string_format_test',
     'test/boost/encrypted_file_test',
     'test/boost/encryption_at_rest_test',
     'test/manual/ec2_snitch_test',
@@ -1217,7 +1218,7 @@ scylla_tests_generic_dependencies = [
     'test/lib/sstable_run_based_compaction_strategy_for_tests.cc',
 ]
 
-scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependencies + [
+scylla_tests_dependencies = scylla_core + alternator + idls + scylla_tests_generic_dependencies + [
     'test/lib/cql_assertions.cc',
     'test/lib/result_set_assertions.cc',
     'test/lib/mutation_source_test.cc',
@@ -1284,6 +1285,7 @@ pure_boost_tests = set([
     'test/boost/vint_serialization_test',
     'test/boost/bptree_test',
     'test/boost/utf8_test',
+    'test/boost/string_format_test',
     'test/manual/streaming_histogram_test',
 ])
 
@@ -1321,7 +1323,7 @@ for t in sorted(scylla_tests):
     if t not in tests_not_using_seastar_test_framework:
         deps[t] += scylla_tests_dependencies
     else:
-        deps[t] += scylla_core + idls + scylla_tests_generic_dependencies
+        deps[t] += scylla_core + alternator + idls + scylla_tests_generic_dependencies
 
 perf_tests_seastar_deps = [
     'seastar/tests/perf/perf_tests.cc'
@@ -1394,9 +1396,7 @@ warnings = [
     '-Werror',
     '-Wno-mismatched-tags',  # clang-only
     '-Wno-tautological-compare',
-    '-Wno-parentheses-equality',
     '-Wno-c++11-narrowing',
-    '-Wno-missing-braces',
     '-Wno-ignored-attributes',
     '-Wno-overloaded-virtual',
     '-Wno-unused-command-line-argument',
@@ -2178,7 +2178,7 @@ with open(buildfile, 'w') as f:
                 if binary not in tests_not_using_seastar_test_framework:
                     local_libs += f' {seastar_testing_libs}'
                 else:
-                    local_libs += ' ' + '-lgnutls'
+                    local_libs += ' ' + '-lgnutls' + ' ' + '-lboost_unit_test_framework'
                 # Our code's debugging information is huge, and multiplied
                 # by many tests yields ridiculous amounts of disk space.
                 # So we strip the tests by default; The user can very
@@ -2305,13 +2305,14 @@ with open(buildfile, 'w') as f:
                 obj = cc.replace('.cpp', '.o')
                 for suffix in [''] + ['.lto'] * modes[mode]['has_lto']:
                     f.write(f'build {obj}{suffix}: cxx.{mode}{suffix} {cc} | {profile_dep} || {" ".join(serializers)}\n')
+                    flags = '-Wno-parentheses-equality'
                     if cc.endswith('Parser.cpp'):
                         # Unoptimized parsers end up using huge amounts of stack space and overflowing their stack
-                        flags = '-O1' if modes[mode]['optimization-level'] in ['0', 'g', 's'] else ''
+                        flags += ' -O1' if modes[mode]['optimization-level'] in ['0', 'g', 's'] else ''
 
                         if has_sanitize_address_use_after_scope:
                             flags += ' -fno-sanitize-address-use-after-scope'
-                        f.write('  obj_cxxflags = %s\n' % flags)
+                    f.write('  obj_cxxflags = %s\n' % flags)
         f.write(f'build $builddir/{mode}/gen/empty.cc: gen\n')
         for hh in headers:
             f.write('build $builddir/{mode}/{hh}.o: checkhh.{mode} {hh} | $builddir/{mode}/gen/empty.cc {profile_dep} || {gen_headers_dep}\n'.format(

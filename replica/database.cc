@@ -311,6 +311,14 @@ public:
     }
 };
 
+sstables::object_storage_config make_object_storage_config(const db::config& db_cfg) {
+    std::unordered_map<sstring, s3::endpoint_config_ptr> ret;
+    for (auto [ ep, cfg ] : db_cfg.object_storage_config()) {
+        ret[ep] = make_lw_shared<s3::endpoint_config>(std::move(cfg));
+    }
+    return ret;
+}
+
 reader_concurrency_semaphore&
 database::read_concurrency_sem() {
     reader_concurrency_semaphore* sem = _reader_concurrency_semaphores_group.get_or_null(current_scheduling_group());
@@ -383,7 +391,7 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
               _cfg.compaction_rows_count_warning_threshold,
               _cfg.compaction_collection_elements_count_warning_threshold))
     , _nop_large_data_handler(std::make_unique<db::nop_large_data_handler>())
-    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory, sst_dir_sem.local()))
+    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory, sst_dir_sem.local(), make_object_storage_config(_cfg)))
     , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory, sst_dir_sem.local()))
     , _result_memory_limiter(dbcfg.available_memory / 10)
     , _data_listeners(std::make_unique<db::data_listeners>())
@@ -397,6 +405,7 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _stop_barrier(std::move(barrier))
     , _update_memtable_flush_static_shares_action([this, &cfg] { return _memtable_controller.update_static_shares(cfg.memtable_flush_static_shares()); })
     , _memtable_flush_static_shares_observer(cfg.memtable_flush_static_shares.observe(_update_memtable_flush_static_shares_action.make_observer()))
+    , _object_storage_config_updater(this_shard_id() == 0 ? std::make_unique<object_storage_config_updater>(*this) : nullptr)
 {
     assert(dbcfg.available_memory != 0); // Detect misconfigured unit tests, see #7544
 
@@ -410,6 +419,15 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
         set_format(*_dbcfg.sstables_format);
     }
 }
+
+database::object_storage_config_updater::object_storage_config_updater(database& db)
+    : action([&db] () mutable {
+        return db.container().invoke_on_all([] (database& db) {
+            db._user_sstables_manager->update_object_storage_config(make_object_storage_config(db._cfg));
+        });
+    })
+    , observer(db._cfg.object_storage_config.observe(action.make_observer()))
+{}
 
 const db::extensions& database::extensions() const {
     return get_config().extensions();
@@ -1580,10 +1598,10 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
     }
 
     auto read_func = [&, this] (reader_permit permit) {
-        reader_permit::used_guard ug{permit};
+        reader_permit::need_cpu_guard ncpu_guard{permit};
         permit.set_max_result_size(max_result_size);
         return cf.query(std::move(s), std::move(permit), cmd, opts, ranges, trace_state, get_result_memory_limiter(),
-                timeout, &querier_opt).then([&result, ug = std::move(ug)] (lw_shared_ptr<query::result> res) {
+                timeout, &querier_opt).then([&result, ncpu_guard = std::move(ncpu_guard)] (lw_shared_ptr<query::result> res) {
             result = std::move(res);
         });
     };
@@ -1647,10 +1665,10 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
     }
 
     auto read_func = [&] (reader_permit permit) {
-        reader_permit::used_guard ug{permit};
+        reader_permit::need_cpu_guard ncpu_guard{permit};
         permit.set_max_result_size(max_result_size);
         return cf.mutation_query(std::move(s), std::move(permit), cmd, range,
-                std::move(trace_state), std::move(accounter), timeout, &querier_opt).then([&result, ug = std::move(ug)] (reconcilable_result res) {
+                std::move(trace_state), std::move(accounter), timeout, &querier_opt).then([&result, ncpu_guard = std::move(ncpu_guard)] (reconcilable_result res) {
             result = std::move(res);
         });
     };
@@ -2373,6 +2391,9 @@ future<> database::stop() {
     co_await _system_read_concurrency_sem.stop();
     dblog.info("Joining memtable update action");
     co_await _update_memtable_flush_static_shares_action.join();
+    if (_object_storage_config_updater) {
+        co_await _object_storage_config_updater->action.join();
+    }
 }
 
 future<> database::flush_all_memtables() {

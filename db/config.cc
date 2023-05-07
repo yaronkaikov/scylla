@@ -936,6 +936,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , wasm_udf_total_fuel(this, "wasm_udf_total_fuel", value_status::Used, 100000000, "Wasmtime fuel a WASM UDF can consume before termination")
     , wasm_udf_memory_limit(this, "wasm_udf_memory_limit", value_status::Used, 2*1024*1024, "How much memory each WASM UDF can allocate at most")
     , relabel_config_file(this, "relabel_config_file", value_status::Used, "", "Optionally, read relabel config from file")
+    , object_storage_config_file(this, "object_storage_config_file", value_status::Used, "", "Optionally, read object-storage endpoints config from file")
     , minimum_keyspace_rf(this, "minimum_keyspace_rf", liveness::LiveUpdate, value_status::Used, 0, "The minimum allowed replication factor when creating or altering a keyspace.")
 
     , audit(this, "audit", value_status::Used, "none",

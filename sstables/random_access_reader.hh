@@ -6,6 +6,8 @@
  * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
+#pragma once
+
 #include <memory>
 #include <seastar/core/file.hh>
 #include <seastar/core/fstream.hh>
