@@ -399,6 +399,21 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
     }
 
     // if we did not get full auth info in config, we can try to 
+    // retrieve it from environment
+    if (_options.aws_access_key_id.empty() || _options.aws_secret_access_key.empty()) {
+        auto key_id = std::getenv("AWS_ACCESS_KEY_ID");
+        auto key = std::getenv("AWS_SECRET_ACCESS_KEY");
+        if (_options.aws_access_key_id.empty() && key_id) {
+            kms_log.debug("No aws id specified. Using environment AWS_ACCESS_KEY_ID");
+            _options.aws_access_key_id = key_id;
+        }
+        if (_options.aws_secret_access_key.empty() && key) {
+            kms_log.debug("No aws secret specified. Using environment AWS_SECRET_ACCESS_KEY");
+            _options.aws_secret_access_key = key;
+        }
+    }
+
+    // if we did not get full auth info in config or env, we can try to 
     // retrieve it from ~/.aws/credentials
     if (_options.aws_access_key_id.empty() || _options.aws_secret_access_key.empty()) {
         auto home = std::getenv("HOME");
