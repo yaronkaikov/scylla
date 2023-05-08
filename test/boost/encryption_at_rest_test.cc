@@ -171,6 +171,16 @@ SEASTAR_TEST_CASE(test_kms_provider) {
         kms_aws_region = default_aws_region.data();
     }
 
+    static const std::string default_profile = "default";
+
+    const char* kms_aws_profile = std::getenv("KMS_AWS_PROFILE");
+    if (kms_aws_profile == nullptr) {
+        kms_aws_profile = std::getenv("AWS_PROFILE");
+    }
+    if (kms_aws_profile == nullptr) {
+        kms_aws_profile = default_profile.data();
+    }
+
     tmpdir tmp;
 
     /**
@@ -182,8 +192,9 @@ SEASTAR_TEST_CASE(test_kms_provider) {
             kms_test:
                 master_key: {0}
                 aws_region: {1}
+                aws_profile: {2}
                 )foo"
-        , kms_key_alias, kms_aws_region
+        , kms_key_alias, kms_aws_region, kms_aws_profile
     );
 
     co_await test_provider("'key_provider': 'KmsKeyProviderFactory', 'kms_host': 'kms_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);

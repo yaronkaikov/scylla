@@ -37,6 +37,8 @@ public:
         std::string aws_access_key_id;
         std::string aws_secret_access_key;
         std::string aws_region;
+        std::string aws_profile;
+
         // key to use for keys
         std::string master_key;
         // tls. if unspeced, use system for https
