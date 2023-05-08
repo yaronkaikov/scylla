@@ -119,6 +119,14 @@ public:
         if (_options.port == 0) {
             _options.port = _options.https ? 443 : 80; 
         }
+        if (_options.aws_profile.empty()) {
+            auto profile = std::getenv("AWS_PROFILE");
+            if (profile) {
+                _options.aws_profile = profile;
+            } else {
+                _options.aws_profile = "default";
+            }
+        }
         kms_log.trace("Added KMS node {}={}", name, _options.endpoint.empty() 
             ? (_options.host.empty() ? _options.aws_region : _options.host)
             : _options.endpoint 
@@ -424,18 +432,24 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
                 kms_log.debug("No aws id/secret specified. Trying to read credentials from {}", credentials);
                 try {
                     auto buf = co_await read_text_file_fully(credentials);
+                    std::string profile;
 
-                    static std::regex cred_line(R"foo(\s*([^\s]+)\s*=\s*([^\s]+)\s*\n)foo");
+                    static std::regex cred_line(R"foo(\s*\[(?:profile\s+)?(\w+)\]|([^\s]+)\s*=\s*([^\s]+)\s*\n)foo");
                     std::cregex_iterator i(buf.get(), buf.get() + buf.size(), cred_line), e;
 
                     std::string id, secret;
                     while (i != e) {
-                        std::string key((*i)[1].str());
-                        std::string val((*i)[2].str());
-                        if (key == "aws_access_key_id") {
-                            id = val;
-                        } else if (key == "aws_secret_access_key") {
-                            secret = val;
+                        if ((*i)[1].length() > 0) {
+                            profile = (*i)[1].str();
+                            kms_log.trace("Found profile {} ({})", profile, credentials);
+                        } else if (profile == _options.aws_profile) {
+                            std::string key((*i)[2].str());
+                            std::string val((*i)[3].str());
+                            if (key == "aws_access_key_id") {
+                                id = val;
+                            } else if (key == "aws_secret_access_key") {
+                                secret = val;
+                            }
                         }
                         ++i;
                     }
@@ -448,6 +462,9 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
                     }
                     if (!secret.empty() && _options.aws_secret_access_key.empty()) {
                         _options.aws_secret_access_key = secret;
+                    }
+                    if (_options.aws_access_key_id.empty() || _options.aws_secret_access_key.empty()) {
+                        throw std::runtime_error(fmt::format("Could not find credentials for profile {}", _options.aws_profile));
                     }
                     kms_log.debug("Read credentials from {} ({}:{}{})", credentials, _options.aws_access_key_id                    
                         , _options.aws_secret_access_key.substr(0, 2)
@@ -782,6 +799,7 @@ encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name
         opts.aws_access_key_id = m("aws_access_key_id").value_or("");
         opts.aws_secret_access_key = m("aws_secret_access_key").value_or("");
         opts.aws_region = m("aws_region").value_or("");
+        opts.aws_profile = m("aws_profile").value_or("");
 
         // use "endpoint" semantics to match AWS configs.
         opts.endpoint = m("endpoint").value_or("");

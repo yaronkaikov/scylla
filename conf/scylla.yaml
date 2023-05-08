@@ -679,7 +679,8 @@ consistent_cluster_management: true
 # Actual connection can be either an explicit endpoint (<host>:<port>), or selected automatic via aws_region.
 # 
 # Authentication can be explicit with aws_access_key_id and aws_secret_access_key. Either secret or both can be ommitted
-# in which case the provider will try to read them from AWS credentials in ~/.aws/credentials
+# in which case the provider will try to read them from AWS credentials in ~/.aws/credentials. If aws_profile is set, the
+# credentials in this section is used.
 #
 # master_key is an AWS KMS key id or alias from which all keys used for actual encryption of scylla data will be derived.
 # This key must be pre-created with access policy allowing the above AWS id Encrypt, Decrypt and GenerateDataKey operations.
@@ -690,6 +691,7 @@ consistent_cluster_management: true
 #       aws_region: <aws region> (optional)
 #       aws_access_key_id: <aws access key id> (optional)
 #       aws_secret_access_key: <aws secret access key> (optional)
+#       aws_profile: <aws credentials profile> (optional)
 #       master_key: <named KMS key for encrypting data keys> (required)
 #       certificate: <identifying certificate> (optional)
 #       keyfile: <identifying key> (optional)
