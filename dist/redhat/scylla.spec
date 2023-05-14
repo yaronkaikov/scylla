@@ -16,6 +16,8 @@ Requires:       %{product}-tools = %{version}-%{release}
 Requires:       %{product}-tools-core = %{version}-%{release}
 Requires:       %{product}-node-exporter = %{version}-%{release}
 Requires:       %{product}-cqlsh = %{version}-%{release}
+
+Suggests:       %{product}-machine-image = %{version}-%{release}
 Obsoletes:	scylla-server < 1.1
 
 %global _debugsource_template %{nil}
