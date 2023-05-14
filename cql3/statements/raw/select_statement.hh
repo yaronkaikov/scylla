@@ -75,7 +75,7 @@ public:
     template<typename T>
     using compare_fn = std::function<bool(const T&, const T&)>;
 
-    using result_row_type = std::vector<bytes_opt>;
+    using result_row_type = std::vector<managed_bytes_opt>;
     using ordering_comparator_type = compare_fn<result_row_type>;
 protected:
     virtual audit::statement_category category() const override;

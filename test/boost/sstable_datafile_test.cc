@@ -1927,12 +1927,12 @@ static void copy_directory(fs::path src_dir, fs::path dst_dir) {
 SEASTAR_TEST_CASE(test_unknown_component) {
     return test_env::do_with_async([] (test_env& env) {
         copy_directory("test/resource/sstables/unknown_component", std::string(env.tempdir().path().string()) + "/unknown_component");
-        auto sstp = env.reusable_sst(uncompressed_schema(), env.tempdir().path().string() + "/unknown_component", 1).get0();
+        auto sstp = env.reusable_sst(uncompressed_schema(), env.tempdir().path().string() + "/unknown_component").get0();
         test::create_links(*sstp, env.tempdir().path().string()).get();
         // check that create_links() moved unknown component to new dir
         BOOST_REQUIRE(file_exists(env.tempdir().path().string() + "/la-1-big-UNKNOWN.txt").get0());
 
-        sstp = env.reusable_sst(uncompressed_schema(), 1).get0();
+        sstp = env.reusable_sst(uncompressed_schema(), generation_type{1}).get0();
         sstables::sstable_directory::delete_atomically({sstp}).get();
         // assure unknown component is deleted
         BOOST_REQUIRE(!file_exists(env.tempdir().path().string() + "/la-1-big-UNKNOWN.txt").get0());
@@ -2119,7 +2119,7 @@ SEASTAR_TEST_CASE(sstable_bad_tombstone_histogram_test) {
                 .with_column("id", utf8_type, column_kind::partition_key)
                 .with_column("value", int32_type);
         auto s = builder.build();
-        auto sst = env.reusable_sst(s, "test/resource/sstables/bad_tombstone_histogram", 1).get0();
+        auto sst = env.reusable_sst(s, "test/resource/sstables/bad_tombstone_histogram").get0();
         auto histogram = sst->get_stats_metadata().estimated_tombstone_drop_time;
         BOOST_REQUIRE(histogram.max_bin_size == sstables::TOMBSTONE_HISTOGRAM_BIN_SIZE);
         // check that bad histogram was discarded
@@ -2822,7 +2822,7 @@ SEASTAR_TEST_CASE(compound_sstable_set_basic_test) {
         set2->insert(sstable_for_overlapping_test(env, s, keys[0].key(), keys[1].key(), 0));
         set2->insert(sstable_for_overlapping_test(env, s, keys[0].key(), keys[1].key(), 0));
 
-        BOOST_REQUIRE(boost::accumulate(*compound->all() | boost::adaptors::transformed([] (const sstables::shared_sstable& sst) { return generation_value(sst->generation()); }), unsigned(0)) == 6);
+        BOOST_REQUIRE(boost::accumulate(*compound->all() | boost::adaptors::transformed([] (const sstables::shared_sstable& sst) { return sst->generation().as_int(); }), unsigned(0)) == 6);
         {
             unsigned found = 0;
             for (auto sstables = compound->all(); [[maybe_unused]] auto& sst : *sstables) {
@@ -3174,7 +3174,7 @@ SEASTAR_TEST_CASE(test_sstable_bytes_on_disk_correctness) {
 
         auto get_bytes_on_disk_from_storage = [&] (const sstables::shared_sstable& sst) {
             uint64_t bytes_on_disk = 0;
-            auto& underlying_storage = const_cast<sstable::storage&>(sst->get_storage());
+            auto& underlying_storage = const_cast<sstables::storage&>(sst->get_storage());
             for (auto& component_type : sstables::test(sst).get_components()) {
                 file f = underlying_storage.open_component(*sst, component_type, open_flags::ro, file_open_options{}, true).get0();
                 bytes_on_disk += f.size().get0();

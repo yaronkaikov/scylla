@@ -1561,6 +1561,11 @@ private:
 
 bool needs_cleanup(const sstables::shared_sstable& sst,
                    const dht::token_range_vector& sorted_owned_ranges) {
+    // Finish early if the keyspace has no owned token ranges (in this data center)
+    if (sorted_owned_ranges.empty()) {
+        return true;
+    }
+
     auto first_token = sst->get_first_decorated_key().token();
     auto last_token = sst->get_last_decorated_key().token();
     dht::token_range sst_token_range = dht::token_range::make(first_token, last_token);
@@ -1611,14 +1616,13 @@ future<> compaction_manager::perform_cleanup(owned_ranges_ptr sorted_owned_range
         throw std::runtime_error(format("cleanup request failed: there is an ongoing cleanup on {}", t));
     }
 
-    if (sorted_owned_ranges->empty()) {
-        throw std::runtime_error("cleanup request failed: sorted_owned_ranges is empty");
-    }
-
     // Called with compaction_disabled
     auto get_sstables = [this, &t, sorted_owned_ranges] () -> future<std::vector<sstables::shared_sstable>> {
         return seastar::async([this, &t, sorted_owned_ranges = std::move(sorted_owned_ranges)] {
             auto update_sstables_cleanup_state = [&] (const sstables::sstable_set& set) {
+                // Hold on to the sstable set since it may be overwritten
+                // while we yield in this loop.
+                auto set_holder = set.shared_from_this();
                 set.for_each_sstable([&] (const sstables::shared_sstable& sst) {
                     update_sstable_cleanup_state(t, sst, *sorted_owned_ranges);
                     seastar::thread::maybe_yield();

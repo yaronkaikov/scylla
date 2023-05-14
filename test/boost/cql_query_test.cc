@@ -944,7 +944,7 @@ SEASTAR_TEST_CASE(test_limit_is_respected_across_partitions) {
             const auto& rs = rows->rs().result_set();
             for (auto&& row : rs.rows()) {
                 BOOST_REQUIRE(row[0]);
-                keys.push_back(*row[0]);
+                keys.push_back(to_bytes(*row[0]));
             }
             BOOST_REQUIRE(keys.size() == 2);
             bytes k1 = keys[0];
@@ -1004,7 +1004,7 @@ SEASTAR_TEST_CASE(test_partitions_have_consistent_ordering_in_range_query) {
             const auto& rs = rows->rs().result_set();
             for (auto&& row : rs.rows()) {
                 BOOST_REQUIRE(row[0]);
-                keys.push_back(*row[0]);
+                keys.push_back(to_bytes(*row[0]));
             }
             BOOST_REQUIRE(keys.size() == 6);
 
@@ -1088,7 +1088,7 @@ SEASTAR_TEST_CASE(test_partition_range_queries_with_bounds) {
             for (auto&& row : rs.rows()) {
                 BOOST_REQUIRE(row[0]);
                 BOOST_REQUIRE(row[1]);
-                keys.push_back(*row[0]);
+                keys.push_back(to_bytes(*row[0]));
                 tokens.push_back(value_cast<int64_t>(long_type->deserialize(*row[1])));
             }
             BOOST_REQUIRE(keys.size() == 5);
@@ -3784,7 +3784,7 @@ SEASTAR_TEST_CASE(test_rf_expand) {
             auto row0 = rows[0];
             BOOST_REQUIRE_EQUAL(row0.size(), 1);
 
-            auto parsed = rjson::parse(to_sstring_view(*row0[0]));
+            auto parsed = rjson::parse(to_sstring_view(to_bytes(*row0[0])));
             return std::move(rjson::get(parsed, "replication"));
         };
 

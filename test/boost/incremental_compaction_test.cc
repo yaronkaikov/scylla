@@ -114,7 +114,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
             BOOST_REQUIRE(*expected_sst == old_sstables.front()->generation());
             expected_sst++;
             // check that previously released sstables were already closed
-            if (old_sstables.front()->generation().value() % 4 == 0) {
+            if (old_sstables.front()->generation().as_int() % 4 == 0) {
                 // Due to performance reasons, sstables are not released immediately, but in batches.
                 // At the time of writing, mutation_reader_merger releases it's sstable references
                 // in batches of 4. That's why we only perform this check every 4th sstable. 
