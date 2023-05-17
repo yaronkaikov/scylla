@@ -120,6 +120,7 @@ fedora_packages=(
     openldap-devel
     toxiproxy
     cyrus-sasl
+    fipscheck
 )
 
 # lld is not available on s390x, see
