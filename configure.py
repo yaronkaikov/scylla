@@ -1721,7 +1721,7 @@ for mode in modes:
                 modes[mode]['profile_recipe'] += textwrap.dedent(f"""\
                     rule xz_uncompress
                         command = xz --uncompress --stdout $in > $out
-                        description = XZ_UNCOMPRESS $out to $in
+                        description = XZ_UNCOMPRESS $in to $out
                     build {profile_target}: xz_uncompress {default_profile_archive_path}
                     """)
             else:
