@@ -1721,7 +1721,7 @@ for mode in modes:
                 modes[mode]['profile_recipe'] += textwrap.dedent(f"""\
                     rule xz_uncompress
                         command = xz --uncompress --stdout $in > $out
-                        description = XZ_UNCOMPRESS $out to $in
+                        description = XZ_UNCOMPRESS $in to $out
                     build {profile_target}: xz_uncompress {default_profile_archive_path}
                     """)
             else:
@@ -1995,7 +1995,7 @@ with open(buildfile, 'w') as f:
             command = {python} ./idl-compiler.py --ns ser -f $in -o $out
             description = IDL compiler $out
         rule ninja
-            command = if test $profile_dep && test $profile_dep -nt $out; then ninja -C $subdir -t clean; fi; {ninja} -C $subdir $target
+            command = {ninja} -C $subdir $target
             restat = 1
             description = NINJA $out
         rule ragel
