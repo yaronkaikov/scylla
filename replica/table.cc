@@ -47,6 +47,7 @@
 #include "utils/lister.hh"
 #include "dht/token.hh"
 #include "dht/i_partitioner.hh"
+#include "replica/global_table_ptr.hh"
 
 #include <boost/range/algorithm/remove_if.hpp>
 #include <boost/range/algorithm.hpp>
@@ -1076,8 +1077,8 @@ table::sstable_list_builder::build_new_list(const sstables::sstable_set& current
 future<>
 compaction_group::delete_sstables_atomically(std::vector<sstables::shared_sstable> sstables_to_remove) {
     return seastar::try_with_gate(_t._sstable_deletion_gate, [this, sstables_to_remove = std::move(sstables_to_remove)] () mutable {
-        return with_semaphore(_t._sstable_deletion_sem, 1, [sstables_to_remove = std::move(sstables_to_remove)] () mutable {
-            return sstables::sstable_directory::delete_atomically(std::move(sstables_to_remove));
+        return with_semaphore(_t._sstable_deletion_sem, 1, [this, sstables_to_remove = std::move(sstables_to_remove)] () mutable {
+            return _t.get_sstables_manager().delete_atomically(std::move(sstables_to_remove));
         });
     }).handle_exception([] (std::exception_ptr ex) {
         // There is nothing more we can do here.
@@ -1681,12 +1682,12 @@ future<> table::write_schema_as_cql(database& db, sstring dir) const {
 }
 
 // Runs the orchestration code on an arbitrary shard to balance the load.
-future<> table::snapshot_on_all_shards(sharded<database>& sharded_db, const std::vector<foreign_ptr<lw_shared_ptr<table>>>& table_shards, sstring name) {
-    auto jsondir = table_shards[this_shard_id()]->_config.datadir + "/snapshots/" + name;
+future<> table::snapshot_on_all_shards(sharded<database>& sharded_db, const global_table_ptr& table_shards, sstring name) {
+    auto jsondir = table_shards->_config.datadir + "/snapshots/" + name;
     auto orchestrator = std::hash<sstring>()(jsondir) % smp::count;
 
     co_await smp::submit_to(orchestrator, [&] () -> future<> {
-        auto& t = *table_shards[this_shard_id()];
+        auto& t = *table_shards;
         auto s = t.schema();
         tlogger.debug("Taking snapshot of {}.{}: directory={}", s->ks_name(), s->cf_name(), jsondir);
 
@@ -1695,7 +1696,7 @@ future<> table::snapshot_on_all_shards(sharded<database>& sharded_db, const std:
 
         co_await coroutine::parallel_for_each(boost::irange(0u, smp::count), [&] (unsigned shard) -> future<> {
             file_sets.emplace_back(co_await smp::submit_to(shard, [&] {
-                return table_shards[this_shard_id()]->take_snapshot(sharded_db.local(), jsondir);
+                return table_shards->take_snapshot(sharded_db.local(), jsondir);
             }));
         });
 
@@ -1915,7 +1916,7 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
         if (r.enable_backlog_tracker) {
             remove_sstable_from_backlog_tracker(r.cg.get_backlog_tracker(), r.sst);
         }
-        co_await sstables::sstable_directory::delete_atomically({r.sst});
+        co_await get_sstables_manager().delete_atomically({r.sst});
         erase_sstable_cleanup_state(r.sst);
     });
     co_return p->rp;
@@ -2550,6 +2551,14 @@ table::disable_auto_compaction() {
     });
 }
 
+void table::set_tombstone_gc_enabled(bool tombstone_gc_enabled) noexcept {
+    _tombstone_gc_enabled = tombstone_gc_enabled;
+    tlogger.info0("Tombstone GC was {} for {}.{}", tombstone_gc_enabled ? "enabled" : "disabled", _schema->ks_name(), _schema->cf_name());
+    if (_tombstone_gc_enabled) {
+        trigger_compaction();
+    }
+}
+
 flat_mutation_reader_v2
 table::make_reader_v2_excluding_sstables(schema_ptr s,
         reader_permit permit,
@@ -2582,6 +2591,7 @@ table::make_reader_v2_excluding_sstables(schema_ptr s,
 future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable> sstables) {
     auto units = co_await get_units(_sstable_deletion_sem, 1);
     sstables::delayed_commit_changes delay_commit;
+    std::unordered_set<compaction_group*> compaction_groups_to_notify;
     for (auto sst : sstables) {
         try {
             // Off-strategy can happen in parallel to view building, so the SSTable may be deleted already if the former
@@ -2589,12 +2599,16 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
             // The _sstable_deletion_sem prevents list update on off-strategy completion and move_sstables_from_staging()
             // from stepping on each other's toe.
             co_await sst->change_state(sstables::normal_dir, &delay_commit);
+            auto& cg = compaction_group_for_sstable(sst);
+            if (get_compaction_manager().requires_cleanup(cg.as_table_state(), sst)) {
+                compaction_groups_to_notify.insert(&cg);
+            }
             // If view building finished faster, SSTable with repair origin still exists.
             // It can also happen the SSTable is not going through reshape, so it doesn't have a repair origin.
             // That being said, we'll only add this SSTable to tracker if its origin is other than repair.
             // Otherwise, we can count on off-strategy completion to add it when updating lists.
             if (sst->get_origin() != sstables::repair_origin) {
-                add_sstable_to_backlog_tracker(compaction_group_for_sstable(sst).get_backlog_tracker(), sst);
+                add_sstable_to_backlog_tracker(cg.get_backlog_tracker(), sst);
             }
         } catch (...) {
             tlogger.warn("Failed to move sstable {} from staging: {}", sst->get_filename(), std::current_exception());
@@ -2603,6 +2617,10 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
     }
 
     co_await delay_commit.commit();
+
+    for (auto* cg : compaction_groups_to_notify) {
+        cg->get_staging_done_condition().broadcast();
+    }
 
     // Off-strategy timer will be rearmed, so if there's more incoming data through repair / streaming,
     // the timer can be updated once again. In practice, it allows off-strategy compaction to kick off
@@ -2795,6 +2813,9 @@ public:
     bool is_auto_compaction_disabled_by_user() const noexcept override {
         return _t.is_auto_compaction_disabled_by_user();
     }
+    bool tombstone_gc_enabled() const noexcept override {
+        return _t._tombstone_gc_enabled;
+    }
     const tombstone_gc_state& get_tombstone_gc_state() const noexcept override {
         return _t.get_compaction_manager().get_tombstone_gc_state();
     }
@@ -2803,6 +2824,10 @@ public:
     }
     const std::string& get_group_id() const noexcept override {
         return _cg.get_group_id();
+    }
+
+    seastar::condition_variable& get_staging_done_condition() noexcept override {
+        return _cg.get_staging_done_condition();
     }
 };
 

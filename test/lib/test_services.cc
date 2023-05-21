@@ -52,6 +52,7 @@ class table_for_tests::table_state : public compaction::table_state {
     mutable compaction_backlog_tracker _backlog_tracker;
     compaction::compaction_strategy_state _compaction_strategy_state;
     std::string _group_id;
+    seastar::condition_variable _staging_condition;
 private:
     replica::table& table() const noexcept {
         return *_data.cf;
@@ -115,6 +116,9 @@ public:
     bool is_auto_compaction_disabled_by_user() const noexcept override {
         return table().is_auto_compaction_disabled_by_user();
     }
+    bool tombstone_gc_enabled() const noexcept override {
+        return table().tombstone_gc_enabled();
+    }
     const tombstone_gc_state& get_tombstone_gc_state() const noexcept override {
         return _tombstone_gc_state;
     }
@@ -123,6 +127,9 @@ public:
     }
     const std::string& get_group_id() const noexcept override {
         return _group_id;
+    }
+    seastar::condition_variable& get_staging_done_condition() noexcept override {
+        return _staging_condition;
     }
 };
 
@@ -153,35 +160,40 @@ future<> table_for_tests::stop() {
     co_await when_all_succeed(data->cm.stop(), data->semaphore.stop()).discard_result();
 }
 
-namespace sstables {
-
-std::unique_ptr<db::config> make_db_config(sstring temp_dir) {
-    auto cfg = std::make_unique<db::config>();
-    cfg->data_file_directories.set({ temp_dir });
-    cfg->host_id = locator::host_id::create_random_id();
-    return cfg;
+void table_for_tests::set_tombstone_gc_enabled(bool tombstone_gc_enabled) noexcept {
+    _data->cf->set_tombstone_gc_enabled(tombstone_gc_enabled);
 }
 
-std::unordered_map<sstring, s3::endpoint_config_ptr> make_storage_options_config(const data_dictionary::storage_options& so) {
-    std::unordered_map<sstring, s3::endpoint_config_ptr> cfg;
+namespace sstables {
+
+std::unordered_map<sstring, s3::endpoint_config> make_storage_options_config(const data_dictionary::storage_options& so) {
+    std::unordered_map<sstring, s3::endpoint_config> cfg;
     std::visit(overloaded_functor {
         [] (const data_dictionary::storage_options::local& loc) mutable -> void {
         },
         [&cfg] (const data_dictionary::storage_options::s3& os) mutable -> void {
-            cfg[os.endpoint] = make_lw_shared<s3::endpoint_config>(s3::endpoint_config {
+            cfg[os.endpoint] = s3::endpoint_config {
                 .port = std::stoul(tests::getenv_safe("S3_SERVER_PORT_FOR_TEST")),
-            });
+            };
         }
     }, so.value);
     return cfg;
 }
 
-test_env::impl::impl(test_env_config cfg)
+std::unique_ptr<db::config> make_db_config(sstring temp_dir, const data_dictionary::storage_options so) {
+    auto cfg = std::make_unique<db::config>();
+    cfg->data_file_directories.set({ temp_dir });
+    cfg->host_id = locator::host_id::create_random_id();
+    cfg->object_storage_config = make_storage_options_config(so);
+    return cfg;
+}
+
+test_env::impl::impl(test_env_config cfg, sstables::storage_manager* sstm)
     : dir()
-    , db_config(make_db_config(dir.path().native()))
+    , db_config(make_db_config(dir.path().native(), cfg.storage))
     , dir_sem(1)
     , feature_service(gms::feature_config_from_db_config(*db_config))
-    , mgr(cfg.large_data_handler == nullptr ? nop_ld_handler : *cfg.large_data_handler, *db_config, feature_service, cache_tracker, memory::stats().total_memory(), dir_sem, make_storage_options_config(cfg.storage))
+    , mgr(cfg.large_data_handler == nullptr ? nop_ld_handler : *cfg.large_data_handler, *db_config, feature_service, cache_tracker, memory::stats().total_memory(), dir_sem, sstm)
     , semaphore(reader_concurrency_semaphore::no_limits{}, "sstables::test_env")
     , storage(std::move(cfg.storage))
 { }
@@ -196,8 +208,9 @@ future<> test_env::do_with_async(noncopyable_function<void (test_env&)> func, te
         auto wrap = std::make_shared<test_env_with_cql>(std::move(func), std::move(cfg));
         auto db_cfg = make_shared<db::config>();
         db_cfg->experimental_features({db::experimental_features_t::feature::KEYSPACE_STORAGE_OPTIONS});
+        db_cfg->object_storage_config = make_storage_options_config(wrap->cfg.storage);
         return do_with_cql_env_thread([wrap = std::move(wrap)] (auto& cql_env) mutable {
-            test_env env(std::move(wrap->cfg));
+            test_env env(std::move(wrap->cfg), &cql_env.get_sstorage_manager().local());
             auto close_env = defer([&] { env.stop().get(); });
             env.manager().plug_system_keyspace(cql_env.get_system_keyspace().local());
             auto unplu = defer([&env] { env.manager().unplug_system_keyspace(); });

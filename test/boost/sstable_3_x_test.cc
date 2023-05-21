@@ -52,19 +52,23 @@ using namespace sstables;
 class sstable_assertions final {
     test_env& _env;
     shared_sstable _sst;
-public:
-    sstable_assertions(test_env& env, schema_ptr schema, const sstring& path, sstable_version_types version = sstable_version_types::mc, sstables::generation_type::int_t generation = 1)
+
+    sstable_assertions(test_env& env, schema_ptr schema, const sstring& path, sstable_version_types version, sstables::generation_type generation)
         : _env(env)
         , _sst(_env.make_sstable(std::move(schema),
                             path,
-                            sstables::generation_type(generation),
+                            generation,
                             version,
                             sstable_format_types::big,
                             1))
     { }
+public:
+    sstable_assertions(test_env& env, schema_ptr schema, const sstring& path)
+        : sstable_assertions(env, schema, path, sstable_version_types::mc, sstables::generation_type{1})
+    {}
 
     sstable_assertions(test_env& env, shared_sstable sst)
-        : sstable_assertions(env, sst->get_schema(), env.tempdir().path().native(), sst->get_version(), sst->generation().as_int())
+        : sstable_assertions(env, sst->get_schema(), env.tempdir().path().native(), sst->get_version(), sst->generation())
     {}
 
     test_env& get_env() {
@@ -5513,4 +5517,27 @@ SEASTAR_TEST_CASE(test_legacy_udt_in_collection_table) {
     sst.load();
     assert_that(sst.make_reader()).produces(mut).produces_end_of_stream();
   });
+}
+
+SEASTAR_TEST_CASE(test_compression_premature_eof) {
+    return test_env::do_with_async([] (test_env& env) {
+        auto stable_dir = "./test/resource/sstables/compression-premature-eof";
+        sstable_assertions sst(env, ZSTD_MULTIPLE_CHUNKS_SCHEMA, stable_dir);
+        sst.load();
+
+        auto to_key = [] (int key) {
+            auto bytes = int32_type->decompose(int32_t(key));
+            auto pk = partition_key::from_single_value(*ZSTD_MULTIPLE_CHUNKS_SCHEMA, bytes);
+            return dht::decorate_key(*ZSTD_MULTIPLE_CHUNKS_SCHEMA, pk);
+        };
+
+        flat_reader_assertions_v2 assertions(sst.make_reader());
+        try {
+            assertions.produces_partition_start(to_key(0));
+            BOOST_FAIL("produces_partition_start unexpectedly");
+        } catch (const sstables::malformed_sstable_exception& e) {
+            std::string what = e.what();
+            BOOST_REQUIRE(what.find("compressed reader hit premature end-of-file") != std::string::npos);
+        }
+    });
 }

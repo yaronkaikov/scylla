@@ -48,6 +48,7 @@
 #include "service/storage_proxy.hh"
 #include "db/operation_type.hh"
 #include "db/view/view_update_generator.hh"
+#include "multishard_mutation_query.hh"
 
 #include "utils/human_readable.hh"
 #include "utils/fb_utilities.hh"
@@ -70,6 +71,7 @@
 #include "service/qos/service_level_controller.hh"
 
 #include "replica/data_dictionary_impl.hh"
+#include "replica/global_table_ptr.hh"
 #include "replica/exceptions.hh"
 #include "readers/multi_range.hh"
 #include "readers/multishard.hh"
@@ -311,14 +313,6 @@ public:
     }
 };
 
-sstables::object_storage_config make_object_storage_config(const db::config& db_cfg) {
-    std::unordered_map<sstring, s3::endpoint_config_ptr> ret;
-    for (auto [ ep, cfg ] : db_cfg.object_storage_config()) {
-        ret[ep] = make_lw_shared<s3::endpoint_config>(std::move(cfg));
-    }
-    return ret;
-}
-
 reader_concurrency_semaphore&
 database::read_concurrency_sem() {
     reader_concurrency_semaphore* sem = _reader_concurrency_semaphores_group.get_or_null(current_scheduling_group());
@@ -343,7 +337,7 @@ database::read_concurrency_sem() {
 }
 
 database::database(const db::config& cfg, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
-        compaction_manager& cm, sharded<sstables::directory_semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier)
+        compaction_manager& cm, sstables::storage_manager& sstm, sharded<sstables::directory_semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier)
     : _stats(make_lw_shared<db_stats>())
     , _user_types(std::make_shared<db_user_types_storage>(*this))
     , _cl_stats(std::make_unique<cell_locker_stats>())
@@ -391,7 +385,7 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
               _cfg.compaction_rows_count_warning_threshold,
               _cfg.compaction_collection_elements_count_warning_threshold))
     , _nop_large_data_handler(std::make_unique<db::nop_large_data_handler>())
-    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory, sst_dir_sem.local(), make_object_storage_config(_cfg)))
+    , _user_sstables_manager(std::make_unique<sstables::sstables_manager>(*_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory, sst_dir_sem.local(), &sstm))
     , _system_sstables_manager(std::make_unique<sstables::sstables_manager>(*_nop_large_data_handler, _cfg, feat, _row_cache_tracker, dbcfg.available_memory, sst_dir_sem.local()))
     , _result_memory_limiter(dbcfg.available_memory / 10)
     , _data_listeners(std::make_unique<db::data_listeners>())
@@ -405,7 +399,6 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _stop_barrier(std::move(barrier))
     , _update_memtable_flush_static_shares_action([this, &cfg] { return _memtable_controller.update_static_shares(cfg.memtable_flush_static_shares()); })
     , _memtable_flush_static_shares_observer(cfg.memtable_flush_static_shares.observe(_update_memtable_flush_static_shares_action.make_observer()))
-    , _object_storage_config_updater(this_shard_id() == 0 ? std::make_unique<object_storage_config_updater>(*this) : nullptr)
 {
     assert(dbcfg.available_memory != 0); // Detect misconfigured unit tests, see #7544
 
@@ -419,15 +412,6 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
         set_format(*_dbcfg.sstables_format);
     }
 }
-
-database::object_storage_config_updater::object_storage_config_updater(database& db)
-    : action([&db] () mutable {
-        return db.container().invoke_on_all([] (database& db) {
-            db._user_sstables_manager->update_object_storage_config(make_object_storage_config(db._cfg));
-        });
-    })
-    , observer(db._cfg.object_storage_config.observe(action.make_observer()))
-{}
 
 const db::extensions& database::extensions() const {
     return get_config().extensions();
@@ -826,7 +810,7 @@ static future<>
 do_parse_schema_tables(distributed<service::storage_proxy>& proxy, const sstring cf_name, std::function<future<> (db::schema_tables::schema_result_value_type&)> func) {
     using namespace db::schema_tables;
 
-    auto rs = co_await db::system_keyspace::query(proxy, db::schema_tables::NAME, cf_name);
+    auto rs = co_await db::system_keyspace::query(proxy.local().get_db(), db::schema_tables::NAME, cf_name);
     auto names = std::set<sstring>();
     for (auto& r : rs->rows()) {
         auto keyspace_name = r.template get_nonnull<sstring>("keyspace_name");
@@ -1091,17 +1075,36 @@ future<> database::detach_column_family(table& cf) {
     });
 }
 
-future<std::vector<foreign_ptr<lw_shared_ptr<table>>>> database::get_table_on_all_shards(sharded<database>& sharded_db, table_id uuid) {
-    std::vector<foreign_ptr<lw_shared_ptr<table>>> table_shards;
-    table_shards.resize(smp::count);
-    co_await coroutine::parallel_for_each(boost::irange(0u, smp::count), [&] (unsigned shard) -> future<> {
-        table_shards[shard] = co_await smp::submit_to(shard, [&] {
-            try {
-                return make_foreign(sharded_db.local()._column_families.at(uuid));
-            } catch (std::out_of_range&) {
-                on_internal_error(dblog, fmt::format("Table UUID={} not found", uuid));
-            }
-        });
+global_table_ptr::global_table_ptr() {
+    _p.resize(smp::count);
+}
+
+global_table_ptr::global_table_ptr(global_table_ptr&& o) noexcept
+    : _p(std::move(o._p))
+{ }
+
+global_table_ptr::~global_table_ptr() {}
+
+void global_table_ptr::assign(table& t) {
+    _p[this_shard_id()] = make_foreign(t.shared_from_this());
+}
+
+table* global_table_ptr::operator->() const noexcept { return &*_p[this_shard_id()]; }
+table& global_table_ptr::operator*() const noexcept { return *_p[this_shard_id()]; }
+
+future<global_table_ptr> get_table_on_all_shards(sharded<database>& sharded_db, sstring ks_name, sstring cf_name) {
+    auto uuid = sharded_db.local().find_uuid(ks_name, cf_name);
+    return get_table_on_all_shards(sharded_db, std::move(uuid));
+}
+
+future<global_table_ptr> get_table_on_all_shards(sharded<database>& sharded_db, table_id uuid) {
+    global_table_ptr table_shards;
+    co_await sharded_db.invoke_on_all([&] (auto& db) {
+        try {
+            table_shards.assign(db.find_column_family(uuid));
+        } catch (no_such_column_family&) {
+            on_internal_error(dblog, fmt::format("Table UUID={} not found", uuid));
+        }
     });
     co_return table_shards;
 }
@@ -1112,13 +1115,13 @@ future<> database::drop_table_on_all_shards(sharded<database>& sharded_db, sstri
 
     auto uuid = sharded_db.local().find_uuid(ks_name, cf_name);
     auto table_shards = co_await get_table_on_all_shards(sharded_db, uuid);
-    auto table_dir = fs::path(table_shards[this_shard_id()]->dir());
+    auto table_dir = fs::path(table_shards->dir());
     std::optional<sstring> snapshot_name_opt;
     if (with_snapshot) {
         snapshot_name_opt = format("pre-drop-{}", db_clock::now().time_since_epoch().count());
     }
     co_await sharded_db.invoke_on_all([&] (database& db) {
-        return db.detach_column_family(*table_shards[this_shard_id()]);
+        return db.detach_column_family(*table_shards);
     });
     // Use a time point in the far future (9999-12-31T00:00:00+0000)
     // to ensure all sstables are truncated,
@@ -1126,7 +1129,7 @@ future<> database::drop_table_on_all_shards(sharded<database>& sharded_db, sstri
     constexpr db_clock::time_point truncated_at(std::chrono::seconds(253402214400));
     auto f = co_await coroutine::as_future(truncate_table_on_all_shards(sharded_db, table_shards, truncated_at, with_snapshot, std::move(snapshot_name_opt)));
     co_await smp::invoke_on_all([&] {
-        return table_shards[this_shard_id()]->stop();
+        return table_shards->stop();
     });
     f.get(); // re-throw exception from truncate() if any
     co_await sstables::remove_table_directory_if_has_no_snapshots(table_dir);
@@ -2391,9 +2394,6 @@ future<> database::stop() {
     co_await _system_read_concurrency_sem.stop();
     dblog.info("Joining memtable update action");
     co_await _update_memtable_flush_static_shares_action.join();
-    if (_object_storage_config_updater) {
-        co_await _object_storage_config_updater->action.join();
-    }
 }
 
 future<> database::flush_all_memtables() {
@@ -2438,7 +2438,7 @@ future<> database::snapshot_table_on_all_shards(sharded<database>& sharded_db, s
     auto table_shards = co_await get_table_on_all_shards(sharded_db, uuid);
     co_await table::snapshot_on_all_shards(sharded_db, table_shards, tag);
     if (snap_views) {
-        for (const auto& vp : table_shards[this_shard_id()]->views()) {
+        for (const auto& vp : table_shards->views()) {
             co_await snapshot_table_on_all_shards(sharded_db, ks_name, vp->cf_name(), tag, db::snapshot_ctl::snap_views::no, skip_flush);
         }
     }
@@ -2476,8 +2476,8 @@ struct database::table_truncate_state {
     bool did_flush;
 };
 
-future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, const std::vector<foreign_ptr<lw_shared_ptr<table>>>& table_shards, std::optional<db_clock::time_point> truncated_at_opt, bool with_snapshot, std::optional<sstring> snapshot_name_opt) {
-    auto& cf = *table_shards[this_shard_id()];
+future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, const global_table_ptr& table_shards, std::optional<db_clock::time_point> truncated_at_opt, bool with_snapshot, std::optional<sstring> snapshot_name_opt) {
+    auto& cf = *table_shards;
     auto s = cf.schema();
 
     // Schema tables changed commitlog domain at some point and this node will refuse to boot with
@@ -2495,7 +2495,7 @@ future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, c
 
     co_await coroutine::parallel_for_each(boost::irange(0u, smp::count), [&] (unsigned shard) -> future<> {
         table_states[shard] = co_await smp::submit_to(shard, [&] () -> future<foreign_ptr<std::unique_ptr<table_truncate_state>>> {
-            auto& cf = *table_shards[this_shard_id()];
+            auto& cf = *table_shards;
             auto st = std::make_unique<table_truncate_state>();
 
             st->holder = cf.async_gate().hold();
@@ -2540,7 +2540,7 @@ future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, c
             };
     co_await sharded_db.invoke_on_all([&] (replica::database& db) -> future<> {
         unsigned shard = this_shard_id();
-        auto& cf = *table_shards[shard];
+        auto& cf = *table_shards;
         auto& st = *table_states[shard];
 
         co_await flush_or_clear(cf);
@@ -2561,7 +2561,7 @@ future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, c
 
     co_await sharded_db.invoke_on_all([&] (database& db) {
         auto shard = this_shard_id();
-        auto& cf = *table_shards[shard];
+        auto& cf = *table_shards;
         auto& st = *table_states[shard];
 
         return db.truncate(cf, st, truncated_at);
@@ -2974,6 +2974,57 @@ const timeout_config infinite_timeout_config = {
         // not really infinite, but long enough
         1h, 1h, 1h, 1h, 1h, 1h, 1h,
 };
+
+namespace replica {
+
+future<foreign_ptr<lw_shared_ptr<reconcilable_result>>> query_mutations(
+        sharded<database>& db,
+        schema_ptr s,
+        const dht::partition_range& pr,
+        const query::partition_slice& ps,
+        db::timeout_clock::time_point timeout) {
+    auto max_size = db.local().get_unlimited_query_max_result_size();
+    auto max_res_size = query::max_result_size(max_size.soft_limit, max_size.hard_limit, query::result_memory_limiter::maximum_result_size);
+    auto cmd = query::read_command(s->id(), s->version(), ps, max_res_size, query::tombstone_limit::max);
+    if (pr.is_singular()) {
+        unsigned shard = dht::shard_of(*s, pr.start()->value().token());
+        co_return co_await db.invoke_on(shard, [gs = global_schema_ptr(s), &cmd, &pr, timeout] (replica::database& db) mutable {
+            return db.query_mutations(gs, cmd, pr, {}, timeout).then([] (std::tuple<reconcilable_result, cache_temperature>&& res) {
+                return make_foreign(make_lw_shared<reconcilable_result>(std::move(std::get<0>(res))));
+            });
+        });
+    } else {
+        auto prs = dht::partition_range_vector{pr};
+        auto&& [res, _] = co_await query_mutations_on_all_shards(db, std::move(s), cmd, prs, {}, timeout);
+        co_return std::move(res);
+    }
+}
+
+future<foreign_ptr<lw_shared_ptr<query::result>>> query_data(
+        sharded<database>& db,
+        schema_ptr s,
+        const dht::partition_range& pr,
+        const query::partition_slice& ps,
+        db::timeout_clock::time_point timeout) {
+    auto max_size = db.local().get_unlimited_query_max_result_size();
+    auto max_res_size = query::max_result_size(max_size.soft_limit, max_size.hard_limit, query::result_memory_limiter::maximum_result_size);
+    auto cmd = query::read_command(s->id(), s->version(), ps, max_res_size, query::tombstone_limit::max);
+    auto prs = dht::partition_range_vector{pr};
+    auto opts = query::result_options::only_result();
+    if (pr.is_singular()) {
+        unsigned shard = dht::shard_of(*s, pr.start()->value().token());
+        co_return co_await db.invoke_on(shard, [gs = global_schema_ptr(s), &cmd, opts, &prs, timeout] (replica::database& db) mutable {
+            return db.query(gs, cmd, opts, prs, {}, timeout).then([] (std::tuple<lw_shared_ptr<query::result>, cache_temperature>&& res) {
+                return make_foreign(std::move(std::get<0>(res)));
+            });
+        });
+    } else {
+        auto&& [res, _] = co_await query_data_on_all_shards(db, std::move(s), cmd, prs, opts, {}, timeout);
+        co_return std::move(res);
+    }
+}
+
+} // namespace replica
 
 namespace replica {
 

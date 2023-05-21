@@ -168,7 +168,11 @@ std::ostream& operator<<(std::ostream& os, pretty_printed_throughput tp) {
 }
 
 static api::timestamp_type get_max_purgeable_timestamp(const table_state& table_s, sstable_set::incremental_selector& selector,
-        const std::unordered_set<shared_sstable>& compacting_set, const dht::decorated_key& dk) {
+        const std::unordered_set<shared_sstable>& compacting_set, const dht::decorated_key& dk, uint64_t& bloom_filter_checks) {
+    if (!table_s.tombstone_gc_enabled()) [[unlikely]] {
+        return api::min_timestamp;
+    }
+
     auto timestamp = table_s.min_memtable_timestamp();
     std::optional<utils::hashed_key> hk;
     for (auto&& sst : boost::range::join(selector.select(dk).sstables, table_s.compacted_undeleted_sstables())) {
@@ -179,6 +183,7 @@ static api::timestamp_type get_max_purgeable_timestamp(const table_state& table_
             hk = sstables::sstable::make_hashed_key(*table_s.schema(), dk.key());
         }
         if (sst->filter_has_key(*hk)) {
+            bloom_filter_checks++;
             timestamp = std::min(timestamp, sst->get_stats_metadata().min_timestamp);
         }
     }
@@ -414,9 +419,12 @@ private:
 
 class formatted_sstables_list {
     bool _include_origin = true;
-    std::vector<sstring> _ssts;
+    std::vector<std::string> _ssts;
 public:
     formatted_sstables_list() = default;
+    void reserve(size_t n) {
+        _ssts.reserve(n);
+    }
     explicit formatted_sstables_list(const std::vector<shared_sstable>& ssts, bool include_origin) : _include_origin(include_origin) {
         _ssts.reserve(ssts.size());
         for (const auto& sst : ssts) {
@@ -431,9 +439,7 @@ public:
 };
 
 std::ostream& operator<<(std::ostream& os, const formatted_sstables_list& lst) {
-    os << "[";
-    os << boost::algorithm::join(lst._ssts, ",");
-    os << "]";
+    fmt::print(os, "[{}]", fmt::join(lst._ssts, ","));
     return os;
 }
 
@@ -458,6 +464,7 @@ protected:
     uint64_t _start_size = 0;
     uint64_t _end_size = 0;
     uint64_t _estimated_partitions = 0;
+    uint64_t _bloom_filter_checks = 0;
     db::replay_position _rp;
     encoding_stats_collector _stats_collector;
     bool _can_split_large_partition = false;
@@ -571,7 +578,7 @@ protected:
     // Tombstone expiration is enabled based on the presence of sstable set.
     // If it's not present, we cannot purge tombstones without the risk of resurrecting data.
     bool tombstone_expiration_enabled() const {
-        return bool(_sstable_set);
+        return bool(_sstable_set) && _table_s.tombstone_gc_enabled();
     }
 
     compaction_writer create_gc_compaction_writer() const {
@@ -663,6 +670,7 @@ private:
     future<> setup() {
         auto ssts = make_lw_shared<sstables::sstable_set>(make_sstable_set_for_input());
         formatted_sstables_list formatted_msg;
+        formatted_msg.reserve(_sstables.size());
         auto fully_expired = _table_s.fully_expired_sstables(_sstables, gc_clock::now());
         min_max_tracker<api::timestamp_type> timestamp_tracker;
 
@@ -779,6 +787,7 @@ protected:
                 .ended_at = ended_at,
                 .start_size = _start_size,
                 .end_size = _end_size,
+                .bloom_filter_checks = _bloom_filter_checks,
             },
         };
 
@@ -819,7 +828,7 @@ private:
             };
         }
         return [this] (const dht::decorated_key& dk) {
-            return get_max_purgeable_timestamp(_table_s, *_selector, _compacting_for_max_purgeable_func, dk);
+            return get_max_purgeable_timestamp(_table_s, *_selector, _compacting_for_max_purgeable_func, dk, _bloom_filter_checks);
         };
     }
 

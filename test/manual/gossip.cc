@@ -14,7 +14,6 @@
 
 #include "db/system_distributed_keyspace.hh"
 #include "message/messaging_service.hh"
-#include "gms/feature_service.hh"
 #include "gms/gossiper.hh"
 #include "gms/application_state.hh"
 #include "service/qos/service_level_controller.hh"
@@ -62,15 +61,10 @@ int main(int ac, char ** av) {
             utils::fb_utilities::set_broadcast_rpc_address(listen);
             auto cfg = std::make_unique<db::config>();
 
-            sharded<gms::feature_service> feature_service;
-            feature_service.start(gms::feature_config_from_db_config(*cfg)).get();
-            auto stop_feature_service = deferred_stop(feature_service);
-
             sharded<abort_source> abort_sources;
             sharded<locator::shared_token_metadata> token_metadata;
             sharded<netw::messaging_service> messaging;
             sharded<auth::service> auth_service;
-            sharded<db::system_keyspace> sys_ks;
 
             abort_sources.start().get();
             auto stop_abort_source = defer([&] { abort_sources.stop().get(); });
@@ -88,7 +82,7 @@ int main(int ac, char ** av) {
                 gcfg.seeds.emplace(std::move(s));
             }
             sharded<gms::gossiper> gossiper;
-            gossiper.start(std::ref(abort_sources), std::ref(feature_service), std::ref(token_metadata), std::ref(messaging), std::ref(sys_ks), std::ref(*cfg), std::move(gcfg)).get();
+            gossiper.start(std::ref(abort_sources), std::ref(token_metadata), std::ref(messaging), std::ref(*cfg), std::move(gcfg)).get();
 
             auto& server = messaging.local();
             auto port = server.port();

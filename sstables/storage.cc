@@ -17,6 +17,7 @@
 #include <seastar/util/file.hh>
 
 #include "sstables/exceptions.hh"
+#include "sstables/sstable_directory.hh"
 #include "sstables/sstables_manager.hh"
 #include "sstables/sstable_version.hh"
 #include "sstables/integrity_checked_file_impl.hh"
@@ -65,6 +66,9 @@ public:
     virtual future<data_sink> make_data_or_index_sink(sstable& sst, component_type type, io_priority_class pc) override;
     virtual future<data_sink> make_component_sink(sstable& sst, component_type type, open_flags oflags, file_output_stream_options options) override;
     virtual future<> destroy(const sstable& sst) override { return make_ready_future<>(); }
+    virtual noncopyable_function<future<>(std::vector<shared_sstable>)> atomic_deleter() const override {
+        return sstable_directory::delete_with_pending_deletion_log;
+    }
 
     virtual sstring prefix() const override { return dir; }
 };
@@ -96,7 +100,7 @@ static future<file> open_sstable_component_file_non_checked(std::string_view nam
 future<file> filesystem_storage::open_component(const sstable& sst, component_type type, open_flags flags, file_open_options options, bool check_integrity) {
     auto create_flags = open_flags::create | open_flags::exclusive;
     auto readonly = (flags & create_flags) != create_flags;
-    auto tgt_dir = !readonly && temp_dir ? dir + "/" + sstable::sst_dir_basename(sst._generation) : dir;
+    auto tgt_dir = !readonly && temp_dir ? *temp_dir : dir;
     auto name = sst.filename(tgt_dir, type);
 
     auto f = open_sstable_component_file_non_checked(name, flags, options, check_integrity);
@@ -158,30 +162,27 @@ future<> filesystem_storage::seal(const sstable& sst) {
 
 future<> filesystem_storage::touch_temp_dir(const sstable& sst) {
     if (temp_dir) {
-        return make_ready_future<>();
+        co_return;
     }
-    auto tmp = dir + "/" + sstable::sst_dir_basename(sst._generation);
+    auto tmp = fmt::format("{}/{}{}", dir, sst._generation, tempdir_extension);
     sstlog.debug("Touching temp_dir={}", tmp);
-    auto fut = sst.sstable_touch_directory_io_check(tmp);
-    return fut.then([this, tmp = std::move(tmp)] () mutable {
-        temp_dir = std::move(tmp);
-    });
+    co_await sst.sstable_touch_directory_io_check(tmp);
+    temp_dir = std::move(tmp);
 }
 
 future<> filesystem_storage::remove_temp_dir() {
     if (!temp_dir) {
-        return make_ready_future<>();
+        co_return;
     }
     sstlog.debug("Removing temp_dir={}", temp_dir);
-    return remove_file(*temp_dir).then_wrapped([this] (future<> f) {
-        if (!f.failed()) {
-            temp_dir.reset();
-            return make_ready_future<>();
-        }
-        auto ep = f.get_exception();
-        sstlog.error("Could not remove temporary directory: {}", ep);
-        return make_exception_future<>(ep);
-    });
+    try {
+        co_await remove_file(*temp_dir);
+    } catch (...) {
+        sstlog.error("Could not remove temporary directory: {}", std::current_exception());
+        throw;
+    }
+
+    temp_dir.reset();
 }
 
 static bool is_same_file(const seastar::stat_data& sd1, const seastar::stat_data& sd2) noexcept {
@@ -424,9 +425,11 @@ class s3_storage : public sstables::storage {
 
     future<> ensure_remote_prefix(const sstable& sst);
 
+    static future<> delete_with_system_keyspace(std::vector<shared_sstable>);
+
 public:
-    s3_storage(sstring endpoint, s3::endpoint_config_ptr cfg, sstring bucket, sstring dir)
-        : _client(s3::client::make(std::move(endpoint), std::move(cfg)))
+    s3_storage(shared_ptr<s3::client> client, sstring bucket, sstring dir)
+        : _client(std::move(client))
         , _bucket(std::move(bucket))
         , _location(std::move(dir))
     {
@@ -442,7 +445,10 @@ public:
     virtual future<data_sink> make_data_or_index_sink(sstable& sst, component_type type, io_priority_class pc) override;
     virtual future<data_sink> make_component_sink(sstable& sst, component_type type, open_flags oflags, file_output_stream_options options) override;
     virtual future<> destroy(const sstable& sst) override {
-        return _client->close();
+        return make_ready_future<>();
+    }
+    virtual noncopyable_function<future<>(std::vector<shared_sstable>)> atomic_deleter() const override {
+        return delete_with_system_keyspace;
     }
 
     virtual sstring prefix() const override { return _location; }
@@ -517,6 +523,18 @@ future<> s3_storage::wipe(const sstable& sst) noexcept {
     co_await sys_ks.sstables_registry_delete_entry(_location, sst.generation());
 }
 
+future<> s3_storage::delete_with_system_keyspace(std::vector<shared_sstable> ssts) {
+    co_await coroutine::parallel_for_each(ssts, [] (shared_sstable sst) -> future<> {
+        const s3_storage* storage = dynamic_cast<const s3_storage*>(&sst->get_storage());
+        if (!storage) {
+            on_fatal_internal_error(sstlog, "Atomically deleted sstables must be of same storage type");
+        }
+
+        // FIXME -- need atomicity, see #13567
+        co_await sst->unlink();
+    });
+}
+
 future<> s3_storage::snapshot(const sstable& sst, sstring dir, absolute_path abs) const {
     co_await coroutine::return_exception(std::runtime_error("Snapshotting S3 objects not implemented"));
 }
@@ -527,7 +545,7 @@ std::unique_ptr<sstables::storage> make_storage(sstables_manager& manager, const
             return std::make_unique<sstables::filesystem_storage>(std::move(dir));
         },
         [dir, &manager] (const data_dictionary::storage_options::s3& os) mutable -> std::unique_ptr<sstables::storage> {
-            return std::make_unique<sstables::s3_storage>(os.endpoint, manager.get_endpoint_config(os.endpoint), os.bucket, std::move(dir));
+            return std::make_unique<sstables::s3_storage>(manager.get_endpoint_client(os.endpoint), os.bucket, std::move(dir));
         }
     }, s_opts.value);
 }

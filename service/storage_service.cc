@@ -341,6 +341,12 @@ future<> storage_service::topology_state_load(cdc::generation_service& cdc_gen_s
             // Save tokens, not needed for raft topology management, but needed by legacy
             // Also ip -> id mapping is needed for address map recreation on reboot
             if (!utils::fb_utilities::is_me(ip)) {
+                // Some state that is used to fill in 'peeers' table is still propagated over gossiper.
+                // Populate the table with the state from the gossiper here since storage_service::on_change()
+                // (which is called each time gossiper state changes) may have skipped it because the tokens
+                // for the node were not in the 'normal' state yet
+                co_await update_peer_info(ip);
+                // And then amend with the info from raft
                 co_await _sys_ks.local().update_tokens(ip, rs.ring.value().tokens);
                 co_await _sys_ks.local().update_peer_info(ip, "data_center", rs.datacenter);
                 co_await _sys_ks.local().update_peer_info(ip, "rack", rs.rack);
@@ -1477,7 +1483,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
     // Save the advertised feature set to system.local table after
     // all remote feature checks are complete and after gossip shadow rounds are done.
     // At this point, the final feature set is already determined before the node joins the ring.
-    co_await db::system_keyspace::save_local_supported_features(features);
+    co_await _sys_ks.local().save_local_supported_features(features);
 
     // If this is a restarting node, we should update tokens before gossip starts
     auto my_tokens = co_await _sys_ks.local().get_saved_tokens();
@@ -1584,6 +1590,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
     });
     _listeners.emplace_back(make_lw_shared(std::move(schema_change_announce)));
     co_await _gossiper.wait_for_gossip_to_settle();
+    co_await _feature_service.enable_features_on_join(_gossiper, _sys_ks.local());
 
     set_mode(mode::JOINING);
 
@@ -1846,7 +1853,7 @@ std::unordered_set<gms::inet_address> storage_service::parse_node_list(sstring c
 future<std::unordered_set<gms::inet_address>> storage_service::get_nodes_to_sync_with(
         const std::unordered_set<gms::inet_address>& ignore_nodes) {
     std::unordered_set<gms::inet_address> result;
-    for (const auto& [node, _] :_gossiper.get_endpoint_states()) {
+    for (const auto& node :_gossiper.get_endpoints()) {
         co_await coroutine::maybe_yield();
         slogger.info("Check node={}, status={}", node, _gossiper.get_gossip_status(node));
         if (node != get_broadcast_address() &&
@@ -2185,7 +2192,7 @@ future<> storage_service::handle_state_normal(inet_address endpoint) {
         }
     } else {
         if (owned_tokens.empty()) {
-            on_internal_error_noexcept(slogger, ::format("endpoint={} is not marked for removal but owns no tokens", endpoint));
+            on_internal_error(slogger, ::format("endpoint={} is not marked for removal but owns no tokens", endpoint));
         }
 
         if (!is_normal_token_owner) {
@@ -2687,7 +2694,7 @@ future<> storage_service::join_cluster(cdc::generation_service& cdc_gen_service,
         auto initial_contact_nodes = loaded_endpoints.empty() ?
             std::unordered_set<gms::inet_address>(seeds.begin(), seeds.end()) :
             loaded_endpoints;
-        auto loaded_peer_features = db::system_keyspace::load_peer_features().get0();
+        auto loaded_peer_features = _sys_ks.local().load_peer_features().get0();
         slogger.info("initial_contact_nodes={}, loaded_endpoints={}, loaded_peer_features={}",
                 initial_contact_nodes, loaded_endpoints, loaded_peer_features.size());
         for (auto& x : loaded_peer_features) {
@@ -2841,12 +2848,11 @@ future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::i
                 // Raft is responsible for consistency, so in case it is enable no need to check here
                 !_raft_topology_change_enabled) {
                 found_bootstrapping_node = false;
-                for (auto& x : _gossiper.get_endpoint_states()) {
-                    auto state = _gossiper.get_gossip_status(x.second);
+                for (const auto& addr : _gossiper.get_endpoints()) {
+                    auto state = _gossiper.get_gossip_status(addr);
                     if (state == sstring(versioned_value::STATUS_UNKNOWN)) {
-                        throw std::runtime_error(::format("Node {} has gossip status=UNKNOWN. Try fixing it before adding new node to the cluster.", x.first));
+                        throw std::runtime_error(::format("Node {} has gossip status=UNKNOWN. Try fixing it before adding new node to the cluster.", addr));
                     }
-                    auto addr = x.first;
                     slogger.debug("Checking bootstrapping/leaving/moving nodes: node={}, status={} (check_for_endpoint_collision)", addr, state);
                     if (state == sstring(versioned_value::STATUS_BOOTSTRAPPING) ||
                         state == sstring(versioned_value::STATUS_LEAVING) ||
@@ -5033,6 +5039,8 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
                co_return raft_topology_snapshot{};
             }
 
+            auto& db = proxy.local().get_db();
+
             std::vector<canonical_mutation> topology_mutations;
             std::optional<cdc::generation_id_v2> curr_cdc_gen_id;
             {
@@ -5040,7 +5048,7 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
                 // might be useful if multiple nodes are trying to pull concurrently.
                 auto read_apply_mutex_holder = co_await ss._group0->client().hold_read_apply_mutex();
                 auto rs = co_await db::system_keyspace::query_mutations(
-                    proxy, db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
+                    db, db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
                 auto s = ss._db.local().find_schema(db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
                 topology_mutations.reserve(rs->partitions().size());
                 boost::range::transform(
@@ -5070,7 +5078,7 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
                 auto key = dht::decorate_key(*s, partition_key::from_singular(*s, curr_cdc_gen_id->id));
                 auto partition_range = dht::partition_range::make_singular(key);
                 auto rs = co_await db::system_keyspace::query_mutations(
-                    proxy, db::system_keyspace::NAME, db::system_keyspace::CDC_GENERATIONS_V3, partition_range);
+                    db, db::system_keyspace::NAME, db::system_keyspace::CDC_GENERATIONS_V3, partition_range);
                 if (rs->partitions().size() != 1) {
                     on_internal_error(slogger, ::format(
                         "pull_raft_topology_snapshot: expected a single partition in CDC generation query,"

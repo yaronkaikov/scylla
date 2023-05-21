@@ -94,6 +94,7 @@ namespace sstables {
 class sstable;
 class compaction_descriptor;
 class compaction_completion_desc;
+class storage_manager;
 class sstables_manager;
 class compaction_data;
 class sstable_set;
@@ -143,6 +144,7 @@ extern logging::logger dblog;
 namespace replica {
 
 using shared_memtable = lw_shared_ptr<memtable>;
+class global_table_ptr;
 
 // We could just add all memtables, regardless of types, to a single list, and
 // then filter them out when we read them. Here's why I have chosen not to do
@@ -449,6 +451,7 @@ private:
     sstables::sstables_manager& _sstables_manager;
     secondary_index::secondary_index_manager _index_manager;
     bool _compaction_disabled_by_user = false;
+    bool _tombstone_gc_enabled = true;
     utils::phased_barrier _flush_barrier;
     std::vector<view_ptr> _views;
 
@@ -858,7 +861,7 @@ private:
     static future<> seal_snapshot(sstring jsondir, std::vector<snapshot_file_set> file_sets);
 
 public:
-    static future<> snapshot_on_all_shards(sharded<database>& sharded_db, const std::vector<foreign_ptr<lw_shared_ptr<table>>>& table_shards, sstring name);
+    static future<> snapshot_on_all_shards(sharded<database>& sharded_db, const global_table_ptr& table_shards, sstring name);
 
     future<std::unordered_map<sstring, snapshot_details>> get_snapshot_details();
 
@@ -970,6 +973,13 @@ public:
 
     void enable_auto_compaction();
     future<> disable_auto_compaction();
+
+    void set_tombstone_gc_enabled(bool tombstone_gc_enabled) noexcept;
+
+    bool tombstone_gc_enabled() const noexcept {
+        return _tombstone_gc_enabled;
+    }
+
     bool is_auto_compaction_disabled_by_user() const {
       return _compaction_disabled_by_user;
     }
@@ -1400,14 +1410,6 @@ private:
     serialized_action _update_memtable_flush_static_shares_action;
     utils::observer<float> _memtable_flush_static_shares_observer;
 
-    struct object_storage_config_updater {
-        serialized_action action;
-        utils::observer<std::unordered_map<sstring, s3::endpoint_config>> observer;
-        object_storage_config_updater(database&);
-    };
-
-    std::unique_ptr<object_storage_config_updater> _object_storage_config_updater;
-
 public:
     data_dictionary::database as_data_dictionary() const;
     std::shared_ptr<data_dictionary::user_types_storage> as_user_types_storage() const noexcept;
@@ -1484,7 +1486,7 @@ public:
 
     future<> parse_system_tables(distributed<service::storage_proxy>&, sharded<db::system_keyspace>&);
     database(const db::config&, database_config dbcfg, service::migration_notifier& mn, gms::feature_service& feat, const locator::shared_token_metadata& stm,
-            compaction_manager& cm, sharded<sstables::directory_semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier = utils::cross_shard_barrier(utils::cross_shard_barrier::solo{}) /* for single-shard usage */);
+            compaction_manager& cm, sstables::storage_manager& sstm, sharded<sstables::directory_semaphore>& sst_dir_sem, utils::cross_shard_barrier barrier = utils::cross_shard_barrier(utils::cross_shard_barrier::solo{}) /* for single-shard usage */);
     database(database&&) = delete;
     ~database();
 
@@ -1696,11 +1698,9 @@ public:
 private:
     future<> detach_column_family(table& cf);
 
-    static future<std::vector<foreign_ptr<lw_shared_ptr<table>>>> get_table_on_all_shards(sharded<database>& db, table_id uuid);
-
     struct table_truncate_state;
 
-    static future<> truncate_table_on_all_shards(sharded<database>& db, const std::vector<foreign_ptr<lw_shared_ptr<table>>>&, std::optional<db_clock::time_point> truncated_at_opt, bool with_snapshot, std::optional<sstring> snapshot_name_opt);
+    static future<> truncate_table_on_all_shards(sharded<database>& db, const global_table_ptr&, std::optional<db_clock::time_point> truncated_at_opt, bool with_snapshot, std::optional<sstring> snapshot_name_opt);
     future<> truncate(column_family& cf, const table_truncate_state&, db_clock::time_point truncated_at);
 public:
     /** Truncates the given column family */
