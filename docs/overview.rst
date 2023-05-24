@@ -79,5 +79,4 @@ You can learn to use ScyllaDB by taking free courses at `ScyllaDB University <ht
   ScyllaDB University <https://university.scylladb.com/>
   faq
   Contribute to ScyllaDB <contribute>
-  glossary
   alternator/alternator
