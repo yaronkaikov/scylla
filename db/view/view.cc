@@ -487,7 +487,7 @@ mutation_partition& view_updates::partition_for(partition_key&& key) {
     if (it != _updates.end()) {
         return it->second;
     }
-    return _updates.emplace(std::move(key), mutation_partition(_view)).first->second;
+    return _updates.emplace(std::move(key), mutation_partition(*_view)).first->second;
 }
 
 size_t view_updates::op_count() const {
@@ -1637,7 +1637,7 @@ future<> view_update_generator::mutate_MV(
         auto view_token = dht::get_token(*mut.s, mut.fm.key());
         auto& keyspace_name = mut.s->ks_name();
         auto target_endpoint = get_view_natural_endpoint(_proxy.local().local_db(), keyspace_name, base_token, view_token);
-        auto remote_endpoints = _proxy.local().get_token_metadata_ptr()->pending_endpoints_for(view_token, keyspace_name);
+        auto remote_endpoints = _proxy.local().local_db().find_keyspace(keyspace_name).get_effective_replication_map()->get_pending_endpoints(view_token);
         auto sem_units = pending_view_updates.split(mut.fm.representation().size());
 
         const bool update_synchronously = should_update_synchronously(*mut.s);
@@ -1794,9 +1794,8 @@ future<> view_builder::start(service::migration_manager& mm) {
             // or `on_update_view` events.
             auto units = get_units(_sem, 1).get0();
             // Wait for schema agreement even if we're a seed node.
-            while (!mm.have_schema_agreement()) {
-                seastar::sleep_abortable(500ms, _as).get();
-            }
+            mm.wait_for_schema_agreement(_db, db::timeout_clock::time_point::max(), &_as).get();
+
             auto built = _sys_ks.load_built_views().get0();
             auto in_progress = _sys_ks.load_view_build_progress().get0();
             setup_shard_build_step(vbi, std::move(built), std::move(in_progress));

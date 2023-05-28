@@ -504,6 +504,8 @@ private:
     sstables::shared_sstable make_sstable(sstring dir);
 
 public:
+    void deregister_metrics();
+
     data_dictionary::table as_data_dictionary() const;
 
     future<> add_sstable_and_update_cache(sstables::shared_sstable sst,
@@ -1263,6 +1265,7 @@ struct database_config {
     seastar::scheduling_group statement_scheduling_group;
     seastar::scheduling_group streaming_scheduling_group;
     seastar::scheduling_group gossip_scheduling_group;
+    seastar::scheduling_group commitlog_scheduling_group;
     size_t available_memory;
     std::optional<sstables::sstable_version_types> sstables_format;
 };
@@ -1455,7 +1458,7 @@ private:
     Future update_write_metrics(Future&& f);
     void update_write_metrics_for_timed_out_write();
     future<> create_keyspace(const lw_shared_ptr<keyspace_metadata>&, locator::effective_replication_map_factory& erm_factory, bool is_bootstrap, system_keyspace system);
-    void remove(const table&) noexcept;
+    void remove(table&) noexcept;
 public:
     static table_schema_version empty_version;
 

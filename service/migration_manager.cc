@@ -240,6 +240,18 @@ bool migration_manager::have_schema_agreement() {
     return match;
 }
 
+future<> migration_manager::wait_for_schema_agreement(const replica::database& db, db::timeout_clock::time_point deadline, seastar::abort_source* as) {
+    while (db.get_version() == replica::database::empty_version || !have_schema_agreement()) {
+        if (as) {
+            as->check();
+        }
+        if (db::timeout_clock::now() > deadline) {
+            throw std::runtime_error("Unable to reach schema agreement");
+        }
+        co_await (as ? sleep_abortable(std::chrono::milliseconds(500), *as) : sleep(std::chrono::milliseconds(500)));
+    }
+}
+
 /**
  * If versions differ this node sends request with local migration list to the endpoint
  * and expecting to receive a list of migrations to apply locally.
@@ -1224,7 +1236,9 @@ future<column_mapping> get_column_mapping(table_id table_id, table_schema_versio
 }
 
 future<> migration_manager::on_join(gms::inet_address endpoint, gms::endpoint_state ep_state) {
-    schedule_schema_pull(endpoint, ep_state);
+    if (!_group0_client.using_raft()) {
+        schedule_schema_pull(endpoint, ep_state);
+    }
     return make_ready_future();
 }
 
@@ -1236,14 +1250,18 @@ future<> migration_manager::on_change(gms::inet_address endpoint, gms::applicati
             return make_ready_future();
         }
         if (_storage_proxy.get_token_metadata_ptr()->is_normal_token_owner(endpoint)) {
-            schedule_schema_pull(endpoint, *ep_state);
+            if (!_group0_client.using_raft()) {
+                schedule_schema_pull(endpoint, *ep_state);
+            }
         }
     }
     return make_ready_future();
 }
 
 future<> migration_manager::on_alive(gms::inet_address endpoint, gms::endpoint_state state) {
-    schedule_schema_pull(endpoint, state);
+    if (!_group0_client.using_raft()) {
+        schedule_schema_pull(endpoint, state);
+    }
     return make_ready_future();
 }
 

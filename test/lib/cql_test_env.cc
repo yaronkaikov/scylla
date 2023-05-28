@@ -466,7 +466,7 @@ public:
     }
 
     future<> create_keyspace(std::string_view name) {
-        auto query = format("create keyspace {} with replication = {{ 'class' : 'org.apache.cassandra.locator.SimpleStrategy', 'replication_factor' : 1 }};", name);
+        auto query = format("create keyspace {} with replication = {{ 'class' : 'org.apache.cassandra.locator.NetworkTopologyStrategy', 'replication_factor' : 1 }};", name);
         return execute_cql(query).discard_result();
     }
 
@@ -555,6 +555,8 @@ public:
                 cfg->max_memory_for_unlimited_query_hard_limit.set(uint64_t(query::result_memory_limiter::unlimited_result_size));
             }
 
+            auto scheduling_groups = get_scheduling_groups().get();
+
             sharded<cql3::query_processor> qp;
             sharded<gms::feature_service> feature_service;
             sharded<netw::messaging_service> ms;
@@ -603,7 +605,6 @@ public:
             const gms::inet_address listen("127.0.0.1");
             auto sys_dist_ks = seastar::sharded<db::system_distributed_keyspace>();
             auto sl_controller = sharded<qos::service_level_controller>();
-            auto scheduling_groups = get_scheduling_groups().get();
 
             sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, scheduling_groups.statement_scheduling_group).get();
             auto stop_sl_controller = defer([&sl_controller] { sl_controller.stop().get(); });
@@ -694,7 +695,7 @@ public:
                 std::ref(raft_address_map), std::ref(ms), std::ref(gossiper), std::ref(fd)).get();
             auto stop_raft_gr = deferred_stop(raft_gr);
 
-            stream_manager.start(std::ref(*cfg), std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(ms), std::ref(mm), std::ref(gossiper)).get();
+            stream_manager.start(std::ref(*cfg), std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(ms), std::ref(mm), std::ref(gossiper), scheduling_groups.streaming_scheduling_group).get();
             auto stop_streaming = defer([&stream_manager] { stream_manager.stop().get(); });
 
             sharded<sstables::directory_semaphore> sst_dir_semaphore;

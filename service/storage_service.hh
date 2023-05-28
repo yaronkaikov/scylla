@@ -198,8 +198,8 @@ private:
     // Update pending ranges locally and then replicate to all cores.
     // Should be serialized under token_metadata_lock.
     // Must be called on shard 0.
-    future<> update_pending_ranges(mutable_token_metadata_ptr tmptr, sstring reason);
-    future<> update_pending_ranges(sstring reason, acquire_merge_lock aml = acquire_merge_lock::yes);
+    future<> update_topology_change_info(mutable_token_metadata_ptr tmptr, sstring reason);
+    future<> update_topology_change_info(sstring reason, acquire_merge_lock aml = acquire_merge_lock::yes);
     future<> keyspace_changed(const sstring& ks_name);
     void register_metrics();
     future<> snitch_reconfigured();
@@ -541,9 +541,9 @@ private:
      * Handle notification that a node being actively removed from the ring via 'removenode'
      *
      * @param endpoint node
-     * @param pieces either REMOVED_TOKEN (node is gone) or REMOVING_TOKEN (replicas need to be restored)
+     * @param pieces is REMOVED_TOKEN (node is gone)
      */
-    future<> handle_state_removing(inet_address endpoint, std::vector<sstring> pieces);
+    future<> handle_state_removed(inet_address endpoint, std::vector<sstring> pieces);
 
     future<>
     handle_state_replacing_update_pending_ranges(mutable_token_metadata_ptr tmptr, inet_address replacing_node);
@@ -570,24 +570,6 @@ private:
      */
     future<std::unordered_multimap<inet_address, dht::token_range>> get_new_source_ranges(locator::vnode_effective_replication_map_ptr erm, const dht::token_range_vector& ranges) const;
 
-    /**
-     * Sends a notification to a node indicating we have finished replicating data.
-     *
-     * @param remote node to send notification to
-     */
-    future<> send_replication_notification(inet_address remote);
-
-    /**
-     * Called when an endpoint is removed from the ring. This function checks
-     * whether this node becomes responsible for new ranges as a
-     * consequence and streams data if needed.
-     *
-     * This is rather ineffective, but it does not matter so much
-     * since this is called very seldom
-     *
-     * @param endpoint the node that left
-     */
-    future<> restore_replica_count(inet_address endpoint, inet_address notify_endpoint);
     future<> removenode_with_stream(gms::inet_address leaving_node, shared_ptr<abort_source> as_ptr);
     future<> removenode_add_ranges(lw_shared_ptr<dht::range_streamer> streamer, gms::inet_address leaving_node);
 
@@ -718,6 +700,9 @@ public:
 
     future<std::map<gms::inet_address, float>> effective_ownership(sstring keyspace_name);
 
+    // Must run on shard 0.
+    future<> check_and_repair_cdc_streams(cdc::generation_service&);
+
 private:
     promise<> _drain_finished;
     std::optional<shared_future<>> _transport_stopped;
@@ -801,6 +786,7 @@ private:
     future<> raft_removenode(locator::host_id host_id);
     future<> raft_replace(raft::server&, raft::server_id, gms::inet_address);
     future<> raft_rebuild(sstring source_dc);
+    future<> raft_check_and_repair_cdc_streams();
     future<> update_topology_with_local_metadata(raft::server&);
 
     // This is called on all nodes for each new command received through raft

@@ -20,6 +20,7 @@
 #include "test/lib/result_set_assertions.hh"
 #include "test/lib/log.hh"
 #include "test/lib/random_utils.hh"
+#include "test/lib/test_utils.hh"
 #include "test/lib/key_utils.hh"
 
 #include "replica/database.hh"
@@ -300,6 +301,21 @@ SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_sourc
     test_database(run_mutation_source_tests_reverse);
 }
 
+static void require_exist(const sstring& filename, bool should) {
+    auto exists = file_exists(filename).get();
+    BOOST_REQUIRE_EQUAL(exists, should);
+}
+
+static void touch_dir(const sstring& dirname) {
+    recursive_touch_directory(dirname).get();
+    require_exist(dirname, true);
+}
+
+static void touch_file(const sstring& filename) {
+    tests::touch_file(filename).get();
+    require_exist(filename, true);
+}
+
 SEASTAR_THREAD_TEST_CASE(test_distributed_loader_with_incomplete_sstables) {
     using sst = sstables::sstable;
 
@@ -313,22 +329,6 @@ SEASTAR_THREAD_TEST_CASE(test_distributed_loader_with_incomplete_sstables) {
     sstring ks = "system";
     sstring cf = "peers-37f71aca7dc2383ba70672528af04d4f";
     sstring sst_dir = (data_dir.path() / std::string_view(ks) / std::string_view(cf)).string();
-
-    auto require_exist = [] (const sstring& name, bool should_exist) {
-        auto exists = file_exists(name).get0();
-        BOOST_REQUIRE(exists == should_exist);
-    };
-
-    auto touch_dir = [&require_exist] (const sstring& dir_name) {
-        recursive_touch_directory(dir_name).get();
-        require_exist(dir_name, true);
-    };
-
-    auto touch_file = [&require_exist] (const sstring& file_name) {
-        auto f = open_file_dma(file_name, open_flags::create).get0();
-        f.close().get();
-        require_exist(file_name, true);
-    };
 
     auto temp_sst_dir_2 = fmt::format("{}/{}{}", sst_dir, generation_from_value(2), tempdir_extension);
     touch_dir(temp_sst_dir_2);
@@ -344,7 +344,7 @@ SEASTAR_THREAD_TEST_CASE(test_distributed_loader_with_incomplete_sstables) {
     temp_file_name = sst::filename(sst_dir, ks, cf, sstables::get_highest_sstable_version(), generation_from_value(4), sst::format_types::big, component_type::Data);
     touch_file(temp_file_name);
 
-    do_with_cql_env_and_compaction_groups([&sst_dir, &ks, &cf, &require_exist, &temp_sst_dir_2, &temp_sst_dir_3] (cql_test_env& e) {
+    do_with_cql_env_and_compaction_groups([&sst_dir, &ks, &cf, &temp_sst_dir_2, &temp_sst_dir_3] (cql_test_env& e) {
         require_exist(temp_sst_dir_2, false);
         require_exist(temp_sst_dir_3, false);
 
@@ -368,27 +368,7 @@ SEASTAR_THREAD_TEST_CASE(test_distributed_loader_with_pending_delete) {
     sstring sst_dir = (data_dir.path() / std::string_view(ks) / std::string_view(cf)).string();
     sstring pending_delete_dir = sst_dir + "/" + sstables::pending_delete_dir;
 
-    auto require_exist = [] (const sstring& name, bool should_exist) {
-        auto exists = file_exists(name).get0();
-        if (should_exist) {
-            BOOST_REQUIRE(exists);
-        } else {
-            BOOST_REQUIRE(!exists);
-        }
-    };
-
-    auto touch_dir = [&require_exist] (const sstring& dir_name) {
-        recursive_touch_directory(dir_name).get();
-        require_exist(dir_name, true);
-    };
-
-    auto touch_file = [&require_exist] (const sstring& file_name) {
-        auto f = open_file_dma(file_name, open_flags::create).get0();
-        f.close().get();
-        require_exist(file_name, true);
-    };
-
-    auto write_file = [&require_exist] (const sstring& file_name, const sstring& text) {
+    auto write_file = [] (const sstring& file_name, const sstring& text) {
         auto f = open_file_dma(file_name, open_flags::wo | open_flags::create | open_flags::truncate).get0();
         auto os = make_file_output_stream(f, file_output_stream_options{}).get0();
         os.write(text).get();
@@ -1100,6 +1080,65 @@ SEASTAR_THREAD_TEST_CASE(max_result_size_for_unlimited_query_selection_test) {
             }).get();
         }
     }, std::move(cfg)).get();
+}
+
+// Check that during a multi-page range scan:
+// * semaphore mismatch is detected
+// * code is exception safe w.r.t. to the mismatch exception, e.g. readers are closed properly
+SEASTAR_TEST_CASE(multipage_range_scan_semaphore_mismatch) {
+    return do_with_cql_env_thread([] (cql_test_env& e) {
+        const auto do_abort = set_abort_on_internal_error(false);
+        auto reset_abort = defer([do_abort] {
+            set_abort_on_internal_error(do_abort);
+        });
+        e.execute_cql("CREATE TABLE ks.tbl (pk int, ck int, v int, PRIMARY KEY (pk, ck));").get();
+
+        auto insert_id = e.prepare("INSERT INTO ks.tbl(pk, ck, v) VALUES(?, ?, ?)").get();
+
+        auto& db = e.local_db();
+        auto& tbl = db.find_column_family("ks", "tbl");
+        auto s = tbl.schema();
+
+        auto dk = tests::generate_partition_key(tbl.schema());
+        const auto pk = cql3::raw_value::make_value(managed_bytes(*dk.key().begin(*s)));
+        const auto v = cql3::raw_value::make_value(int32_type->decompose(0));
+        for (int32_t ck = 0; ck < 100; ++ck) {
+            e.execute_prepared(insert_id, {pk, cql3::raw_value::make_value(int32_type->decompose(ck)), v}).get();
+        }
+
+        auto sched_groups = get_scheduling_groups().get();
+
+        query::read_command cmd1(
+                s->id(),
+                s->version(),
+                s->full_slice(),
+                query::max_result_size(std::numeric_limits<uint64_t>::max(), std::numeric_limits<uint64_t>::max(), std::numeric_limits<uint64_t>::max()),
+                query::tombstone_limit::max,
+                query::row_limit(4),
+                query::partition_limit::max,
+                gc_clock::now(),
+                std::nullopt,
+                query_id::create_random_id(),
+                query::is_first_page::yes);
+
+        auto cmd2 = cmd1;
+        auto cr = query::clustering_range::make_starting_with({clustering_key::from_single_value(*s, int32_type->decompose(3)), false});
+        cmd2.slice = partition_slice_builder(*s).set_specific_ranges(query::specific_ranges(dk.key(), {cr})).build();
+        cmd2.is_first_page = query::is_first_page::no;
+
+        auto pr = dht::partition_range::make_starting_with({dk, true});
+        auto prs = dht::partition_range_vector{pr};
+
+        auto read_page = [&] (scheduling_group sg, const query::read_command& cmd) {
+            with_scheduling_group(sg, [&] {
+                return query_data_on_all_shards(e.db(), s, cmd, prs, query::result_options::only_result(), {}, db::no_timeout);
+            }).get();
+        };
+
+        read_page(default_scheduling_group(), cmd1);
+        BOOST_REQUIRE_EXCEPTION(read_page(sched_groups.statement_scheduling_group, cmd2), std::runtime_error,
+                testing::exception_predicate::message_contains("looked-up reader belongs to different semaphore than the one appropriate for this query class:"));
+    });
 }
 
 // Test `upgrade_sstables` on all keyspaces (including the system keyspace).

@@ -29,6 +29,7 @@
 #include "test/lib/sstable_utils.hh"
 #include "test/lib/index_reader_assertions.hh"
 #include "test/lib/random_utils.hh"
+#include "test/lib/test_utils.hh"
 #include "sstables/types.hh"
 #include "keys.hh"
 #include "types/types.hh"
@@ -3188,23 +3189,6 @@ SEASTAR_TEST_CASE(compact_deleted_cell) {
   });
 }
 
-static void compare_files(sstring filename1, sstring filename2) {
-    BOOST_TEST_MESSAGE(format("comparing {} to {}", filename1, filename2));
-    BOOST_REQUIRE(file_exists(filename1).get());
-    std::ifstream ifs1;
-    ifs1.exceptions(std::ifstream::failbit | std::ifstream::badbit);
-    ifs1.open(filename1, std::ios_base::in | std::ios_base::binary);
-
-    BOOST_REQUIRE(file_exists(filename2).get());
-    std::ifstream ifs2;
-    ifs2.exceptions(std::ifstream::failbit | std::ifstream::badbit);
-    ifs2.open(filename2);
-
-    std::istreambuf_iterator<char> b1(ifs1), e1;
-    std::istreambuf_iterator<char> b2(ifs2), e2;
-    BOOST_CHECK_EQUAL_COLLECTIONS(b1, e1, b2, e2);
-}
-
 static sstring get_write_test_path(sstring table_name) {
     return format("test/resource/sstables/3.x/uncompressed/write_{}", table_name);
 }
@@ -3220,7 +3204,8 @@ static void compare_sstables(const std::filesystem::path& result_path, sstring t
                                   "ks", table_name, sstables::sstable_version_types::mc, generation_from_value(1), big, file_type);
         auto result_filename =
                 sstable::filename(result_path.string(), "ks", table_name, sst->get_version(), sst->generation(), big, file_type);
-        compare_files(orig_filename, result_filename);
+        auto eq = tests::compare_files(orig_filename, result_filename).get0();
+        BOOST_REQUIRE(eq);
     }
 }
 
@@ -4586,8 +4571,7 @@ static sstring get_read_index_test_path(sstring table_name) {
 }
 
 static std::unique_ptr<index_reader> get_index_reader(shared_sstable sst, reader_permit permit) {
-    return std::make_unique<index_reader>(sst, std::move(permit), default_priority_class(),
-                                          tracing::trace_state_ptr(), use_caching::yes);
+    return std::make_unique<index_reader>(sst, std::move(permit));
 }
 
 shared_sstable make_test_sstable(test_env& env, schema_ptr schema, const sstring& table_name) {

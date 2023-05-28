@@ -939,6 +939,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             dbcfg.memtable_scheduling_group = make_sched_group("memtable", 1000);
             dbcfg.memtable_to_cache_scheduling_group = make_sched_group("memtable_to_cache", 200);
             dbcfg.gossip_scheduling_group = make_sched_group("gossip", 1000);
+            dbcfg.commitlog_scheduling_group = make_sched_group("commitlog", 1000);
             dbcfg.available_memory = get_available_memory();
 
             netw::messaging_service::config mscfg;
@@ -1355,9 +1356,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // 3. need to check if it depends on any of the above steps
             sys_ks.local().setup(snitch, messaging).get();
 
-            supervisor::notify("loading tablet metadata");
-            ss.local().load_tablet_metadata().get();
-
             supervisor::notify("starting schema commit log");
 
             // Check there is no truncation record for schema tables.
@@ -1398,6 +1396,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }
 
             db::schema_tables::recalculate_schema_version(sys_ks, proxy, feature_service.local()).get();
+
+            supervisor::notify("loading tablet metadata");
+            ss.local().load_tablet_metadata().get();
 
             supervisor::notify("loading non-system sstables");
             replica::distributed_loader::init_non_system_keyspaces(db, proxy, sys_ks).get();
@@ -1476,7 +1477,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             debug::the_stream_manager = &stream_manager;
             supervisor::notify("starting streaming service");
-            stream_manager.start(std::ref(*cfg), std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(messaging), std::ref(mm), std::ref(gossiper)).get();
+            stream_manager.start(std::ref(*cfg), std::ref(db), std::ref(sys_dist_ks), std::ref(view_update_generator), std::ref(messaging), std::ref(mm), std::ref(gossiper), maintenance_scheduling_group).get();
             auto stop_stream_manager = defer_verbose_shutdown("stream manager", [&stream_manager] {
                 // FIXME -- keep the instances alive, just call .stop on them
                 stream_manager.invoke_on_all(&streaming::stream_manager::stop).get();

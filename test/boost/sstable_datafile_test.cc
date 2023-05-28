@@ -2270,7 +2270,8 @@ SEASTAR_TEST_CASE(test_wrong_counter_shard_order) {
                     auto acv = ac_o_c.as_atomic_cell(s->regular_column_at(id));
                     counter_cell_view ccv(acv);
                     counter_shard_view::less_compare_by_id cmp;
-                    BOOST_REQUIRE_MESSAGE(boost::algorithm::is_sorted(ccv.shards(), cmp), ccv << " is expected to be sorted");
+                    BOOST_REQUIRE_MESSAGE(boost::algorithm::is_sorted(ccv.shards(), cmp),
+                                          fmt::format("{} is expected to be sorted", ccv));
                     BOOST_REQUIRE_EQUAL(ccv.total_value(), expected_value);
                     n++;
                 });
@@ -2309,8 +2310,7 @@ SEASTAR_TEST_CASE(test_wrong_counter_shard_order) {
 }
 
 static std::unique_ptr<index_reader> get_index_reader(shared_sstable sst, reader_permit permit) {
-    return std::make_unique<index_reader>(sst, std::move(permit), default_priority_class(),
-                                          tracing::trace_state_ptr(), use_caching::yes);
+    return std::make_unique<index_reader>(sst, std::move(permit));
 }
 
 SEASTAR_TEST_CASE(test_broken_promoted_index_is_skipped) {
@@ -2767,7 +2767,7 @@ SEASTAR_TEST_CASE(test_missing_partition_end_fragment) {
             sstable_writer_config cfg = env.manager().configure_writer();
 
             try {
-                auto wr = sst->get_writer(*s, 1, cfg, encoding_stats{}, default_priority_class());
+                auto wr = sst->get_writer(*s, 1, cfg, encoding_stats{});
                 mr.consume_in_thread(std::move(wr));
                 BOOST_FAIL("write_components() should have failed");
             } catch (const std::runtime_error&) {
@@ -2911,7 +2911,7 @@ SEASTAR_TEST_CASE(test_validate_checksums) {
                 auto sst = env.make_sstable(sst_schema, version);
                 sstable_writer_config cfg = env.manager().configure_writer();
 
-                auto wr = sst->get_writer(*sst_schema, 1, cfg, encoding_stats{}, default_priority_class());
+                auto wr = sst->get_writer(*sst_schema, 1, cfg, encoding_stats{});
                 mr.consume_in_thread(std::move(wr));
 
                 sst->load().get();
@@ -2920,7 +2920,7 @@ SEASTAR_TEST_CASE(test_validate_checksums) {
 
                 testlog.info("Validating intact {}", sst->get_filename());
 
-                valid = sstables::validate_checksums(sst, permit, default_priority_class()).get();
+                valid = sstables::validate_checksums(sst, permit).get();
                 BOOST_REQUIRE(valid);
 
                 auto sst_file = open_file_dma(test(sst).filename(sstables::component_type::Data).native(), open_flags::wo).get();
@@ -2932,10 +2932,10 @@ SEASTAR_TEST_CASE(test_validate_checksums) {
                     const auto size = std::min(sst->ondisk_data_size() / 2, uint64_t(1024));
                     auto buf = temporary_buffer<char>::aligned(sst_file.disk_write_dma_alignment(), size);
                     std::fill(buf.get_write(), buf.get_write() + size, 0xba);
-                    sst_file.dma_write(sst->ondisk_data_size() / 2, buf.begin(), buf.size(), default_priority_class()).get();
+                    sst_file.dma_write(sst->ondisk_data_size() / 2, buf.begin(), buf.size()).get();
                 }
 
-                valid = sstables::validate_checksums(sst, permit, default_priority_class()).get();
+                valid = sstables::validate_checksums(sst, permit).get();
                 BOOST_REQUIRE(!valid);
 
                 testlog.info("Validating truncated {}", sst->get_filename());
@@ -2944,7 +2944,7 @@ SEASTAR_TEST_CASE(test_validate_checksums) {
                     sst_file.truncate(sst->ondisk_data_size() / 2).get();
                 }
 
-                valid = sstables::validate_checksums(sst, permit, default_priority_class()).get();
+                valid = sstables::validate_checksums(sst, permit).get();
                 BOOST_REQUIRE(!valid);
             }
         }
@@ -2992,7 +2992,7 @@ SEASTAR_TEST_CASE(test_index_fast_forwarding_after_eof) {
 
             sstable_writer_config cfg = env.manager().configure_writer();
 
-            auto wr = sst->get_writer(*schema, 1, cfg, encoding_stats{}, default_priority_class());
+            auto wr = sst->get_writer(*schema, 1, cfg, encoding_stats{});
             mr.consume_in_thread(std::move(wr));
 
             sst->load().get();

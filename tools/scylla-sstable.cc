@@ -962,7 +962,7 @@ void dump_index_operation(schema_ptr schema, reader_permit permit, const std::ve
     json_writer writer;
     writer.StartStream();
     for (auto& sst : sstables) {
-        sstables::index_reader idx_reader(sst, permit, default_priority_class(), {}, sstables::use_caching::yes);
+        sstables::index_reader idx_reader(sst, permit);
         auto close_idx_reader = deferred_close(idx_reader);
 
         writer.SstableKey(*sst);
@@ -1504,7 +1504,7 @@ void validate_checksums_operation(schema_ptr schema, reader_permit permit, const
     }
 
     for (auto& sst : sstables) {
-        const auto valid = sstables::validate_checksums(sst, permit, default_priority_class()).get();
+        const auto valid = sstables::validate_checksums(sst, permit).get();
         sst_log.info("validated the checksums of {}: {}", sst->get_filename(), valid ? "valid" : "invalid");
     }
 }

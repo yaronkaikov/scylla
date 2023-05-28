@@ -950,6 +950,7 @@ SEASTAR_TEST_CASE(test_eviction_after_schema_change) {
             rd.fill_buffer().get();
         }
 
+        tracker.cleaner().drain().get0();
         while (tracker.region().evict_some() == memory::reclaiming_result::reclaimed_something) ;
 
         // The partition should be evictable after schema change
@@ -3508,6 +3509,16 @@ SEASTAR_TEST_CASE(test_concurrent_reads_and_eviction) {
             auto m2 = gen();
             m2.partition().make_fully_continuous();
 
+            bool upgrade_schema = tests::random::get_bool();
+            if (upgrade_schema) {
+                schema_ptr new_schema = schema_builder(s)
+                    .with_column(to_bytes("_phantom"), byte_type)
+                    .remove_column("_phantom")
+                    .build();
+                m2.upgrade(new_schema);
+                cache.set_schema(new_schema);
+            }
+
             auto mt = make_lw_shared<replica::memtable>(m2.schema());
             mt->apply(m2);
             cache.update(row_cache::external_updater([&] () noexcept {
@@ -4433,7 +4444,7 @@ SEASTAR_TEST_CASE(test_populating_cache_with_expired_and_nonexpired_tombstones) 
 
         env.execute_cql(format(
             "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = "
-            "{{'class' : 'SimpleStrategy', 'replication_factor' : 1}};", ks_name)).get();
+            "{{'class' : 'NetworkTopologyStrategy', 'replication_factor' : 1}};", ks_name)).get();
         env.execute_cql(format(
             "CREATE TABLE {}.{} (pk int, ck int, PRIMARY KEY(pk, ck));", ks_name, table_name)).get();
 

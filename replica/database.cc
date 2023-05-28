@@ -898,7 +898,7 @@ database::init_commitlog() {
         return make_ready_future<>();
     }
 
-    return db::commitlog::create_commitlog(db::commitlog::config::from_db_config(_cfg, _dbcfg.available_memory)).then([this](db::commitlog&& log) {
+    return db::commitlog::create_commitlog(db::commitlog::config::from_db_config(_cfg, _dbcfg.commitlog_scheduling_group, _dbcfg.available_memory)).then([this](db::commitlog&& log) {
         _commitlog = std::make_unique<db::commitlog>(std::move(log));
         _commitlog->add_flush_handler([this](db::cf_id_type id, db::replay_position pos) {
             if (!_column_families.contains(id)) {
@@ -1047,9 +1047,10 @@ bool database::update_column_family(schema_ptr new_schema) {
     return columns_changed;
 }
 
-void database::remove(const table& cf) noexcept {
+void database::remove(table& cf) noexcept {
     auto s = cf.schema();
     auto& ks = find_keyspace(s->ks_name());
+    cf.deregister_metrics();
     _column_families.erase(s->id());
     ks.metadata()->remove_column_family(s);
     _ks_cf_to_uuid.erase(std::make_pair(s->ks_name(), s->cf_name()));

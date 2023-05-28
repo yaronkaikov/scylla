@@ -6,6 +6,7 @@ Upgrade ScyllaDB
    :titlesonly:
    :hidden:
 
+   ScyllaDB Versioning <scylladb-versioning>
    ScyllaDB Enterprise <upgrade-enterprise/index>
    ScyllaDB Open Source to ScyllaDB Enterprise <upgrade-to-enterprise/index>
    ScyllaDB AMI <ami-upgrade>

@@ -18,6 +18,7 @@
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/tmpdir.hh"
 #include "test/lib/key_utils.hh"
+#include "test/lib/test_utils.hh"
 #include "db/config.hh"
 #include "utils/lister.hh"
 
@@ -176,8 +177,7 @@ SEASTAR_TEST_CASE(sstable_directory_test_table_simple_empty_directory_scan) {
 
         // Write a manifest file to make sure it's ignored
         auto manifest = dir.path() / "manifest.json";
-        auto f = open_file_dma(manifest.native(), open_flags::wo | open_flags::create | open_flags::truncate).get0();
-        f.close().get();
+        tests::touch_file(manifest.native()).get();
 
         with_sstable_directory(env, [] (sharded<sstables::sstable_directory>& sstdir) {
             distributed_loader_for_tests::process_sstable_dir(sstdir, {}).get();
@@ -213,8 +213,7 @@ SEASTAR_TEST_CASE(sstable_directory_test_table_scan_invalid_file) {
 
         // Add a bogus file in the sstables directory
         auto name = dir.path() / "bogus";
-        auto f = open_file_dma(name.native(), open_flags::rw | open_flags::create | open_flags::truncate).get0();
-        f.close().get();
+        tests::touch_file(name.native()).get();
 
         with_sstable_directory(env, [] (sharded<sstables::sstable_directory>& sstdir) {
                 auto expect_malformed_sstable = distributed_loader_for_tests::process_sstable_dir(sstdir, {});
@@ -274,8 +273,7 @@ SEASTAR_THREAD_TEST_CASE(sstable_directory_test_temporary_statistics) {
     sstables::test_env::do_with_sharded_async([] (sharded<test_env>& env) {
         auto sst = make_sstable_for_this_shard(std::bind(new_env_sstable, std::ref(env.local())));
         auto tempstr = test(sst).filename(component_type::TemporaryStatistics);
-        auto f = open_file_dma(tempstr.native(), open_flags::rw | open_flags::create | open_flags::truncate).get0();
-        f.close().get();
+        tests::touch_file(tempstr.native()).get();
         auto tempstat = fs::canonical(tempstr);
 
         with_sstable_directory(env, [&] (sharded<sstables::sstable_directory>& sstdir_ok) {
@@ -429,7 +427,7 @@ SEASTAR_TEST_CASE(sstable_directory_test_table_lock_works) {
                     return make_ready_future<>();
                 });
             }).get();
-            BOOST_REQUIRE(sstables.size() != 0);
+            BOOST_REQUIRE_NE(sstables.size(), 0);
 
             distributed_loader_for_tests::lock_table(sstdir, e.db(), ks_name, cf_name).get();
 
@@ -462,8 +460,8 @@ SEASTAR_TEST_CASE(sstable_directory_test_table_lock_works) {
             };
 
             auto res = all_sstables_exist();
-            BOOST_REQUIRE(res[false] == 0);
-            BOOST_REQUIRE(res[true] == sstables.size());
+            BOOST_REQUIRE_EQUAL(res[false], 0);
+            BOOST_REQUIRE_EQUAL(res[true], sstables.size());
 
             // Stop manually now, to allow for the object to be destroyed and take the
             // phaser with it.
@@ -473,8 +471,8 @@ SEASTAR_TEST_CASE(sstable_directory_test_table_lock_works) {
             BOOST_REQUIRE(!table_exists());
 
             res = all_sstables_exist();
-            BOOST_REQUIRE(res[false] == sstables.size());
-            BOOST_REQUIRE(res[true] == 0);
+            BOOST_REQUIRE_EQUAL(res[false], sstables.size());
+            BOOST_REQUIRE_EQUAL(res[true], 0);
         });
     });
 }
