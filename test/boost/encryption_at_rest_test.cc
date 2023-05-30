@@ -10,6 +10,7 @@
 #include <boost/test/unit_test.hpp>
 #include <stdint.h>
 #include <random>
+#include <regex>
 
 #include <seastar/core/future-util.hh>
 #include <seastar/core/seastar.hh>
@@ -29,6 +30,7 @@
 #include "db/config.hh"
 #include "db/extensions.hh"
 #include "init.hh"
+#include "sstables/sstables.hh"
 
 using namespace encryption;
 namespace fs = std::filesystem;
@@ -71,6 +73,27 @@ static future<> test_provider(const std::string& options, const tmpdir& tmp, con
 
         co_await do_with_cql_env_thread([&] (cql_test_env& env) {
             require_rows(env, "select * from ks.t", {{utf8_type->decompose(pk), utf8_type->decompose(v)}});
+
+            // check that all sstables have the defined provider class (i.e. are encrypted using correct optons)
+            if (options.find("'key_provider'") != std::string::npos) {
+                static std::regex ex(R"foo('key_provider'\s*:\s*'(\w+)')foo");
+
+                std::smatch m;
+                BOOST_REQUIRE(std::regex_search(options.begin(), options.end(), m, ex));
+                auto provider = m[1].str();
+
+                env.db().invoke_on_all([&](replica::database& db) {
+                    auto& cf = db.find_column_family("ks", "t");
+                    auto sstables = cf.get_sstables_including_compacted_undeleted();
+
+                    if (sstables) {
+                        for (auto& t : *sstables) {
+                            auto sst_provider = encryption::encryption_provider(*t);
+                            BOOST_REQUIRE_EQUAL(provider, sst_provider);
+                        }
+                    }
+                }).get0();
+            }
         }, cfg, {}, cql_test_init_configurables{ *ext });
     }
 }
