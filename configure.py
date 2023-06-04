@@ -1812,7 +1812,7 @@ def configure_seastar(build_dir, mode, mode_config):
         '-DSeastar_API_LEVEL=6',
         '-DSeastar_UNUSED_RESULT_ERROR=ON',
         '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
-        '-DSeastar_SCHEDULING_GROUPS_COUNT=17',
+        '-DSeastar_SCHEDULING_GROUPS_COUNT=18',
         '-DSeastar_IO_URING=OFF', # io_uring backend is not stable enough
     ] + distro_extra_cmake_args
 
@@ -2277,7 +2277,6 @@ with open(buildfile, 'w') as f:
                     rust_headers[hh] = src
                 else:
                     raise Exception('No rule for ' + src)
-        f.write('   libs = $seastar_libs_{}\n'.format(mode))
         f.write(
             'build {mode}-objects: phony {objs}\n'.format(
                 mode=mode,

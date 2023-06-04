@@ -254,19 +254,32 @@ static future<> set_gossip_tokens(gms::gossiper& g,
  * The helper waits for two things
  *  1) for schema agreement
  *  2) there's no pending node operations
- * before proceeding with the bootstrap or replace
+ * before proceeding with the bootstrap or replace.
+ *
+ * This function must only be called if we're not the first node
+ * (i.e. booting into existing cluster).
  */
-future<> storage_service::wait_for_ring_to_settle(std::chrono::milliseconds delay) {
-    // first sleep the delay to make sure we see *at least* one other node
-    for (int i = 0; i < delay.count() && _gossiper.get_live_members().size() < 2; i += 1000) {
-        co_await sleep_abortable(std::chrono::seconds(1), _abort_source);
+future<> storage_service::wait_for_ring_to_settle() {
+    // Make sure we see at least one other node.
+    logger::rate_limit rate_limit{std::chrono::seconds{5}};
+    auto timeout = gms::gossiper::clk::now() + std::chrono::minutes{5};
+    while (_gossiper.get_live_members().size() < 2) {
+        if (timeout <= gms::gossiper::clk::now()) {
+            auto err = ::format("Timed out waiting for other live nodes to show up in gossip during initial boot");
+            slogger.error("{}", err);
+            throw std::runtime_error{std::move(err)};
+        }
+
+        slogger.log(log_level::info, rate_limit, "No other live nodes seen yet in gossip during initial boot...");
+        co_await sleep_abortable(std::chrono::milliseconds(10), _abort_source);
     }
+    slogger.info("Live nodes seen in gossip during initial boot: {}", _gossiper.get_live_members());
 
     auto t = gms::gossiper::clk::now();
     while (true) {
+        slogger.info("waiting for schema information to complete");
         while (!_migration_manager.local().have_schema_agreement()) {
-            slogger.info("waiting for schema information to complete");
-            co_await sleep_abortable(std::chrono::seconds(1), _abort_source);
+            co_await sleep_abortable(std::chrono::milliseconds(10), _abort_source);
         }
         co_await update_topology_change_info("joining");
 
@@ -1567,11 +1580,11 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
     std::optional<cdc::generation_id> cdc_gen_id;
 
     if (_sys_ks.local().was_decommissioned()) {
-        if (_db.local().get_config().override_decommission()) {
+        if (_db.local().get_config().override_decommission() && !_db.local().get_config().consistent_cluster_management()) {
             slogger.warn("This node was decommissioned, but overriding by operator request.");
             co_await _sys_ks.local().set_bootstrap_state(db::system_keyspace::bootstrap_state::COMPLETED);
         } else {
-            auto msg = sstring("This node was decommissioned and will not rejoin the ring unless override_decommission=true has been set,"
+            auto msg = sstring("This node was decommissioned and will not rejoin the ring unless override_decommission=true has been set and consistent cluster management is not in use,"
                                "or all existing data is removed and the node is bootstrapped again");
             slogger.error("{}", msg);
             throw std::runtime_error(msg);
@@ -1718,6 +1731,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
     co_await _gossiper.start_gossiping(generation_number, app_states, advertise);
 
     assert(_group0);
+    // if the node is bootstrapped the functin will do nothing since we already created group0 in main.cc
     co_await _group0->setup_group0(_sys_ks.local(), initial_contact_nodes, raft_replace_info, *this, qp, _migration_manager.local(), cdc_gen_service);
 
     raft::server* raft_server = co_await [this] () -> future<raft::server*> {
@@ -1809,7 +1823,7 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
 
         // if our schema hasn't matched yet, keep sleeping until it does
         // (post CASSANDRA-1391 we don't expect this to be necessary very often, but it doesn't hurt to be careful)
-        co_await wait_for_ring_to_settle(delay);
+        co_await wait_for_ring_to_settle();
 
         if (!replace_address) {
             auto tmptr = get_token_metadata_ptr();
@@ -2740,24 +2754,24 @@ future<> storage_service::join_cluster(cdc::generation_service& cdc_gen_service,
     _group0 = &group0;
     _raft_topology_change_enabled = _group0->is_raft_enabled() && _db.local().get_config().check_experimental(db::experimental_features_t::feature::RAFT);
 
-    return seastar::async([this, &cdc_gen_service, &sys_dist_ks, &proxy, &qp] {
-        set_mode(mode::STARTING);
+    set_mode(mode::STARTING);
 
-        std::unordered_set<inet_address> loaded_endpoints;
-        if (_db.local().get_config().load_ring_state()) {
-            slogger.info("Loading persisted ring state");
-            auto loaded_tokens = _sys_ks.local().load_tokens().get0();
-            auto loaded_host_ids = _sys_ks.local().load_host_ids().get0();
-            auto loaded_dc_rack = _sys_ks.local().load_dc_rack_info().get0();
+    std::unordered_set<inet_address> loaded_endpoints;
+    if (_db.local().get_config().load_ring_state() && !_raft_topology_change_enabled) {
+        slogger.info("Loading persisted ring state");
+        auto loaded_tokens = co_await _sys_ks.local().load_tokens();
+        auto loaded_host_ids = co_await _sys_ks.local().load_host_ids();
+        auto loaded_dc_rack = co_await _sys_ks.local().load_dc_rack_info();
 
-            auto get_dc_rack = [&loaded_dc_rack] (inet_address ep) {
-                if (loaded_dc_rack.contains(ep)) {
-                    return loaded_dc_rack[ep];
-                } else {
-                    return locator::endpoint_dc_rack::default_location;
-                }
-            };
+        auto get_dc_rack = [&loaded_dc_rack] (inet_address ep) {
+            if (loaded_dc_rack.contains(ep)) {
+                return loaded_dc_rack[ep];
+            } else {
+                return locator::endpoint_dc_rack::default_location;
+            }
+        };
 
+        if (slogger.is_enabled(logging::log_level::debug)) {
             for (auto& x : loaded_tokens) {
                 slogger.debug("Loaded tokens: endpoint={}, tokens={}", x.first, x.second);
             }
@@ -2765,44 +2779,44 @@ future<> storage_service::join_cluster(cdc::generation_service& cdc_gen_service,
             for (auto& x : loaded_host_ids) {
                 slogger.debug("Loaded host_id: endpoint={}, uuid={}", x.first, x.second);
             }
+        }
 
-            auto tmlock = get_token_metadata_lock().get0();
-            auto tmptr = get_mutable_token_metadata_ptr().get0();
-            for (auto x : loaded_tokens) {
-                auto ep = x.first;
-                auto tokens = x.second;
-                if (ep == get_broadcast_address()) {
-                    // entry has been mistakenly added, delete it
-                    _sys_ks.local().remove_endpoint(ep).get();
-                } else {
-                    tmptr->update_topology(ep, get_dc_rack(ep), locator::node::state::normal);
-                    tmptr->update_normal_tokens(tokens, ep).get();
-                    if (loaded_host_ids.contains(ep)) {
-                        tmptr->update_host_id(loaded_host_ids.at(ep), ep);
-                    }
-                    loaded_endpoints.insert(ep);
-                    _gossiper.add_saved_endpoint(ep).get();
+        auto tmlock = co_await get_token_metadata_lock();
+        auto tmptr = co_await get_mutable_token_metadata_ptr();
+        for (auto x : loaded_tokens) {
+            auto ep = x.first;
+            auto tokens = x.second;
+            if (ep == get_broadcast_address()) {
+                // entry has been mistakenly added, delete it
+                co_await _sys_ks.local().remove_endpoint(ep);
+            } else {
+                tmptr->update_topology(ep, get_dc_rack(ep), locator::node::state::normal);
+                co_await tmptr->update_normal_tokens(tokens, ep);
+                if (loaded_host_ids.contains(ep)) {
+                    tmptr->update_host_id(loaded_host_ids.at(ep), ep);
                 }
+                loaded_endpoints.insert(ep);
+                co_await _gossiper.add_saved_endpoint(ep);
             }
-            replicate_to_all_cores(std::move(tmptr)).get();
         }
+        co_await replicate_to_all_cores(std::move(tmptr));
+    }
 
-        // Seeds are now only used as the initial contact point nodes. If the
-        // loaded_endpoints are empty which means this node is a completely new
-        // node, we use the nodes specified in seeds as the initial contact
-        // point nodes, otherwise use the peer nodes persisted in system table.
-        auto seeds = _gossiper.get_seeds();
-        auto initial_contact_nodes = loaded_endpoints.empty() ?
-            std::unordered_set<gms::inet_address>(seeds.begin(), seeds.end()) :
-            loaded_endpoints;
-        auto loaded_peer_features = _sys_ks.local().load_peer_features().get0();
-        slogger.info("initial_contact_nodes={}, loaded_endpoints={}, loaded_peer_features={}",
-                initial_contact_nodes, loaded_endpoints, loaded_peer_features.size());
-        for (auto& x : loaded_peer_features) {
-            slogger.info("peer={}, supported_features={}", x.first, x.second);
-        }
-        join_token_ring(cdc_gen_service, sys_dist_ks, proxy, std::move(initial_contact_nodes), std::move(loaded_endpoints), std::move(loaded_peer_features), get_ring_delay(), qp).get();
-    });
+    // Seeds are now only used as the initial contact point nodes. If the
+    // loaded_endpoints are empty which means this node is a completely new
+    // node, we use the nodes specified in seeds as the initial contact
+    // point nodes, otherwise use the peer nodes persisted in system table.
+    auto seeds = _gossiper.get_seeds();
+    auto initial_contact_nodes = loaded_endpoints.empty() ?
+        std::unordered_set<gms::inet_address>(seeds.begin(), seeds.end()) :
+        loaded_endpoints;
+    auto loaded_peer_features = co_await _sys_ks.local().load_peer_features();
+    slogger.info("initial_contact_nodes={}, loaded_endpoints={}, loaded_peer_features={}",
+            initial_contact_nodes, loaded_endpoints, loaded_peer_features.size());
+    for (auto& x : loaded_peer_features) {
+        slogger.info("peer={}, supported_features={}", x.first, x.second);
+    }
+    co_return co_await join_token_ring(cdc_gen_service, sys_dist_ks, proxy, std::move(initial_contact_nodes), std::move(loaded_endpoints), std::move(loaded_peer_features), get_ring_delay(), qp);
 }
 
 future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept {

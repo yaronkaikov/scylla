@@ -470,8 +470,8 @@ struct group0_members {
     const raft_address_map& _address_map;
 
 
-    std::vector<gms::inet_address> get_inet_addrs(std::source_location l =
-            std::source_location::current()) const {
+    std::vector<gms::inet_address> get_inet_addrs(seastar::compat::source_location l =
+            seastar::compat::source_location::current()) const {
         const raft::config_member_set& members = _group0_server.get_configuration().current;
         std::vector<gms::inet_address> ret;
         std::vector<raft::server_id> missing;
@@ -507,9 +507,7 @@ static future<bool> synchronize_schema(
         const noncopyable_function<future<bool>()>& can_finish_early,
         abort_source&);
 
-future<> raft_group0::setup_group0(
-        db::system_keyspace& sys_ks, const std::unordered_set<gms::inet_address>& initial_contact_nodes,
-        std::optional<replace_info> replace_info, service::storage_service& ss, cql3::query_processor& qp, service::migration_manager& mm, cdc::generation_service& cdc_gen_servic) {
+future<bool> raft_group0::use_raft() {
     assert(this_shard_id() == 0);
 
     if (!_raft_gr.is_enabled()) {
@@ -517,31 +515,53 @@ future<> raft_group0::setup_group0(
         // Note: if the local feature was enabled by every node earlier, that would enable the cluster
         // SUPPORTS_RAFT feature, and the node should then refuse to start during feature check
         // (because if the local feature is disabled, then the cluster feature - enabled in the cluster - is 'unknown' to us).
-        co_return;
+        co_return false;
     }
 
     if (((co_await _client.get_group0_upgrade_state()).second) == group0_upgrade_state::recovery) {
         group0_log.warn("setup_group0: Raft RECOVERY mode, skipping group 0 setup.");
+        co_return false;
+    }
+
+    co_return true;
+}
+
+future<> raft_group0::setup_group0_if_exist(db::system_keyspace& sys_ks, service::storage_service& ss, cql3::query_processor& qp, service::migration_manager& mm, cdc::generation_service& cdc_gen_service) {
+    if (!co_await use_raft()) {
+        co_return;
+    }
+
+    if (!sys_ks.bootstrap_complete()) {
+        // If bootsrap did not complete yet there is no group0 to setup
+        co_return;
+    }
+
+    auto group0_id = raft::group_id{co_await db::system_keyspace::get_raft_group0_id()};
+    if (group0_id) {
+        // Group 0 ID is present => we've already joined group 0 earlier.
+        group0_log.info("setup_group0: group 0 ID present. Starting existing Raft server.");
+        co_await start_server_for_group0(group0_id, ss, qp, mm, cdc_gen_service);
+    } else {
+        // Scylla has bootstrapped earlier but group 0 ID not present. This means we're upgrading.
+        // Upgrade will start through a feature listener created after we enter NORMAL state.
+        //
+        // See `raft_group0::finish_setup_after_join`.
+        upgrade_log.info(
+            "setup_group0: Scylla bootstrap completed before but group 0 ID not present."
+            " Internal upgrade-to-raft procedure will automatically start after every node finishes"
+            " upgrading to the new Scylla version.");
+    }
+}
+
+future<> raft_group0::setup_group0(
+        db::system_keyspace& sys_ks, const std::unordered_set<gms::inet_address>& initial_contact_nodes,
+        std::optional<replace_info> replace_info, service::storage_service& ss, cql3::query_processor& qp, service::migration_manager& mm, cdc::generation_service& cdc_gen_service) {
+    if (!co_await use_raft()) {
         co_return;
     }
 
     if (sys_ks.bootstrap_complete()) {
-        auto group0_id = raft::group_id{co_await db::system_keyspace::get_raft_group0_id()};
-        if (group0_id) {
-            // Group 0 ID is present => we've already joined group 0 earlier.
-            group0_log.info("setup_group0: group 0 ID present. Starting existing Raft server.");
-            co_await start_server_for_group0(group0_id, ss, qp, mm, cdc_gen_servic);
-        } else {
-            // Scylla has bootstrapped earlier but group 0 ID not present. This means we're upgrading.
-            // Upgrade will start through a feature listener created after we enter NORMAL state.
-            //
-            // See `raft_group0::finish_setup_after_join`.
-            upgrade_log.info(
-                "setup_group0: Scylla bootstrap completed before but group 0 ID not present."
-                " Internal upgrade-to-raft procedure will automatically start after every node finishes"
-                " upgrading to the new Scylla version.");
-        }
-
+        // If the node is bootsraped the group0 server should be setup already
         co_return;
     }
 
@@ -553,7 +573,7 @@ future<> raft_group0::setup_group0(
     }
 
     group0_log.info("setup_group0: joining group 0...");
-    co_await join_group0(std::move(seeds), false /* non-voter */, ss, qp, mm, cdc_gen_servic);
+    co_await join_group0(std::move(seeds), false /* non-voter */, ss, qp, mm, cdc_gen_service);
     group0_log.info("setup_group0: successfully joined group 0.");
 
     if (replace_info) {
@@ -1040,7 +1060,7 @@ struct sleep_with_exponential_backoff {
     std::chrono::seconds _retry_period{1};
     static constexpr std::chrono::seconds _max_retry_period{16};
     future<> operator()(abort_source& as,
-                        std::source_location loc = std::source_location::current()) {
+                        seastar::compat::source_location loc = seastar::compat::source_location::current()) {
         upgrade_log.info("{}: sleeping for {} seconds before retrying...", loc.function_name(), _retry_period);
         co_await sleep_abortable(_retry_period, as);
         _retry_period = std::min(_retry_period * 2, _max_retry_period);

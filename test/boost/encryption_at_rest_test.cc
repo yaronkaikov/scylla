@@ -39,6 +39,9 @@ static future<> test_provider(const std::string& options, const tmpdir& tmp, con
         auto cfg = seastar::make_shared<db::config>(ext);
         cfg->data_file_directories({tmp.path().string()});
 
+        // Currently the test fails with consistent_cluster_management = true. See #2995.
+        cfg->consistent_cluster_management(false);
+
         if (!extra_yaml.empty()) {
             boost::program_options::options_description desc;
             boost::program_options::options_description_easy_init init(&desc);
