@@ -35,7 +35,6 @@ namespace qos {
 struct service_level {
      service_level_options slo;
      scheduling_group sg;
-     io_priority_class pc = default_priority_class();
      bool marked_for_deletion;
      bool is_static;
 };
@@ -65,7 +64,6 @@ private:
     struct global_controller_data {
         service_levels_info  static_configurations{};
         std::deque<scheduling_group> deleted_scheduling_groups{};
-        std::deque<io_priority_class> deleted_priority_classes{};
         service_level_options default_service_level_config;
         // The below future is used to serialize work so no reordering can occur.
         // This is needed so for example: delete(x), add(x) will not reverse yielding
@@ -94,7 +92,6 @@ private:
     service_level_distributed_data_accessor_ptr _sl_data_accessor;
     sharded<auth::service>& _auth_service;
     std::chrono::time_point<seastar::lowres_clock> _last_successful_config_update;
-    std::vector<io_priority_class> _io_priority_classes;    
     unsigned _logged_intervals;
     atomic_vector<qos_configuration_change_subscriber*> _subscribers;
 public:
@@ -181,11 +178,6 @@ public:
         return with_scheduling_group(sl.sg, std::move(func));
     }
 
-    /**
-     * @return a pointer to the io priority class of the currently active service level,
-     * or nullptr if it is called outside of any service_level.
-     */
-    io_priority_class* get_current_priority_class();
     /**
      * @return the default service level scheduling group (see service_level_controller::initialize).
      */
@@ -293,13 +285,6 @@ private:
     future<> notify_service_level_added(sstring name, service_level sl_data);
     future<> notify_service_level_updated(sstring name, service_level_options slo);
     future<> notify_service_level_removed(sstring name);
-
-    /**
-     * Register this service_level_controller with the local priority
-     * manager. This alows the io priority manager to consult with the
-     * service level controller about the io_priority to return.
-     */
-    void register_with_priority_manager();
 
     enum class  set_service_level_op_type {
         add_if_not_exists,

@@ -10,7 +10,6 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
 #include "service_level_controller.hh"
-#include "service/priority_manager.hh"
 #include "message/messaging_service.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "utils/fb_utilities.hh"
@@ -28,7 +27,6 @@ service_level_controller::service_level_controller(sharded<auth::service>& auth_
         : _sl_data_accessor(nullptr)
         , _auth_service(auth_service)
         , _last_successful_config_update(seastar::lowres_clock::now())
-        , _io_priority_classes(seastar::max_scheduling_groups(), default_priority_class())
         , _logged_intervals(0) {
     // We can't rename the system default scheduling group so we have to reject it.
     assert(default_scheduling_group != get_default_scheduling_group());
@@ -67,7 +65,6 @@ future<> service_level_controller::start() {
         return do_add_service_level(default_service_level_name, _global_controller_db->default_service_level_config, true).then([this] () {
             return container().invoke_on_all([] (service_level_controller& sl) {
                 sl._default_service_level =  sl.get_service_level(default_service_level_name);
-                sl.register_with_priority_manager();
             });
         });
     });
@@ -101,12 +98,9 @@ future<> service_level_controller::drain() {
         // delete all sg's in _service_levels_db, leaving it empty.
         for (auto it = _service_levels_db.begin(); it != _service_levels_db.end(); ) {
             _global_controller_db->deleted_scheduling_groups.emplace_back(it->second.sg);
-            _global_controller_db->deleted_priority_classes.emplace_back(it->second.pc);
             it = _service_levels_db.erase(it);
         }
     }).then_wrapped([] (future<> f) {
-        //unregister from the priority manager
-        service::get_local_priority_manager().set_service_level_controller(nullptr);
         try {
             f.get();
         } catch (const broken_semaphore& ignored) {
@@ -151,10 +145,6 @@ future<> service_level_controller::stop() {
             });
         });
     });
-}
-
-void service_level_controller::register_with_priority_manager() {
-    service::get_local_priority_manager().set_service_level_controller(this);
 }
 
 future<> service_level_controller::update_service_levels_from_distributed_data() {
@@ -307,7 +297,6 @@ future<>  service_level_controller::notify_service_level_added(sstring name, ser
         service_level_info sl_info = {
             .name = name,
             .sg = sl_data.sg,
-            .pc = sl_data.pc
         };
         _subscribers.thread_for_each([name, sl_data, sl_info] (qos_configuration_change_subscriber* subscriber) {
             try {
@@ -336,7 +325,6 @@ future<> service_level_controller::notify_service_level_updated(sstring name, se
             service_level_info sl_info = {
                 .name = name,
                 .sg = sl_it->second.sg,
-                .pc = sl_it->second.pc
             };
             _subscribers.thread_for_each([name, slo_before, slo, sl_info] (qos_configuration_change_subscriber* subscriber) {
                 try {
@@ -351,9 +339,6 @@ future<> service_level_controller::notify_service_level_updated(sstring name, se
                     new_shares = *new_shares_p;
                 }
                 sl_it->second.sg.set_shares(new_shares);
-                f = f.then([pc = sl_it->second.pc, shares = new_shares] () {
-                    return pc.update_shares(shares);
-                });
             }
 
             sl_it->second.slo = slo;
@@ -371,18 +356,14 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
         _sl_lookup[sl_idx].second = nullptr;
         if (this_shard_id() == global_controller) {
             _global_controller_db->deleted_scheduling_groups.emplace_back(sl_it->second.sg);
-            _global_controller_db->deleted_priority_classes.emplace_back(sl_it->second.pc);
-            ret = do_with(sstring(format(deleted_scheduling_group_name_pattern, sl_it->first)), scheduling_group(sl_it->second.sg), io_priority_class(sl_it->second.pc),
-                    [] (sstring& new_name, scheduling_group& sg, io_priority_class& pc) {
-                return rename_scheduling_group(sg, new_name).then([&pc, &new_name] {
-                    return pc.rename(new_name);
-                });
+            ret = do_with(sstring(format(deleted_scheduling_group_name_pattern, sl_it->first)), scheduling_group(sl_it->second.sg),
+                    [] (sstring& new_name, scheduling_group& sg) {
+                return rename_scheduling_group(sg, new_name);
             });
         }
         service_level_info sl_info = {
             .name = name,
             .sg = sl_it->second.sg,
-            .pc = sl_it->second.pc
         };
         _service_levels_db.erase(sl_it);
         return seastar::async( [this, name, sl_info] {
@@ -396,18 +377,6 @@ future<> service_level_controller::notify_service_level_removed(sstring name) {
         });
     }
     return ret;
-}
-
-io_priority_class* service_level_controller::get_current_priority_class() {
-    unsigned sched_idx = internal::scheduling_group_index(current_scheduling_group());
-    if (_sl_lookup[sched_idx].second) {
-        assert(sched_idx < _io_priority_classes.size());
-        // #2438 - prio class address must survive any group add/deletes. do a defensive copy.
-        _io_priority_classes[sched_idx] = _sl_lookup[sched_idx].second->pc;
-        return &_io_priority_classes[sched_idx];
-    } else {
-        return nullptr;
-    }
 }
 
 scheduling_group service_level_controller::get_default_scheduling_group() {
@@ -597,7 +566,7 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
             return make_ready_future();
         }
     } else {
-        return do_with(service_level{slo /*slo*/, default_scheduling_group() /*sg*/, default_priority_class() /*pc*/,
+        return do_with(service_level{slo /*slo*/, default_scheduling_group() /*sg*/,
                 false /*marked_for_deletion*/, is_static /*is_static*/}, std::move(name), [this] (service_level& sl, sstring& name) {
             return make_ready_future().then([this, &sl, &name] () mutable {
                 if (!_global_controller_db->deleted_scheduling_groups.empty()) {
@@ -631,33 +600,6 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
                        sl.sg = sg_fut.get0();
                        return make_ready_future<>();
                    });
-                }
-            }).then([this, &sl, &name] () mutable {
-                if (!_global_controller_db->deleted_priority_classes.empty()) {
-                    int32_t shares = std::get<int32_t>(sl.slo.shares);
-                    auto it = std::find_if(_global_controller_db->deleted_priority_classes.begin()
-                            , _global_controller_db->deleted_priority_classes.end()
-                            , [pc_name_to_find = format(deleted_scheduling_group_name_pattern, name)] (const io_priority_class& pc) {
-                                return (pc.get_name() == pc_name_to_find);
-                            });
-                    if (it != _global_controller_db->deleted_priority_classes.end()) {
-                        sl.pc = *it;
-                        _global_controller_db->deleted_priority_classes.erase(it);
-                    } else {
-                        sl.pc = _global_controller_db->deleted_priority_classes.front();
-                        _global_controller_db->deleted_priority_classes.pop_front();
-                    }
-                    return container().invoke_on_all([pc = sl.pc, shares] (service_level_controller& service) {
-                        return pc.update_shares(shares);
-                    }).then([pc = sl.pc, &name] () mutable{
-                        return do_with(io_priority_class{pc}, [&name] (io_priority_class& pc) {
-                            return pc.rename(format(scheduling_group_name_pattern, name));
-                        });
-                    });
-                } else {
-                    sl. pc =
-                            io_priority_class::register_one(format(scheduling_group_name_pattern, name), std::get<int32_t>(sl.slo.shares));
-                    return make_ready_future();
                 }
             }).then([this, &sl, &name] () {
                 return container().invoke_on_all(&service_level_controller::notify_service_level_added, name, sl);

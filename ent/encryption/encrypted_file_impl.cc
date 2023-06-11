@@ -88,10 +88,10 @@ class encrypted_file_impl : public seastar::file_impl {
 public:
     encrypted_file_impl(file, ::shared_ptr<symmetric_key>);
 
-    future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) override;
-    future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override;
-    future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, const io_priority_class& pc) override;
-    future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override;
+    future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, io_intent*) override;
+    future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, io_intent*) override;
+    future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, io_intent*) override;
+    future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, io_intent*) override;
 
 
     future<> flush() override {
@@ -114,7 +114,7 @@ public:
     subscription<directory_entry> list_directory(std::function<future<> (directory_entry de)> next) override {
         return _file.list_directory(std::move(next));
     }
-    future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc) override;
+    future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, io_intent*) override;
 };
 
 /**
@@ -235,18 +235,18 @@ temporary_buffer<uint8_t> encrypted_file_impl::transform(uint64_t pos, const voi
     return tmp;
 }
 
-future<size_t> encrypted_file_impl::write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) {
+future<size_t> encrypted_file_impl::write_dma(uint64_t pos, const void* buffer, size_t len, io_intent* intent) {
     assert(!(len & (block_size - 1)));
     auto tmp = transform(pos, buffer, len, mode::encrypt);
     assert(tmp.size() == len); // writing
     auto p = tmp.get();
-    return _file.dma_write(pos, p, len, pc).then([this, tmp = std::move(tmp), pos](size_t s) {
+    return _file.dma_write(pos, p, len, intent).then([this, tmp = std::move(tmp), pos](size_t s) {
         maybe_set_length(pos + s);
         return s;
     });
 }
 
-future<size_t> encrypted_file_impl::write_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) {
+future<size_t> encrypted_file_impl::write_dma(uint64_t pos, std::vector<iovec> iov, io_intent* intent) {
     std::vector<temporary_buffer<uint8_t>> tmp;
     tmp.reserve(iov.size());
     size_t n = 0;
@@ -258,24 +258,24 @@ future<size_t> encrypted_file_impl::write_dma(uint64_t pos, std::vector<iovec> i
         n += i.iov_len;
         i = iovec{ tmp.back().get_write(), tmp.back().size() };
     }
-    return _file.dma_write(pos, std::move(iov), pc).then([this, tmp = std::move(tmp), pos](size_t s) {
+    return _file.dma_write(pos, std::move(iov), intent).then([this, tmp = std::move(tmp), pos](size_t s) {
         maybe_set_length(pos + s);
         return s;
     });
 }
 
-future<size_t> encrypted_file_impl::read_dma(uint64_t pos, void* buffer, size_t len, const io_priority_class& pc) {
+future<size_t> encrypted_file_impl::read_dma(uint64_t pos, void* buffer, size_t len, io_intent* intent) {
     assert(!(len & (block_size - 1)));
-    return verify_file_length().then([this, pos, buffer, len, &pc] {
-        return _file.dma_read(pos, buffer, len, pc).then([this, pos, buffer](size_t len) {
+    return verify_file_length().then([this, pos, buffer, len, intent] {
+        return _file.dma_read(pos, buffer, len, intent).then([this, pos, buffer](size_t len) {
             return transform(pos, buffer, len, buffer, mode::decrypt);
         });
     });
 }
 
-future<size_t> encrypted_file_impl::read_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) {
-    return verify_file_length().then([this, pos, iov = std::move(iov), &pc]() mutable {
-        auto f = _file.dma_read(pos, iov, pc);
+future<size_t> encrypted_file_impl::read_dma(uint64_t pos, std::vector<iovec> iov, io_intent* intent) {
+    return verify_file_length().then([this, pos, iov = std::move(iov), intent]() mutable {
+        auto f = _file.dma_read(pos, iov, intent);
         return f.then([this, pos, iov = std::move(iov)](size_t len) mutable {
             size_t off = 0;
             for (auto& i : iov) {
@@ -286,8 +286,8 @@ future<size_t> encrypted_file_impl::read_dma(uint64_t pos, std::vector<iovec> io
     });
 }
 
-future<temporary_buffer<uint8_t>> encrypted_file_impl::dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc) {
-    return verify_file_length().then([this, offset, range_size, &pc]() mutable {
+future<temporary_buffer<uint8_t>> encrypted_file_impl::dma_read_bulk(uint64_t offset, size_t range_size, io_intent* intent) {
+    return verify_file_length().then([this, offset, range_size, intent]() mutable {
         auto front = offset & (block_size - 1);
         offset -= front;
         range_size += front;
@@ -297,7 +297,7 @@ future<temporary_buffer<uint8_t>> encrypted_file_impl::dma_read_bulk(uint64_t of
         // or any other unaligned size, we need to add enough padding
         // to get the actual full block to decode.
         auto block_size = align_up(range_size, _key->block_size());
-        return _file.dma_read_bulk<uint8_t>(offset, block_size, pc).then([this, offset, front, range_size](temporary_buffer<uint8_t> result) {
+        return _file.dma_read_bulk<uint8_t>(offset, block_size, intent).then([this, offset, front, range_size](temporary_buffer<uint8_t> result) {
             auto s = transform(offset, result.get(), result.size(), result.get_write(), mode::decrypt);
             // never give back more than asked for.
             result.trim(std::min(s, range_size));
@@ -346,14 +346,14 @@ future<> encrypted_file_impl::truncate(uint64_t length) {
                 }
                 auto n = std::min(t.buf.size(), align_up(size_t(t.length - t.aligned_size), block_size));
                 if (t.aligned_size < t.size) {
-                    return read_dma(t.aligned_size, t.buf.get_write(), n, default_priority_class()).then([&, n](size_t r) mutable {
+                    return read_dma(t.aligned_size, t.buf.get_write(), n, nullptr).then([&, n](size_t r) mutable {
                         auto rem = size_t(t.size - t.aligned_size);
                         auto ar = align_up(r, block_size);
                         assert(ar <= t.buf.size());
                         if (rem < ar) {
                             std::fill(t.buf.get_write() + rem, t.buf.get_write() + ar, 0);
                         }
-                        return write_dma(t.aligned_size, t.buf.get(), ar, default_priority_class()).then([&, n](size_t w) {
+                        return write_dma(t.aligned_size, t.buf.get(), ar, nullptr).then([&, n](size_t w) {
                             t.aligned_size += w;
                             // #1869. On btrfs, we get the buffer potentially clobbered up to "n" (max read amount)
                             // even when "r" (actual bytes read) is less.
@@ -362,7 +362,7 @@ future<> encrypted_file_impl::truncate(uint64_t length) {
                         });
                     });
                 }
-                return write_dma(t.aligned_size, t.buf.get(), n, default_priority_class()).then([&](size_t w) {
+                return write_dma(t.aligned_size, t.buf.get(), n, nullptr).then([&](size_t w) {
                     t.aligned_size += w;
                     return make_ready_future<stop_iteration>(stop_iteration::no);
                 });
@@ -438,29 +438,29 @@ public:
         : _f(f), _key_block_size(key_block_size), _get(std::move(get))
     {}
 
-    future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) override {
-        return get().then([this, pos, buffer, len, &pc]() {
-            return _impl->write_dma(pos, buffer, len, pc);
+    future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, io_intent* intent) override {
+        return get().then([this, pos, buffer, len, intent]() {
+            return _impl->write_dma(pos, buffer, len, intent);
         });
     }
-    future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override {
-        return get().then([this, pos, iov = std::move(iov), &pc]() mutable {
-            return _impl->write_dma(pos, std::move(iov), pc);
+    future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, io_intent* intent) override {
+        return get().then([this, pos, iov = std::move(iov), intent]() mutable {
+            return _impl->write_dma(pos, std::move(iov), intent);
         });
     }
-    future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, const io_priority_class& pc) override {
-        return get().then([this, pos, buffer, len, &pc]() {
-            return _impl->read_dma(pos, buffer, len, pc);
+    future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, io_intent* intent) override {
+        return get().then([this, pos, buffer, len, intent]() {
+            return _impl->read_dma(pos, buffer, len, intent);
         });
     }
-    future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) override {
-        return get().then([this, pos, iov = std::move(iov), &pc]() mutable {
-            return _impl->read_dma(pos, std::move(iov), pc);
+    future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, io_intent* intent) override {
+        return get().then([this, pos, iov = std::move(iov), intent]() mutable {
+            return _impl->read_dma(pos, std::move(iov), intent);
         });
     }
-    future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc) override {
-        return get().then([this, offset, range_size, &pc]() {
-            return _impl->dma_read_bulk(offset, range_size, pc);
+    future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, io_intent* intent) override {
+        return get().then([this, offset, range_size, intent]() {
+            return _impl->dma_read_bulk(offset, range_size, intent);
         });
     }
     future<> flush(void) override {

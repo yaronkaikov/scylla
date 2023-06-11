@@ -294,7 +294,7 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
                     "Create system_distributed keyspace");
         } catch (exceptions::already_exists_exception&) {}
     } else {
-        dlogger.info("{} keyspase is already present. Not creating", NAME);
+        dlogger.info("{} keyspace is already present. Not creating", NAME);
     }
 
     if (!_sp.get_db().local().has_keyspace(NAME_EVERYWHERE)) {
@@ -311,7 +311,7 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
                     "Create system_distributed_everywhere keyspace");
         } catch (exceptions::already_exists_exception&) {}
     } else {
-        dlogger.info("{} keyspase is already present. Not creating", NAME_EVERYWHERE);
+        dlogger.info("{} keyspace is already present. Not creating", NAME_EVERYWHERE);
     }
 
     bool exist = std::all_of(tables.begin(), tables.end(), [this] (schema_ptr s) {

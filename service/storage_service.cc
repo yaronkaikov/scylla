@@ -59,7 +59,6 @@
 #include "cdc/generation_service.hh"
 #include "repair/repair.hh"
 #include "repair/row_level.hh"
-#include "service/priority_manager.hh"
 #include "gms/generation-number.hh"
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/maybe_yield.hh>
@@ -262,7 +261,13 @@ static future<> set_gossip_tokens(gms::gossiper& g,
 future<> storage_service::wait_for_ring_to_settle() {
     // Make sure we see at least one other node.
     logger::rate_limit rate_limit{std::chrono::seconds{5}};
-    auto timeout = gms::gossiper::clk::now() + std::chrono::minutes{5};
+#ifdef SEASTAR_DEBUG
+    // Account for debug slowness. 3 minutes is probably overkill but we don't want flaky tests.
+    constexpr auto timeout_delay = std::chrono::minutes{3};
+#else
+    constexpr auto timeout_delay = std::chrono::seconds{30};
+#endif
+    auto timeout = gms::gossiper::clk::now() + timeout_delay;
     while (_gossiper.get_live_members().size() < 2) {
         if (timeout <= gms::gossiper::clk::now()) {
             auto err = ::format("Timed out waiting for other live nodes to show up in gossip during initial boot");
@@ -2747,12 +2752,14 @@ future<> storage_service::uninit_messaging_service_part() {
     return container().invoke_on_all(&service::storage_service::uninit_messaging_service);
 }
 
-future<> storage_service::join_cluster(cdc::generation_service& cdc_gen_service,
-        sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy, raft_group0& group0, cql3::query_processor& qp) {
-    assert(this_shard_id() == 0);
-
+void storage_service::set_group0(raft_group0& group0) {
     _group0 = &group0;
     _raft_topology_change_enabled = _group0->is_raft_enabled() && _db.local().get_config().check_experimental(db::experimental_features_t::feature::RAFT);
+}
+
+future<> storage_service::join_cluster(cdc::generation_service& cdc_gen_service,
+        sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy, cql3::query_processor& qp) {
+    assert(this_shard_id() == 0);
 
     set_mode(mode::STARTING);
 

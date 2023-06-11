@@ -1153,8 +1153,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // we need the getter since updateable_value is not shard-safe (#7316)
             auto get_cm_cfg = sharded_parameter([&] {
                 return compaction_manager::config {
-                    .compaction_sched_group = compaction_manager::scheduling_group{dbcfg.compaction_scheduling_group, service::get_local_compaction_priority()},
-                    .maintenance_sched_group = compaction_manager::scheduling_group{dbcfg.streaming_scheduling_group, service::get_local_streaming_priority()},
+                    .compaction_sched_group = compaction_manager::scheduling_group{dbcfg.compaction_scheduling_group},
+                    .maintenance_sched_group = compaction_manager::scheduling_group{dbcfg.streaming_scheduling_group},
                     .available_memory = dbcfg.available_memory,
                     .static_shares = cfg->compaction_static_shares,
                     .throughput_mb_per_sec = cfg->compaction_throughput_mb_per_sec,
@@ -1619,6 +1619,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 group0_service.abort().get();
             });
 
+            // Set up group0 service earlier since it is needed by group0 setup just below
+            ss.local().set_group0(group0_service);
+
             // Setup group0 early in case the node is bootsrapped already and the group exists
             // Need to do it before allowing incomming messaging service connections since
             // storage proxy's and migration manager's verbs may access group0
@@ -1631,7 +1634,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }).get();
 
             with_scheduling_group(maintenance_scheduling_group, [&] {
-                return ss.local().join_cluster(cdc_generation_service.local(), sys_dist_ks, proxy, group0_service, qp.local());
+                return ss.local().join_cluster(cdc_generation_service.local(), sys_dist_ks, proxy, qp.local());
             }).get();
 
             sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {

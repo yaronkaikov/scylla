@@ -225,20 +225,21 @@ private:
     friend class rmw_operation;
 
     static void describe_key_schema(rjson::value& parent, const schema&, std::unordered_map<std::string,std::string> * = nullptr);
-    static void describe_key_schema(rjson::value& parent, const schema& schema, std::unordered_map<std::string,std::string>&);
     
 public:
+    static void describe_key_schema(rjson::value& parent, const schema& schema, std::unordered_map<std::string,std::string>&);
+
     static std::optional<rjson::value> describe_single_item(schema_ptr,
         const query::partition_slice&,
         const cql3::selection::selection&,
         const query::result&,
         const std::optional<attrs_to_get>&);
 
-    static std::vector<rjson::value> describe_multi_item(schema_ptr schema,
-        const query::partition_slice& slice,
-        const cql3::selection::selection& selection,
-        const query::result& query_result,
-        const std::optional<attrs_to_get>& attrs_to_get);
+    static future<std::vector<rjson::value>> describe_multi_item(schema_ptr schema,
+        const query::partition_slice&& slice,
+        shared_ptr<cql3::selection::selection> selection,
+        foreign_ptr<lw_shared_ptr<query::result>> query_result,
+        shared_ptr<const std::optional<attrs_to_get>> attrs_to_get);
 
     static void describe_single_item(const cql3::selection::selection&,
         const std::vector<managed_bytes_opt>&,
@@ -248,7 +249,7 @@ public:
 
     static void add_stream_options(const rjson::value& stream_spec, schema_builder&, service::storage_proxy& sp);
     static void supplement_table_info(rjson::value& descr, const schema& schema, service::storage_proxy& sp);
-    static void supplement_table_stream_info(rjson::value& descr, const schema& schema, service::storage_proxy& sp);
+    static void supplement_table_stream_info(rjson::value& descr, const schema& schema, const service::storage_proxy& sp);
 };
 
 // is_big() checks approximately if the given JSON value is "bigger" than

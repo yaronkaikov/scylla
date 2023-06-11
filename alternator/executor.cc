@@ -60,6 +60,27 @@ logging::logger elogger("alternator-executor");
 
 namespace alternator {
 
+enum class table_status {
+    active = 0,
+    creating,
+    updating,
+    deleting
+};
+
+static sstring_view table_status_to_sstring(table_status tbl_status) {
+    switch(tbl_status) {
+        case table_status::active:
+            return "ACTIVE";
+        case table_status::creating:
+            return "CREATING";
+        case table_status::updating:
+            return "UPDATING";
+        case table_status::deleting:
+            return "DELETING";
+    }
+    return "UKNOWN";
+}
+
 static future<std::vector<mutation>> create_keyspace(std::string_view keyspace_name, service::storage_proxy& sp, service::migration_manager& mm, gms::gossiper& gossiper, api::timestamp_type);
 
 static map_type attrs_type() {
@@ -90,7 +111,6 @@ json::json_return_type make_streamed(rjson::value&& value) {
         auto lrs = std::move(rs);
         try {
             co_await rjson::print(*lrs, los);
-            co_await los.flush();
             co_await los.close();
         } catch (...) {
             // at this point, we cannot really do anything. HTTP headers and return code are
@@ -413,22 +433,8 @@ static rjson::value generate_arn_for_index(const schema& schema, std::string_vie
         schema.ks_name(), schema.cf_name(), index_name));
 }
 
-bool is_alternator_keyspace(const sstring& ks_name) {
-    return ks_name.find(executor::KEYSPACE_NAME_PREFIX) == 0;
-}
-
-sstring executor::table_name(const schema& s) {
-    return s.cf_name();
-}
-
-future<executor::request_return_type> executor::describe_table(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
-    _stats.api_operations.describe_table++;
-    elogger.trace("Describing table {}", request);
-
-    schema_ptr schema = get_table(_proxy, request);
-
-    tracing::add_table_name(trace_state, schema->ks_name(), schema->cf_name());
-
+static rjson::value fill_table_description(schema_ptr schema, table_status tbl_status, service::storage_proxy const& proxy)
+{
     rjson::value table_description = rjson::empty_object();
     rjson::add(table_description, "TableName", rjson::from_string(schema->cf_name()));
     // FIXME: take the tables creation time, not the current time!
@@ -439,9 +445,8 @@ future<executor::request_return_type> executor::describe_table(client_state& cli
     // We don't currently do this in Alternator - instead CreateTable waits
     // until the table is really available. So/ DescribeTable returns either
     // ACTIVE or doesn't exist at all (and DescribeTable returns an error).
-    // The other states (CREATING, UPDATING, DELETING) are not currently
-    // returned.
-    rjson::add(table_description, "TableStatus", "ACTIVE");
+    // The states CREATING and UPDATING are not currently returned.
+    rjson::add(table_description, "TableStatus", rjson::from_string(table_status_to_sstring(tbl_status)));
     rjson::add(table_description, "TableArn", generate_arn_for_table(*schema));
     rjson::add(table_description, "TableId", rjson::from_string(schema->id().to_sstring()));
     // FIXME: Instead of hardcoding, we should take into account which mode was chosen
@@ -458,9 +463,9 @@ future<executor::request_return_type> executor::describe_table(client_state& cli
 
     std::unordered_map<std::string,std::string> key_attribute_types;
     // Add base table's KeySchema and collect types for AttributeDefinitions:
-    describe_key_schema(table_description, *schema, key_attribute_types);
+    executor::describe_key_schema(table_description, *schema, key_attribute_types);
 
-    data_dictionary::table t = _proxy.data_dictionary().find_column_family(schema);
+    data_dictionary::table t = proxy.data_dictionary().find_column_family(schema);
     if (!t.views().empty()) {
         rjson::value gsi_array = rjson::empty_array();
         rjson::value lsi_array = rjson::empty_array();
@@ -476,7 +481,7 @@ future<executor::request_return_type> executor::describe_table(client_state& cli
             rjson::add(view_entry, "IndexName", rjson::from_string(index_name));
             rjson::add(view_entry, "IndexArn", generate_arn_for_index(*schema, index_name));
             // Add indexes's KeySchema and collect types for AttributeDefinitions:
-            describe_key_schema(view_entry, *vptr, key_attribute_types);
+            executor::describe_key_schema(view_entry, *vptr, key_attribute_types);
             // Add projection type
             rjson::value projection = rjson::empty_object();
             rjson::add(projection, "ProjectionType", "ALL");
@@ -504,10 +509,29 @@ future<executor::request_return_type> executor::describe_table(client_state& cli
     }
     rjson::add(table_description, "AttributeDefinitions", std::move(attribute_definitions));
 
-    supplement_table_stream_info(table_description, *schema, _proxy);
-    
-    // FIXME: still missing some response fields (issue #5026)
+    executor::supplement_table_stream_info(table_description, *schema, proxy);
 
+    // FIXME: still missing some response fields (issue #5026)
+    return table_description;
+}
+
+bool is_alternator_keyspace(const sstring& ks_name) {
+    return ks_name.find(executor::KEYSPACE_NAME_PREFIX) == 0;
+}
+
+sstring executor::table_name(const schema& s) {
+    return s.cf_name();
+}
+
+future<executor::request_return_type> executor::describe_table(client_state& client_state, tracing::trace_state_ptr trace_state, service_permit permit, rjson::value request) {
+    _stats.api_operations.describe_table++;
+    elogger.trace("Describing table {}", request);
+
+    schema_ptr schema = get_table(_proxy, request);
+
+    tracing::add_table_name(trace_state, schema->ks_name(), schema->cf_name());
+
+    rjson::value table_description = fill_table_description(schema, table_status::active, _proxy);
     rjson::value response = rjson::empty_object();
     rjson::add(response, "Table", std::move(table_description));
     elogger.trace("returning {}", response);
@@ -522,6 +546,9 @@ future<executor::request_return_type> executor::delete_table(client_state& clien
     std::string keyspace_name = executor::KEYSPACE_NAME_PREFIX + table_name;
     tracing::add_table_name(trace_state, keyspace_name, table_name);
     auto& p = _proxy.container();
+
+    schema_ptr schema = get_table(_proxy, request);
+    rjson::value table_description = fill_table_description(schema, table_status::deleting, _proxy);
 
     co_await _mm.container().invoke_on(0, [&] (service::migration_manager& mm) -> future<> {
         // FIXME: the following needs to be in a loop. If mm.announce() below
@@ -540,10 +567,6 @@ future<executor::request_return_type> executor::delete_table(client_state& clien
         co_await mm.announce(std::move(m), std::move(group0_guard));
     });
 
-    // FIXME: need more attributes?
-    rjson::value table_description = rjson::empty_object();
-    rjson::add(table_description, "TableName", rjson::from_string(table_name));
-    rjson::add(table_description, "TableStatus", "DELETING");
     rjson::value response = rjson::empty_object();
     rjson::add(response, "TableDescription", std::move(table_description));
     elogger.trace("returning {}", response);
@@ -1591,17 +1614,16 @@ static bool check_needs_read_before_write(const parsed::condition_expression& co
 
 // Fail the expression if it has unused attribute names or values. This is
 // how DynamoDB behaves, so we do too.
-static void verify_all_are_used(const rjson::value& req, const char* field,
-        const std::unordered_set<std::string>& used, const char* operation) {
-    const rjson::value* attribute_names = rjson::find(req, field);
-    if (!attribute_names) {
+static void verify_all_are_used(const rjson::value* field,
+        const std::unordered_set<std::string>& used, const char* field_name, const char* operation) {
+    if (!field) {
         return;
     }
-    for (auto it = attribute_names->MemberBegin(); it != attribute_names->MemberEnd(); ++it) {
+    for (auto it = field->MemberBegin(); it != field->MemberEnd(); ++it) {
         if (!used.contains(it->name.GetString())) {
             throw api_error::validation(
                 format("{} has spurious '{}', not used in {}",
-                       field, it->name.GetString(), operation));
+                    field_name, it->name.GetString(), operation));
         }
     }
 }
@@ -1628,8 +1650,8 @@ public:
             resolve_condition_expression(_condition_expression,
                     expression_attribute_names, expression_attribute_values,
                     used_attribute_names, used_attribute_values);
-            verify_all_are_used(_request, "ExpressionAttributeNames", used_attribute_names, "PutItem");
-            verify_all_are_used(_request, "ExpressionAttributeValues", used_attribute_values, "PutItem");
+            verify_all_are_used(expression_attribute_names, used_attribute_names,"ExpressionAttributeNames", "PutItem");
+            verify_all_are_used(expression_attribute_values, used_attribute_values,"ExpressionAttributeValues", "PutItem");
         } else {
             if (expression_attribute_names) {
                 throw api_error::validation("ExpressionAttributeNames cannot be used without ConditionExpression");
@@ -1713,8 +1735,8 @@ public:
             resolve_condition_expression(_condition_expression,
                     expression_attribute_names, expression_attribute_values,
                     used_attribute_names, used_attribute_values);
-            verify_all_are_used(_request, "ExpressionAttributeNames", used_attribute_names, "DeleteItem");
-            verify_all_are_used(_request, "ExpressionAttributeValues", used_attribute_values, "DeleteItem");
+            verify_all_are_used(expression_attribute_names, used_attribute_names,"ExpressionAttributeNames", "DeleteItem");
+            verify_all_are_used(expression_attribute_values, used_attribute_values, "ExpressionAttributeValues", "DeleteItem");
         } else {
             if (expression_attribute_names) {
                 throw api_error::validation("ExpressionAttributeNames cannot be used without ConditionExpression");
@@ -2357,21 +2379,22 @@ std::optional<rjson::value> executor::describe_single_item(schema_ptr schema,
     return item;
 }
 
-std::vector<rjson::value> executor::describe_multi_item(schema_ptr schema,
-        const query::partition_slice& slice,
-        const cql3::selection::selection& selection,
-        const query::result& query_result,
-        const std::optional<attrs_to_get>& attrs_to_get) {
-    cql3::selection::result_set_builder builder(selection, gc_clock::now());
-    query::result_view::consume(query_result, slice, cql3::selection::result_set_builder::visitor(builder, *schema, selection));
+future<std::vector<rjson::value>> executor::describe_multi_item(schema_ptr schema,
+        const query::partition_slice&& slice,
+        shared_ptr<cql3::selection::selection> selection,
+        foreign_ptr<lw_shared_ptr<query::result>> query_result,
+        shared_ptr<const std::optional<attrs_to_get>> attrs_to_get) {
+    cql3::selection::result_set_builder builder(*selection, gc_clock::now());
+    query::result_view::consume(*query_result, slice, cql3::selection::result_set_builder::visitor(builder, *schema, *selection));
     auto result_set = builder.build();
     std::vector<rjson::value> ret;
     for (auto& result_row : result_set->rows()) {
         rjson::value item = rjson::empty_object();
-        describe_single_item(selection, result_row, attrs_to_get, item);
+        describe_single_item(*selection, result_row, *attrs_to_get, item);
         ret.push_back(std::move(item));
+        co_await coroutine::maybe_yield();
     }
-    return ret;
+    co_return ret;
 }
 
 static bool check_needs_read_before_write(const parsed::value& v) {
@@ -2486,8 +2509,8 @@ update_item_operation::update_item_operation(service::storage_proxy& proxy, rjso
             expression_attribute_names, expression_attribute_values,
             used_attribute_names, used_attribute_values);
 
-    verify_all_are_used(_request, "ExpressionAttributeNames", used_attribute_names, "UpdateItem");
-    verify_all_are_used(_request, "ExpressionAttributeValues", used_attribute_values, "UpdateItem");
+    verify_all_are_used(expression_attribute_names, used_attribute_names, "ExpressionAttributeNames", "UpdateItem");
+    verify_all_are_used(expression_attribute_values, used_attribute_values, "ExpressionAttributeValues", "UpdateItem");
 
     // DynamoDB forbids having both old-style AttributeUpdates or Expected
     // and new-style UpdateExpression or ConditionExpression in the same request
@@ -3096,7 +3119,8 @@ future<executor::request_return_type> executor::get_item(client_state& client_st
 
     std::unordered_set<std::string> used_attribute_names;
     auto attrs_to_get = calculate_attrs_to_get(request, used_attribute_names);
-    verify_all_are_used(request, "ExpressionAttributeNames", used_attribute_names, "GetItem");
+    const rjson::value* expression_attribute_names = rjson::find(request, "ExpressionAttributeNames");
+    verify_all_are_used(expression_attribute_names, used_attribute_names, "ExpressionAttributeNames", "GetItem");
 
     return _proxy.query(schema, std::move(command), std::move(partition_ranges), cl,
             service::storage_proxy::coordinator_query_options(executor::default_timeout(), std::move(permit), client_state, trace_state)).then(
@@ -3207,7 +3231,8 @@ future<executor::request_return_type> executor::batch_get_item(client_state& cli
         rs.cl = get_read_consistency(it->value);
         std::unordered_set<std::string> used_attribute_names;
         rs.attrs_to_get = ::make_shared<const std::optional<attrs_to_get>>(calculate_attrs_to_get(it->value, used_attribute_names));
-        verify_all_are_used(request, "ExpressionAttributeNames", used_attribute_names, "GetItem");
+        const rjson::value* expression_attribute_names = rjson::find(it->value, "ExpressionAttributeNames");
+        verify_all_are_used(expression_attribute_names, used_attribute_names,"ExpressionAttributeNames", "GetItem");
         auto& keys = (it->value)["Keys"];
         for (rjson::value& key : keys.GetArray()) {
             rs.add(key);
@@ -3243,8 +3268,7 @@ future<executor::request_return_type> executor::batch_get_item(client_state& cli
                     service::storage_proxy::coordinator_query_options(executor::default_timeout(), permit, client_state, trace_state)).then(
                     [schema = rs.schema, partition_slice = std::move(partition_slice), selection = std::move(selection), attrs_to_get = rs.attrs_to_get] (service::storage_proxy::coordinator_query_result qr) mutable {
                 utils::get_local_injector().inject("alternator_batch_get_item", [] { throw std::runtime_error("batch_get_item injection"); });
-                std::vector<rjson::value> jsons = describe_multi_item(schema, partition_slice, *selection, *qr.query_result, *attrs_to_get);
-                return make_ready_future<std::vector<rjson::value>>(std::move(jsons));
+                return describe_multi_item(std::move(schema), std::move(partition_slice), std::move(selection), std::move(qr.query_result), std::move(attrs_to_get));
             });
             response_futures.push_back(std::move(f));
         }
@@ -3781,8 +3805,10 @@ future<executor::request_return_type> executor::scan(client_state& client_state,
     // optimized the filtering by modifying partition_ranges and/or
     // ck_bounds. We haven't done this optimization yet.
 
-    verify_all_are_used(request, "ExpressionAttributeNames", used_attribute_names, "Scan");
-    verify_all_are_used(request, "ExpressionAttributeValues", used_attribute_values, "Scan");
+    const rjson::value* expression_attribute_names = rjson::find(request, "ExpressionAttributeNames");
+    const rjson::value* expression_attribute_values = rjson::find(request, "ExpressionAttributeValues");
+    verify_all_are_used(expression_attribute_names, used_attribute_names, "ExpressionAttributeNames", "Scan");
+    verify_all_are_used(expression_attribute_values, used_attribute_values, "ExpressionAttributeValues", "Scan");
 
     return do_query(_proxy, schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl,
             std::move(filter), query::partition_slice::option_set(), client_state, _stats.cql_stats, trace_state, std::move(permit));
@@ -4223,13 +4249,17 @@ future<executor::request_return_type> executor::query(client_state& client_state
         throw api_error::validation("Query must have one of "
                 "KeyConditions or KeyConditionExpression");
     }
+
+    const rjson::value* expression_attribute_names = rjson::find(request, "ExpressionAttributeNames");
+    const rjson::value* expression_attribute_values = rjson::find(request, "ExpressionAttributeValues");
+
     // exactly one of key_conditions or key_condition_expression
     auto [partition_ranges, ck_bounds] = key_conditions
                 ? calculate_bounds_conditions(schema, *key_conditions)
                 : calculate_bounds_condition_expression(schema, *key_condition_expression,
-                        rjson::find(request, "ExpressionAttributeValues"),
+                        expression_attribute_values,
                         used_attribute_values,
-                        rjson::find(request, "ExpressionAttributeNames"),
+                        expression_attribute_names,
                         used_attribute_names);
 
     filter filter(request, filter::request_type::QUERY,
@@ -4256,8 +4286,8 @@ future<executor::request_return_type> executor::query(client_state& client_state
     select_type select = parse_select(request, table_type);
 
     auto attrs_to_get = calculate_attrs_to_get(request, used_attribute_names, select);
-    verify_all_are_used(request, "ExpressionAttributeValues", used_attribute_values, "Query");
-    verify_all_are_used(request, "ExpressionAttributeNames", used_attribute_names, "Query");
+    verify_all_are_used(expression_attribute_names, used_attribute_names, "ExpressionAttributeNames", "Query");
+    verify_all_are_used(expression_attribute_values, used_attribute_values, "ExpressionAttributeValues", "Query");
     query::partition_slice::option_set opts;
     opts.set_if<query::partition_slice::option::reversed>(!forward);
     return do_query(_proxy, schema, exclusive_start_key, std::move(partition_ranges), std::move(ck_bounds), std::move(attrs_to_get), limit, cl,

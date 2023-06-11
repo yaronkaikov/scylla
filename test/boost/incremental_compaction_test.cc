@@ -76,7 +76,7 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
         auto& cm = cf.get_compaction_manager();
         auto compact = [&, s] (std::vector<shared_sstable> all, auto replacer) -> std::vector<shared_sstable> {
-            auto desc = sstables::compaction_descriptor(std::move(all), service::get_local_compaction_priority(), 1, 0);
+            auto desc = sstables::compaction_descriptor(std::move(all), 1, 0);
             desc.enable_garbage_collection(cf->get_sstable_set());
             return compact_sstables(cm, std::move(desc), cf.as_table_state(), sst_gen, replacer).get0().new_sstables;
         };
@@ -342,7 +342,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
         run.insert(sst);
         BOOST_REQUIRE(std::fabs(run.estimate_droppable_tombstone_ratio(gc_before) - expired) <= 0.1);
 
-        auto cd = sstables::compaction_descriptor({ sst }, default_priority_class());
+        auto cd = sstables::compaction_descriptor({ sst });
         cd.enable_garbage_collection(cf->get_sstable_set());
         auto info = compact_sstables(cf.get_compaction_manager(), std::move(cd), cf.as_table_state(), creator).get0();
         auto uncompacted_size = sst->data_size();
@@ -429,7 +429,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
                 sstables.push_back(std::move(sst));
             }
 
-            auto ret = cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict);
+            auto ret = cs.get_reshaping_job(sstables, s, reshape_mode::strict);
             BOOST_REQUIRE(ret.sstables.size() == s->max_compaction_threshold());
             BOOST_REQUIRE(ret.max_sstable_bytes == target_sstable_size_in_mb*1024*1024);
         }
@@ -444,7 +444,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
                 sstables.push_back(std::move(sst));
             }
 
-            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == disjoint_sstable_count);
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, reshape_mode::strict).sstables.size() == disjoint_sstable_count);
         }
 
         {
@@ -459,7 +459,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
                 sstables.push_back(std::move(sst));
             }
 
-            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == 0);
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, reshape_mode::strict).sstables.size() == 0);
         }
 
         {
@@ -472,7 +472,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
                 sstables.push_back(std::move(sst));
             }
 
-            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, default_priority_class(), reshape_mode::strict).sstables.size() == uint64_t(s->max_compaction_threshold()));
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, reshape_mode::strict).sstables.size() == uint64_t(s->max_compaction_threshold()));
         }
     });
 }

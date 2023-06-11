@@ -320,6 +320,8 @@ private:
     std::unordered_map<sstring, size_t> _dynamic_tenants_to_client_idx;
     qos::service_level_controller& _sl_controller;
 
+    future<> shutdown_tls_server();
+    future<> shutdown_nontls_server();
     future<> stop_tls_server();
     future<> stop_nontls_server();
     future<> stop_client();

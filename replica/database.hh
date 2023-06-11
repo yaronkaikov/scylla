@@ -41,7 +41,6 @@
 #include "compaction/compaction_strategy.hh"
 #include "utils/estimated_histogram.hh"
 #include <seastar/core/metrics_registration.hh>
-#include "tracing/trace_state.hh"
 #include "db/view/view_stats.hh"
 #include "db/view/view_update_backlog.hh"
 #include "db/view/row_locking.hh"
@@ -76,6 +75,7 @@ class mutation;
 class frozen_mutation;
 class reconcilable_result;
 
+namespace tracing { class trace_state_ptr; }
 namespace s3 { struct endpoint_config; }
 
 namespace service {
@@ -595,7 +595,6 @@ private:
                                         lw_shared_ptr<sstables::sstable_set> sstables,
                                         const dht::partition_range& range,
                                         const query::partition_slice& slice,
-                                        const io_priority_class& pc,
                                         tracing::trace_state_ptr trace_state,
                                         streamed_mutation::forwarding fwd,
                                         mutation_reader::forwarding fwd_mr) const;
@@ -619,7 +618,6 @@ private:
              const reader_permit& permit,
              const dht::partition_range& range,
              const query::partition_slice& slice,
-             const io_priority_class& pc,
              const tracing::trace_state_ptr& trace_state,
              streamed_mutation::forwarding fwd,
              mutation_reader::forwarding fwd_mr,
@@ -669,13 +667,10 @@ public:
     // Note: for data queries use query() instead.
     // The 'range' parameter must be live as long as the reader is used.
     // Mutations returned by the reader will all have given schema.
-    // If I/O needs to be issued to read anything in the specified range, the operations
-    // will be scheduled under the priority class given by pc.
     flat_mutation_reader_v2 make_reader_v2(schema_ptr schema,
             reader_permit permit,
             const dht::partition_range& range,
             const query::partition_slice& slice,
-            const io_priority_class& pc = default_priority_class(),
             tracing::trace_state_ptr trace_state = nullptr,
             streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes) const;
@@ -684,7 +679,6 @@ public:
             std::vector<sstables::shared_sstable>& sst,
             const dht::partition_range& range,
             const query::partition_slice& slice,
-            const io_priority_class& pc = default_priority_class(),
             tracing::trace_state_ptr trace_state = nullptr,
             streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
             mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes) const;
@@ -900,7 +894,7 @@ public:
      * Return a set of the sstables names that contain the given
      * partition key in nodetool format
      */
-    future<std::unordered_set<sstring>> get_sstables_by_partition_key(const sstring& key) const;
+    future<std::unordered_set<sstables::shared_sstable>> get_sstables_by_partition_key(const sstring& key) const;
 
     const sstables::sstable_set& get_sstable_set() const;
     lw_shared_ptr<const sstable_list> get_sstables() const;
@@ -1083,7 +1077,7 @@ public:
 
 private:
     future<row_locker::lock_holder> do_push_view_replica_updates(shared_ptr<db::view::view_update_generator> gen, schema_ptr s, mutation m, db::timeout_clock::time_point timeout, mutation_source source,
-            tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem, const io_priority_class& io_priority, query::partition_slice::option_set custom_opts) const;
+            tracing::trace_state_ptr tr_state, reader_concurrency_semaphore& sem, query::partition_slice::option_set custom_opts) const;
     std::vector<view_ptr> affected_views(shared_ptr<db::view::view_update_generator> gen, const schema_ptr& base, const mutation& update) const;
     future<> generate_and_propagate_view_updates(shared_ptr<db::view::view_update_generator> gen, const schema_ptr& base,
             reader_permit permit,
@@ -1140,9 +1134,6 @@ public:
     compaction::table_state& as_table_state() const noexcept;
     // Safely iterate through table states, while performing async operations on them.
     future<> parallel_foreach_table_state(std::function<future<>(compaction::table_state&)> action);
-
-    // Add sst to or remove it from the sstables_requiring_cleanup set.
-    bool update_sstable_cleanup_state(const sstables::shared_sstable& sst, const dht::token_range_vector& sorted_owned_ranges);
 
     // Uncoditionally erase sst from `sstables_requiring_cleanup`
     // Returns true iff sst was found and erased.
