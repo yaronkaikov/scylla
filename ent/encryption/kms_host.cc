@@ -22,6 +22,7 @@
 #include <boost/beast/http.hpp>
 
 #include <fmt/chrono.h>
+#include <fmt/ranges.h>
 
 #include "kms_host.hh"
 #include "encryption.hh"
@@ -135,30 +136,35 @@ public:
     ~impl() = default;
 
     future<> init();
-    future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&);
-    future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const key_info&);
+    const host_options& options() const {
+        return _options;
+    }
 
-    static const inline key_info master_key_info = { "<none>", 0 };
+    future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, std::optional<std::string> = {});
+    future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const key_info&);
 private:
     class httpclient;
     using key_and_id_type = std::tuple<shared_ptr<symmetric_key>, id_type>;
+    using master_and_info_type = std::tuple<std::string, key_info>;
 
-    struct key_info_hash {
-        size_t operator()(const key_info& i) const {
-            return utils::tuple_hash()(std::tie(i.alg, i.len));
+    struct master_info_hash {
+        size_t operator()(const master_and_info_type& mi) const {
+            auto& master = std::get<0>(mi);
+            auto& info = std::get<1>(mi);
+            return utils::tuple_hash()(std::tie(master, info.alg, info.len));
         }
     };
 
     future<rjson::value> post(std::string_view, const rjson::value&);
 
-    future<key_and_id_type> create_key(const key_info&);
+    future<key_and_id_type> create_key(const master_and_info_type&);
     future<bytes> find_key(const id_type&);
 
     encryption_context& _ctxt;
     std::string _name;
     host_options _options;
-    utils::loading_cache<key_info, key_and_id_type, 2, utils::loading_cache_reload_enabled::yes,
-        utils::simple_entry_size<key_and_id_type>, key_info_hash> _attr_cache;
+    utils::loading_cache<master_and_info_type, key_and_id_type, 2, utils::loading_cache_reload_enabled::yes,
+        utils::simple_entry_size<key_and_id_type>, master_info_hash> _attr_cache;
     utils::loading_cache<id_type, bytes, 2, utils::loading_cache_reload_enabled::yes, 
         utils::simple_entry_size<bytes>> _id_cache;
     shared_ptr<seastar::tls::certificate_credentials> _creds;
@@ -322,8 +328,13 @@ void encryption::kms_host::impl::httpclient::target(std::string_view target) {
     _req.target(std::string(target));
 }
 
-future<std::tuple<shared_ptr<encryption::symmetric_key>, encryption::kms_host::id_type>> encryption::kms_host::impl::get_or_create_key(const key_info& info) {
-    return _attr_cache.get(info);
+future<std::tuple<shared_ptr<encryption::symmetric_key>, encryption::kms_host::id_type>> encryption::kms_host::impl::get_or_create_key(const key_info& info, std::optional<std::string> master_key) {
+    auto master = master_key.value_or(_options.master_key);
+    auto key = std::make_tuple(master, info);
+    if (master.empty()) {
+        throw std::invalid_argument("No master key set in kms host config or encryption attributes");
+    }
+    co_return co_await _attr_cache.get(key);
 }
 
 future<shared_ptr<encryption::symmetric_key>> encryption::kms_host::impl::get_key_by_id(const id_type& id, const key_info& info) {
@@ -646,7 +657,27 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
     co_return body;
 }
 
-future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::create_key(const key_info& info) {
+future<> encryption::kms_host::impl::init() {
+    if (_initialized) {
+        co_return;
+    }
+
+    if (!_options.master_key.empty()) {
+        kms_log.debug("Looking up master key");
+        auto query = rjson::empty_object();
+        rjson::add(query, "KeyId", _options.master_key);
+        auto response = co_await post("DescribeKey", query);
+        kms_log.debug("Master key exists");
+    } else {
+        kms_log.info("No default master key configured. Not verifying.");
+    }
+    _initialized = true;
+}
+
+future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::create_key(const master_and_info_type& minfo) {
+    auto& master_key = std::get<std::string>(minfo);
+    auto& info = std::get<key_info>(minfo);
+
     /**
      * AWS KMS does _not_ allow us to actually have "named keys" that can be used externally,
      * i.e. exported to us, here, for bulk encryption.
@@ -685,9 +716,9 @@ future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::
 
     // avoid creating too many keys and too many calls. If we are not shard 0, delegate there.
     if (this_shard_id() != 0) {
-        auto [data, id] = co_await smp::submit_to(0, [this, info]() -> future<std::tuple<bytes, id_type>> {
+        auto [data, id] = co_await smp::submit_to(0, [this, info, master_key]() -> future<std::tuple<bytes, id_type>> {
             auto host = _ctxt.get_kms_host(_name);
-            auto [k, id] = co_await host->get_or_create_key(info);
+            auto [k, id] = co_await host->_impl->get_or_create_key(info, master_key);
             co_return std::make_tuple(k != nullptr ? k->key() : bytes{}, id);
         });
         co_return key_and_id_type{ 
@@ -696,31 +727,7 @@ future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::
         };
     }
 
-    // we use a special (illegal) info object to signal we want to find master 
-    // key
-    if (&info == &master_key_info) {
-        kms_log.debug("Looking up master key");
-
-        auto query = rjson::empty_object();
-        rjson::add(query, "KeyId", _options.master_key);
-        auto response = co_await post("DescribeKey", query);
-        kms_log.debug("Master key exists");
-
-        _initialized = true;
-
-        co_return key_and_id_type{
-            nullptr, // no key
-            bytes(_options.master_key.begin(), _options.master_key.end())
-        };
-    }
-
-    // before getting any "real" key, we must always ensure we 
-    // have an existing master
-    if (!_initialized) {
-        co_await get_or_create_key(master_key_info);
-    }
-
-    // normal. note: since external keys are _not_ stored,
+    // note: since external keys are _not_ stored,
     // there is nothing we can "look up" or anything. Always 
     // new key here.
 
@@ -728,7 +735,7 @@ future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::
 
     auto query = rjson::empty_object();
 
-    rjson::add(query, "KeyId", std::string(_options.master_key.begin(), _options.master_key.end()));
+    rjson::add(query, "KeyId", std::string(master_key.begin(), master_key.end()));
     rjson::add(query, "NumberOfBytes", info.len/8);
 
     auto response = co_await post("GenerateDataKey", query);
@@ -788,14 +795,6 @@ encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name
         host_options opts;
         map_wrapper<std::unordered_map<sstring, sstring>> m(map);
 
-        auto get_or_error = [&](auto& what, auto& error) {
-            try {
-                return m(what).value();
-            } catch (std::bad_optional_access&) {
-                throw std::invalid_argument(format("No {} specified", error));
-            }
-        };
-
         opts.aws_access_key_id = m("aws_access_key_id").value_or("");
         opts.aws_secret_access_key = m("aws_secret_access_key").value_or("");
         opts.aws_region = m("aws_region").value_or("");
@@ -806,7 +805,7 @@ encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name
         opts.host = m("host").value_or("");
         opts.port = std::stoi(m("port").value_or("0"));
 
-        opts.master_key = get_or_error("master_key", "Master Key");
+        opts.master_key = m("master_key").value_or("");
         opts.keyfile = m("keyfile").value_or("");
         opts.truststore = m("truststore").value_or("");
         opts.priority_string = m("priority_string").value_or("");
@@ -818,12 +817,15 @@ encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name
 encryption::kms_host::~kms_host() = default;
 
 future<> encryption::kms_host::init() {
-    // precreate master key
-    co_await get_or_create_key(impl::master_key_info);
+    return _impl->init();
 }
 
-future<std::tuple<shared_ptr<encryption::symmetric_key>, encryption::kms_host::id_type>> encryption::kms_host::get_or_create_key(const key_info& info) {
-    return _impl->get_or_create_key(info);
+const encryption::kms_host::host_options& encryption::kms_host::options() const {
+    return _impl->options();
+}
+
+future<std::tuple<shared_ptr<encryption::symmetric_key>, encryption::kms_host::id_type>> encryption::kms_host::get_or_create_key(const key_info& info, std::optional<std::string> master_key) {
+    return _impl->get_or_create_key(info, master_key);
 }
 
 future<shared_ptr<encryption::symmetric_key>> encryption::kms_host::get_key_by_id(const id_type& id, const key_info& info) {

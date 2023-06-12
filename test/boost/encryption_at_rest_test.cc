@@ -10,6 +10,7 @@
 #include <boost/test/unit_test.hpp>
 #include <stdint.h>
 #include <random>
+#include <regex>
 
 #include <seastar/core/future-util.hh>
 #include <seastar/core/seastar.hh>
@@ -29,6 +30,7 @@
 #include "db/config.hh"
 #include "db/extensions.hh"
 #include "init.hh"
+#include "sstables/sstables.hh"
 
 using namespace encryption;
 namespace fs = std::filesystem;
@@ -71,6 +73,27 @@ static future<> test_provider(const std::string& options, const tmpdir& tmp, con
 
         co_await do_with_cql_env_thread([&] (cql_test_env& env) {
             require_rows(env, "select * from ks.t", {{utf8_type->decompose(pk), utf8_type->decompose(v)}});
+
+            // check that all sstables have the defined provider class (i.e. are encrypted using correct optons)
+            if (options.find("'key_provider'") != std::string::npos) {
+                static std::regex ex(R"foo('key_provider'\s*:\s*'(\w+)')foo");
+
+                std::smatch m;
+                BOOST_REQUIRE(std::regex_search(options.begin(), options.end(), m, ex));
+                auto provider = m[1].str();
+
+                env.db().invoke_on_all([&](replica::database& db) {
+                    auto& cf = db.find_column_family("ks", "t");
+                    auto sstables = cf.get_sstables_including_compacted_undeleted();
+
+                    if (sstables) {
+                        for (auto& t : *sstables) {
+                            auto sst_provider = encryption::encryption_provider(*t);
+                            BOOST_REQUIRE_EQUAL(provider, sst_provider);
+                        }
+                    }
+                }).get0();
+            }
         }, cfg, {}, cql_test_init_configurables{ *ext });
     }
 }
@@ -138,23 +161,23 @@ SEASTAR_TEST_CASE(test_kmip_provider) {
 
 /*
 Simple test of KMS provider. Still has some caveats:
-    
+
     1.) Uses aws CLI credentials for auth. I.e. you need to have a valid
         ~/.aws/credentials for the user running the test.
     2.) I can't figure out a good way to set up a key "everyone" can access. So user needs
         to have read/encrypt access to the key alias (default "alias/kms_encryption_test")
         in the scylla AWS account.
-    
+
     A "better" solution might be to create dummmy user only for KMS testing with only access
     to a single key, and no other priviledges. But that seems dangerous as well.
-    
+
     For this reason, this test is parameterized with env vars:
     * ENABLE_KMS_TEST - set to non-zero (0)/false to run
     * KMS_KEY_ALIAS - default "alias/kms_encryption_test" - set to key alias you have access to.
     * KMS_AWS_REGION - default us-east-1 - set to whatever region your key is in.
 
 */
-SEASTAR_TEST_CASE(test_kms_provider) {
+static future<> kms_test_helper(std::function<future<>(const tmpdir&, std::string_view, std::string_view, std::string_view)> f) {
     auto do_kms_test = std::getenv("ENABLE_KMS_TEST");
 
     if (do_kms_test == nullptr || !strcasecmp(do_kms_test, "0") || !strcasecmp(do_kms_test, "false")) {
@@ -188,19 +211,53 @@ SEASTAR_TEST_CASE(test_kms_provider) {
 
     tmpdir tmp;
 
-    /**
-     * Note: NOT including any auth stuff here. The provider will pick up AWS credentials
-     * from ~/.aws/credentials
-     */
-    auto yaml = fmt::format(R"foo(
-        kms_hosts:
-            kms_test:
-                master_key: {0}
-                aws_region: {1}
-                aws_profile: {2}
-                )foo"
-        , kms_key_alias, kms_aws_region, kms_aws_profile
-    );
+    co_await f(tmp, kms_key_alias, kms_aws_region, kms_aws_profile);
+}
 
-    co_await test_provider("'key_provider': 'KmsKeyProviderFactory', 'kms_host': 'kms_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+SEASTAR_TEST_CASE(test_kms_provider) {
+    co_await kms_test_helper([](const tmpdir& tmp, std::string_view kms_key_alias, std::string_view kms_aws_region, std::string_view kms_aws_profile) -> future<> {
+        /**
+         * Note: NOT including any auth stuff here. The provider will pick up AWS credentials
+         * from ~/.aws/credentials
+         */
+        auto yaml = fmt::format(R"foo(
+            kms_hosts:
+                kms_test:
+                    master_key: {0}
+                    aws_region: {1}
+                    aws_profile: {2}
+                    )foo"
+            , kms_key_alias, kms_aws_region, kms_aws_profile
+        );
+
+        co_await test_provider("'key_provider': 'KmsKeyProviderFactory', 'kms_host': 'kms_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+    });
+}
+
+SEASTAR_TEST_CASE(test_kms_provider_with_master_key_in_cf) {
+    co_await kms_test_helper([](const tmpdir& tmp, std::string_view kms_key_alias, std::string_view kms_aws_region, std::string_view kms_aws_profile) -> future<> {
+        /**
+         * Note: NOT including any auth stuff here. The provider will pick up AWS credentials
+         * from ~/.aws/credentials
+         */
+        auto yaml = fmt::format(R"foo(
+            kms_hosts:
+                kms_test:
+                    aws_region: {1}
+                    aws_profile: {2}
+                    )foo"
+            , kms_key_alias, kms_aws_region, kms_aws_profile
+        );
+
+        // should fail
+        BOOST_REQUIRE_THROW(
+            co_await test_provider("'key_provider': 'KmsKeyProviderFactory', 'kms_host': 'kms_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml)
+            , std::exception
+        );
+
+        // should be ok
+        co_await test_provider(fmt::format("'key_provider': 'KmsKeyProviderFactory', 'kms_host': 'kms_test', 'master_key': '{}', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", kms_key_alias)
+            , tmp, yaml
+            );
+    });
 }

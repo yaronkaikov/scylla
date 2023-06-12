@@ -38,6 +38,10 @@ class storage_service;
 class migration_manager;
 }
 
+namespace sstables {
+    class sstable;
+}
+
 namespace encryption {
 inline const sstring KEY_PROVIDER = "key_provider";
 inline const sstring SECRET_KEY_PROVIDER_FACTORY_CLASS = "secret_key_provider_factory_class";
@@ -173,6 +177,9 @@ public:
 
 future<seastar::shared_ptr<encryption_context>>
 register_extensions(const db::config&, const encryption_config&, db::extensions&, const ::service_set&);
+
+// for testing
+std::string encryption_provider(const sstables::sstable&);
 
 }
 

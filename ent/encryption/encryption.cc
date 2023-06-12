@@ -655,6 +655,26 @@ public:
     }
 };
 
+std::string encryption_provider(const sstables::sstable& sst) {
+    auto& sc = sst.get_shared_components();
+    if (!sc.scylla_metadata) {
+        return {};
+    }
+    auto* exta  = sc.scylla_metadata->get_extension_attributes();
+    if (!exta) {
+        return {};
+    }
+
+    auto i = exta->map.find(encryption_attribute_ds);
+    if (i == exta->map.end()) {
+        return {};
+    }
+    auto options = encryption_schema_extension::parse_options(i->second.value);
+    opt_wrapper opts(options);
+
+    return opts(KEY_PROVIDER).value_or(std::string{});
+}
+
 namespace bfs = std::filesystem;
 
 class encryption_commitlog_file_extension : public db::commitlog_file_extension {
