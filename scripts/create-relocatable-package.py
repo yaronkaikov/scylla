@@ -160,6 +160,8 @@ for exe in executables:
 
 # manually add libthread_db for debugging thread
 libs.update({'libthread_db.so.1': os.path.realpath('/lib64/libthread_db.so')})
+# manually add p11-kit-trust.so since it will dynamically load
+libs.update({'pkcs11/p11-kit-trust.so': '/lib64/pkcs11/p11-kit-trust.so'})
 
 ld_so = libs['ld.so']
 
@@ -184,6 +186,8 @@ os.makedirs(f'build/{SCYLLA_DIR}')
 with open(f'build/{SCYLLA_DIR}/.relocatable_package_version', 'w') as f:
     f.write('3.0\n')
 ar.add(f'build/{SCYLLA_DIR}/.relocatable_package_version', arcname='.relocatable_package_version')
+os.symlink('./pkcs11/p11-kit-trust.so', f'build/{SCYLLA_DIR}/libnssckbi.so')
+ar.reloc_add(f'build/{SCYLLA_DIR}/libnssckbi.so', arcname='libreloc/libnssckbi.so')
 
 for exe in executables_scylla:
     basename = os.path.basename(exe)

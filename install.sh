@@ -30,6 +30,7 @@ Options:
   --supervisor             enable supervisor to manage scylla processes
   --supervisor-log-to-stdout logging to stdout on supervisor
   --without-systemd         skip installing systemd units
+  --p11-trust-paths         specify trust path for p11-kit
   --help                   this helpful message
 EOF
     exit 1
@@ -71,6 +72,7 @@ supervisor=false
 supervisor_log_to_stdout=false
 without_systemd=false
 skip_systemd_check=false
+p11_trust_paths=
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -120,6 +122,10 @@ while [ $# -gt 0 ]; do
             without_systemd=true
             skip_systemd_check=true
             shift 1
+            ;;
+        "--p11-trust-paths")
+            p11_trust_paths="$2"
+            shift 2
             ;;
         "--help")
             shift 1
@@ -220,6 +226,17 @@ check_usermode_support() {
 
 . /etc/os-release
 
+is_redhat_variant() {
+    is_redhat=0
+    for i in $ID $ID_LIKE; do
+        if [ "$i" = "rhel" -o "$i" = "fedora" -o "$i" = "centos" ]; then
+            is_redhat=1
+            break
+        fi
+    done
+    [ $is_redhat -eq 1 ]
+}
+
 is_debian_variant() {
     [ "$ID_LIKE" = "debian" -o "$ID" = "debian" ]
 }
@@ -259,6 +276,30 @@ cd "$(dirname "$0")"
 
 product="$(cat ./SCYLLA-PRODUCT-FILE)"
 
+if [ -z "$p11_trust_paths" ]; then
+    # our package builder is cross-distro, so we cannot detect distro by os-release
+    if $packaging; then
+        echo "Please specify --p11-trust-paths."
+        echo "The path can be get by following command:"
+        echo "  pkg-config --variable p11_trust_paths p11-kit-1"
+        echo
+        print_usage
+    else
+        # for offline installer users we provide default p11-trust-paths
+        if is_redhat_variant; then
+            p11_trust_paths=/etc/pki/ca-trust/source:/usr/share/pki/ca-trust-source
+        elif is_debian_variant; then
+            p11_trust_paths=/etc/ssl/certs/ca-certificates.crt
+        else
+            echo "Please specify --p11-trust-paths."
+            echo "The path can be get by following command:"
+            echo "  pkg-config --variable p11_trust_paths p11-kit-1"
+            echo
+            print_usage
+        fi
+    fi
+fi
+
 if [ -z "$prefix" ]; then
     if $nonroot; then
         prefix=~/scylladb
@@ -291,6 +332,7 @@ if ! $nonroot; then
     rsysconfdir=$(realpath -m "$root/$sysconfdir")
     rusr=$(realpath -m "$root/usr")
     rsystemd=$(realpath -m "$rusr/lib/systemd/system")
+    rshare="$rprefix/share"
     rdoc="$rprefix/share/doc"
     rdata=$(realpath -m "$root/var/lib/scylla")
     rhkdata=$(realpath -m "$root/var/lib/scylla-housekeeping")
@@ -298,6 +340,7 @@ else
     retc="$rprefix/etc"
     rsysconfdir="$rprefix/$sysconfdir"
     rsystemd="$HOME/.config/systemd/user"
+    rshare="$rprefix/share"
     rdoc="$rprefix/share/doc"
     rdata="$rprefix"
 fi
@@ -368,7 +411,7 @@ for file in dist/common/scylla.d/*.conf; do
     installconfig 644 "$file" "$retc"/scylla.d
 done
 
-install -d -m755 "$retc"/scylla "$rprefix/bin" "$rprefix/libexec" "$rprefix/libreloc" "$rprefix/libreloc/fipscheck" "$rprefix/scripts" "$rprefix/bin"
+install -d -m755 "$retc"/scylla "$rprefix/bin" "$rprefix/libexec" "$rprefix/libreloc" "$rprefix/libreloc/fipscheck" "$rprefix/libreloc/pkcs11" "$rprefix/scripts" "$rprefix/bin"
 if ! $without_systemd; then
     install -m644 dist/common/systemd/scylla-fstrim.service -Dt "$rsystemd"
     install -m644 dist/common/systemd/scylla-housekeeping-daily.service -Dt "$rsystemd"
@@ -385,6 +428,10 @@ done
 for i in $(find libreloc/fipscheck/ -maxdepth 1 -type f); do
     install -m755 "$i" -Dt "$rprefix/libreloc/fipscheck"
 done
+for i in $(find libreloc/pkcs11/ -maxdepth 1 -type f); do
+    install -m755 "$i" -Dt "$rprefix/libreloc/pkcs11"
+done
+
 LIBGNUTLS_SO=$(basename libreloc/libgnutls.so.*)
 LIBGNUTLS_HMAC=$(cat libreloc/.libgnutls.so.*.hmac)
 LIBNETTLE_SO=$(basename libreloc/libnettle.so.*)
@@ -409,7 +456,6 @@ hmac = $LIBHOGWEED_HMAC
 path = "$prefix"/libreloc/$LIBGMP_SO
 hmac = $LIBGMP_HMAC
 EOS
-
 # some files in libexec are symlinks, which "install" dereferences
 # use cp -P for the symlinks instead.
 install -m755 libexec/* -Dt "$rprefix/libexec"
@@ -450,6 +496,16 @@ SBINFILES+=" $(cd seastar/scripts; ls seastar-cpu-map.sh)"
 
 cat << EOS > "$rprefix"/scripts/scylla_product.py
 PRODUCT="$product"
+EOS
+
+install -d -m755 "$rshare"/p11-kit/modules
+cat << EOS > "$rshare"/p11-kit/modules/p11-kit-trust.module
+module: $prefix/libreloc/pkcs11/p11-kit-trust.so
+priority: 1
+trust-policy: yes
+x-trust-lookup: pkcs11:library-description=PKCS%2311%20Kit%20Trust%20Module
+disable-in: p11-kit-proxy
+x-init-reserved: paths=$p11_trust_paths
 EOS
 
 if ! $nonroot && ! $without_systemd; then

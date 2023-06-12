@@ -105,6 +105,11 @@
 
 #include <boost/algorithm/string/join.hpp>
 
+#define P11_KIT_FUTURE_UNSTABLE_API
+extern "C" {
+#include <p11-kit/p11-kit.h>
+}
+
 namespace fs = std::filesystem;
 
 seastar::metrics::metric_groups app_metrics;
@@ -608,6 +613,14 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     // Seastar-specific warnings that may occur when running the app
     auto parsed_opts = bpo::command_line_parser(ac, av).options(app.get_options_description()).allow_unregistered().run();
     print_starting_message(ac, av, parsed_opts);
+
+    // We have to override p11-kit config path before p11-kit initialization.
+    // And the initialization will invoke on seastar initalization, so it has to
+    // be before app.run()
+    auto scylla_path = fs::read_symlink(fs::path("/proc/self/exe"));
+    auto p11_modules = scylla_path.parent_path().parent_path().append("share/p11-kit/modules");
+    auto p11_modules_str = p11_modules.string<char>();
+    ::p11_kit_override_system_files(NULL, NULL, p11_modules_str.c_str(), NULL, NULL);
 
     sharded<locator::shared_token_metadata> token_metadata;
     sharded<locator::effective_replication_map_factory> erm_factory;
