@@ -40,6 +40,8 @@ public:
         std::string aws_profile;
         std::string aws_assume_role_arn;
 
+        bool        aws_use_ec2_credentials;
+
         // key to use for keys
         std::string master_key;
         // tls. if unspeced, use system for https

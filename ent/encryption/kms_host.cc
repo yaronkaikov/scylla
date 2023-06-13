@@ -88,6 +88,17 @@ namespace beast = boost::beast;     // from <boost/beast.hpp>
 namespace bhttp = beast::http;       // from <boost/beast/http.hpp>
 namespace shttp = seastar::http;
 
+static std::string to_lower(std::string_view s) {
+    std::string tmp(s.size(), 0);
+    std::transform(s.begin(), s.end(), tmp.begin(), ::tolower);
+    return tmp;
+}
+
+static bool is_true(std::string_view s) {
+    auto tmp = to_lower(s);
+    return tmp == "true" || tmp == "1" || tmp == "yes" || tmp == "on";
+}
+
 class encryption::kms_host::impl {
 public:
     // set a rather long expiry. normal KMS policies are 365-day rotation of keys.
@@ -217,13 +228,12 @@ public:
     httpclient(std::string host, uint16_t port, shared_ptr<seastar::tls::certificate_credentials> = {});
 
     httpclient& add_header(std::string_view key, std::string_view value);
+    void clear_headers();
 
     using result_type = kms_host::impl::result_type;
     using request_type = bhttp::request<bhttp::string_body>;
 
     future<result_type> send();
-    future<result_type> post();
-    future<result_type> get();
 
     using method_type = bhttp::verb;
 
@@ -254,6 +264,10 @@ encryption::kms_host::impl::httpclient::httpclient(std::string host, uint16_t po
 encryption::kms_host::impl::httpclient& encryption::kms_host::impl::httpclient::add_header(std::string_view key, std::string_view value) {
     _req.set(beast::string_view(key.data(), key.size()), beast::string_view(value.data(), value.size()));
     return *this;
+}
+
+void encryption::kms_host::impl::httpclient::clear_headers() {
+    _req.clear();
 }
 
 future<encryption::kms_host::impl::httpclient::result_type> encryption::kms_host::impl::httpclient::send() {
@@ -432,15 +446,91 @@ struct encryption::kms_host::impl::aws_query {
 };
 
 future<rjson::value> encryption::kms_host::impl::post(std::string_view target, std::string_view aws_assume_role_arn, const rjson::value& query) {
+    static auto get_response_error = [](const result_type& res) -> std::string {
+        switch (res.result()) {
+        case bhttp::status::unauthorized: case bhttp::status::forbidden: return "AccessDenied";
+        case bhttp::status::not_found: return "ResourceNotFound";
+        case bhttp::status::too_many_requests: return "SlowDown";
+        case bhttp::status::internal_server_error: return "InternalError";
+        case bhttp::status::service_unavailable: return "ServiceUnavailable";
+        case bhttp::status::request_timeout: case bhttp::status::gateway_timeout:
+        case bhttp::status::network_connect_timeout_error:
+            return "RequestTimeout";
+        default:
+            return format("{}", res.result());
+        }
+    };
+
+    static auto query_ec2_meta = [](std::string_view target, std::string token = {}) -> future<std::tuple<httpclient::result_type, std::string>> {
+        static auto get_env_def = [](std::string_view var, std::string_view def) {
+            auto val = std::getenv(var.data());
+            return val ? std::string_view(val) : def;
+        };
+
+        static const std::string ec2_meta_host(get_env_def("AWS_EC2_METADATA_ADDRESS", "169.254.169.254"));
+        static const int ec2_meta_port = std::stoi(get_env_def("AWS_EC2_METADATA_PORT", "80").data());
+
+        kms_log.debug("Query ec2 metadata");
+
+        httpclient client(ec2_meta_host, ec2_meta_port);
+
+        static constexpr auto X_AWS_EC2_METADATA_TOKEN_TTL_SECONDS = "X-aws-ec2-metadata-token-ttl-seconds";
+        static constexpr auto X_AWS_EC2_METADATA_TOKEN = "X-aws-ec2-metadata-token";
+        static constexpr const char* HOST_HEADER = "host";
+
+        static auto logged_send = [](httpclient& client) -> future<result_type> {
+            kms_log.trace("Request: {}", client.request());
+            auto res = co_await client.send();
+            kms_log.trace("Result: status={}, response={}", res.result_int(), res);
+            if (res.result() != bhttp::status::ok) {
+                throw kms_error(get_response_error(res), "EC2 metadata query");
+            }
+            co_return res;
+        };
+
+        client.add_header(HOST_HEADER, ec2_meta_host);
+
+        if (token.empty()) {
+            client.add_header(X_AWS_EC2_METADATA_TOKEN_TTL_SECONDS, "21600");
+            client.method(httpclient::method_type::put);
+            client.target("/latest/api/token");
+
+
+            auto res = co_await logged_send(client);
+
+            if (res.result() != bhttp::status::ok) {
+                throw kms_error(get_response_error(res), "EC2 metadata token query");
+            }
+
+            token = res.body();
+            client.clear_headers();
+        }
+
+        client.add_header(X_AWS_EC2_METADATA_TOKEN, token);
+        client.add_header(HOST_HEADER, ec2_meta_host);
+        client.method(httpclient::method_type::get);
+        client.target(target);
+
+        auto res = co_await logged_send(client);
+        co_return std::make_tuple(std::move(res), token);
+    };
+
     if (_options.host.empty()) {
         // resolve region -> endpoint
         assert(!_options.aws_region.empty());
         _options.host = make_aws_host(_options.aws_region, "kms");
     }
 
+    static auto should_resolve_options_credentials = [this] {
+        if (_options.aws_use_ec2_credentials) {
+            return false;
+        }
+        return _options.aws_access_key_id.empty() || _options.aws_secret_access_key.empty();
+    };
+
     // if we did not get full auth info in config, we can try to 
     // retrieve it from environment
-    if (_options.aws_access_key_id.empty() || _options.aws_secret_access_key.empty()) {
+    if (should_resolve_options_credentials()) {
         auto key_id = std::getenv("AWS_ACCESS_KEY_ID");
         auto key = std::getenv("AWS_SECRET_ACCESS_KEY");
         if (_options.aws_access_key_id.empty() && key_id) {
@@ -455,7 +545,7 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, s
 
     // if we did not get full auth info in config or env, we can try to 
     // retrieve it from ~/.aws/credentials
-    if (_options.aws_access_key_id.empty() || _options.aws_secret_access_key.empty()) {
+    if (should_resolve_options_credentials()) {
         auto home = std::getenv("HOME");
         if (home) {
             auto credentials = std::string(home) + "/.aws/credentials";
@@ -513,20 +603,24 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, s
     auto aws_secret_access_key = _options.aws_secret_access_key;
     auto session = ""s;
 
-    static auto get_response_error = [](const result_type& res) -> std::string {
-        switch (res.result()) {
-        case bhttp::status::unauthorized: case bhttp::status::forbidden: return "AccessDenied";
-        case bhttp::status::not_found: return "ResourceNotFound";
-        case bhttp::status::too_many_requests: return "SlowDown";
-        case bhttp::status::internal_server_error: return "InternalError";
-        case bhttp::status::service_unavailable: return "ServiceUnavailable";
-        case bhttp::status::request_timeout: case bhttp::status::gateway_timeout:
-        case bhttp::status::network_connect_timeout_error: 
-            return "RequestTimeout";
-        default:
-            return format("{}", res.result());
+    if (_options.aws_use_ec2_credentials) {
+        auto [res, token] = co_await query_ec2_meta("/latest/meta-data/iam/security-credentials/");
+        auto role = res.body();
+
+        std::tie(res, std::ignore) = co_await query_ec2_meta("/latest/meta-data/iam/security-credentials/" + role, token);
+        auto body = rjson::parse(std::string_view(res.body().data(), res.body().size()));
+
+        try {
+            aws_access_key_id = rjson::get<std::string>(body, "AccessKeyId");
+            aws_secret_access_key = rjson::get<std::string>(body, "SecretAccessKey");
+            session = rjson::get<std::string>(body, "Token");
+        } catch (rjson::malformed_value&) {
+            std::throw_with_nested(kms_error("AccessDenied", fmt::format("Code={}, Message={}"
+                , rjson::get_opt<std::string>(body, "Code")
+                , rjson::get_opt<std::string>(body, "Message")                
+                )));
         }
-    };
+    }
 
     // Note: allowing user code to potentially reset aws_assume_role_arn='' -> no assumerole.
     // Not 100% sure this is needed.
@@ -548,6 +642,7 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, s
                 + "&RoleSessionName=" + role_session,
             .aws_access_key_id = aws_access_key_id,
             .aws_secret_access_key = aws_secret_access_key,
+            .security_token = session,
             .port = _options.port,
         });
 
@@ -700,12 +795,6 @@ future<encryption::kms_host::impl::result_type> encryption::kms_host::impl::post
         << "POST" << NEWLINE 
         << "/" << NEWLINE << NEWLINE
         ;
-
-    auto to_lower = [](std::string_view s) {
-        std::string tmp(s.size(), 0);
-        std::transform(s.begin(), s.end(), tmp.begin(), ::tolower);
-        return tmp;
-    };
 
     auto add_signed_header = [&](std::string_view name, std::string_view value) {
         client.add_header(name, value);
@@ -959,6 +1048,7 @@ encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name
         opts.aws_region = m("aws_region").value_or("");
         opts.aws_profile = m("aws_profile").value_or("");
         opts.aws_assume_role_arn = m("aws_assume_role_arn").value_or("");
+        opts.aws_use_ec2_credentials = is_true(m("aws_use_ec2_credentials").value_or("false"));
 
         // use "endpoint" semantics to match AWS configs.
         opts.endpoint = m("endpoint").value_or("");
