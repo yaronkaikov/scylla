@@ -61,8 +61,13 @@ public:
     future<> init();
     const host_options& options() const;
 
-    future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, std::optional<std::string> master = {});
-    future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const key_info&);
+    struct option_override {
+        std::optional<std::string> master_key;
+        std::optional<std::string> aws_assume_role_arn;
+    };
+
+    future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, const option_override* = nullptr);
+    future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const key_info&, const option_override* = nullptr);
 private:
     class impl;
     std::unique_ptr<impl> _impl;

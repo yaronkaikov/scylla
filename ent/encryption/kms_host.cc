@@ -147,18 +147,41 @@ public:
         return _options;
     }
 
-    future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, std::optional<std::string> = {});
-    future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const key_info&);
+    future<std::tuple<shared_ptr<symmetric_key>, id_type>> get_or_create_key(const key_info&, const option_override* = nullptr);
+    future<shared_ptr<symmetric_key>> get_key_by_id(const id_type&, const key_info&, const option_override* = nullptr);
 private:
     class httpclient;
     using key_and_id_type = std::tuple<shared_ptr<symmetric_key>, id_type>;
-    using master_and_info_type = std::tuple<std::string, key_info>;
 
-    struct master_info_hash {
-        size_t operator()(const master_and_info_type& mi) const {
-            auto& master = std::get<0>(mi);
-            auto& info = std::get<1>(mi);
-            return utils::tuple_hash()(std::tie(master, info.alg, info.len));
+    struct attr_cache_key {
+        std::string master_key;
+        std::string aws_assume_role_arn;
+        key_info info;
+
+        bool operator==(const attr_cache_key& v) const = default;
+        friend std::ostream& operator<<(std::ostream& os, const attr_cache_key& k) {
+            return os << std::tie(k.master_key, k.aws_assume_role_arn, k.info);
+        }
+    };
+
+    struct attr_cache_key_hash {
+        size_t operator()(const attr_cache_key& k) const {
+            return utils::tuple_hash()(std::tie(k.master_key, k.aws_assume_role_arn, k.info.len));
+        }
+    };
+
+    struct id_cache_key {
+        id_type id;
+        std::string aws_assume_role_arn;
+        bool operator==(const id_cache_key& v) const = default;
+        friend std::ostream& operator<<(std::ostream& os, const id_cache_key& k) {
+            return os << std::tie(k.id, k.aws_assume_role_arn);
+        }
+    };
+
+    struct id_cache_key_hash {
+        size_t operator()(const id_cache_key& k) const {
+            return utils::tuple_hash()(std::tie(k.id, k.aws_assume_role_arn));
         }
     };
 
@@ -166,18 +189,18 @@ private:
     using result_type = bhttp::response<bhttp::string_body>;
 
     future<result_type> post(aws_query);
-    future<rjson::value> post(std::string_view target, const rjson::value& query);
+    future<rjson::value> post(std::string_view target, std::string_view aws_assume_role_arn, const rjson::value& query);
 
-    future<key_and_id_type> create_key(const master_and_info_type&);
-    future<bytes> find_key(const id_type&);
+    future<key_and_id_type> create_key(const attr_cache_key&);
+    future<bytes> find_key(const id_cache_key&);
 
     encryption_context& _ctxt;
     std::string _name;
     host_options _options;
-    utils::loading_cache<master_and_info_type, key_and_id_type, 2, utils::loading_cache_reload_enabled::yes,
-        utils::simple_entry_size<key_and_id_type>, master_info_hash> _attr_cache;
-    utils::loading_cache<id_type, bytes, 2, utils::loading_cache_reload_enabled::yes, 
-        utils::simple_entry_size<bytes>> _id_cache;
+    utils::loading_cache<attr_cache_key, key_and_id_type, 2, utils::loading_cache_reload_enabled::yes,
+        utils::simple_entry_size<key_and_id_type>, attr_cache_key_hash> _attr_cache;
+    utils::loading_cache<id_cache_key, bytes, 2, utils::loading_cache_reload_enabled::yes, 
+        utils::simple_entry_size<bytes>, id_cache_key_hash> _id_cache;
     shared_ptr<seastar::tls::certificate_credentials> _creds;
     std::unordered_map<bytes, shared_ptr<symmetric_key>> _cache;
     bool _initialized = false;
@@ -335,20 +358,35 @@ void encryption::kms_host::impl::httpclient::target(std::string_view target) {
     _req.target(std::string(target));
 }
 
-future<std::tuple<shared_ptr<encryption::symmetric_key>, encryption::kms_host::id_type>> encryption::kms_host::impl::get_or_create_key(const key_info& info, std::optional<std::string> master_key) {
-    auto master = master_key.value_or(_options.master_key);
-    auto key = std::make_tuple(master, info);
-    if (master.empty()) {
+static std::string get_option(const encryption::kms_host::option_override* oov, std::optional<std::string> encryption::kms_host::option_override::* f, const std::string& def) {
+    if (oov) {
+        return (oov->*f).value_or(def);
+    }
+    return {};
+};
+
+future<std::tuple<shared_ptr<encryption::symmetric_key>, encryption::kms_host::id_type>> encryption::kms_host::impl::get_or_create_key(const key_info& info, const option_override* oov) {
+    attr_cache_key key {
+        .master_key = get_option(oov, &option_override::master_key, _options.master_key),
+        .aws_assume_role_arn = get_option(oov, &option_override::aws_assume_role_arn, _options.aws_assume_role_arn),
+        .info = info,
+    };
+
+    if (key.master_key.empty() && _options.master_key.empty()) {
         throw std::invalid_argument("No master key set in kms host config or encryption attributes");
     }
     co_return co_await _attr_cache.get(key);
 }
 
-future<shared_ptr<encryption::symmetric_key>> encryption::kms_host::impl::get_key_by_id(const id_type& id, const key_info& info) {
+future<shared_ptr<encryption::symmetric_key>> encryption::kms_host::impl::get_key_by_id(const id_type& id, const key_info& info, const option_override* oov) {
     // note: since KMS does not really have any actual "key" associtation of id -> key,
     // we only cache/query raw bytes of some length. (See below).
     // Thus keys returned are always new objects. But they are not huge...
-    auto data = co_await _id_cache.get(id);
+    id_cache_key key {
+        .id = id,
+        .aws_assume_role_arn = get_option(oov, &option_override::aws_assume_role_arn, _options.aws_assume_role_arn),
+    };
+    auto data = co_await _id_cache.get(key);
     co_return make_shared<symmetric_key>(info, data);
 }
 
@@ -393,7 +431,7 @@ struct encryption::kms_host::impl::aws_query {
     uint16_t port;
 };
 
-future<rjson::value> encryption::kms_host::impl::post(std::string_view target, const rjson::value& query) {
+future<rjson::value> encryption::kms_host::impl::post(std::string_view target, std::string_view aws_assume_role_arn, const rjson::value& query) {
     if (_options.host.empty()) {
         // resolve region -> endpoint
         assert(!_options.aws_region.empty());
@@ -490,20 +528,23 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
         }
     };
 
-    if (!_options.aws_assume_role_arn.empty()) {
+    // Note: allowing user code to potentially reset aws_assume_role_arn='' -> no assumerole.
+    // Not 100% sure this is needed.
+
+    if (!aws_assume_role_arn.empty()) {
         auto sts_host = make_aws_host(_options.aws_region, "sts");
         auto now = db_clock::now();
         auto rs_id = utils::UUID_gen::get_time_UUID(std::chrono::system_clock::time_point(now.time_since_epoch()));
         auto role_session = "ScyllaDB-" + rs_id.to_sstring();
 
-        kms_log.debug("Assume role: {} (RoleSessionID={})", _options.aws_assume_role_arn, role_session);
+        kms_log.debug("Assume role: {} (RoleSessionID={})", aws_assume_role_arn, role_session);
 
         auto res = co_await post(aws_query{
             .host = sts_host,
             .service = "sts",
             .content_type = "application/x-www-form-urlencoded; charset=utf-8",
             .content = "Action=AssumeRole&Version=2011-06-15&RoleArn=" 
-                + shttp::internal::url_encode(_options.aws_assume_role_arn)
+                + shttp::internal::url_encode(aws_assume_role_arn)
                 + "&RoleSessionName=" + role_session,
             .aws_access_key_id = aws_access_key_id,
             .aws_secret_access_key = aws_secret_access_key,
@@ -762,6 +803,13 @@ future<encryption::kms_host::impl::result_type> encryption::kms_host::impl::post
     co_return res;
 }
 
+static std::optional<std::string> make_opt(const std::string& s) {
+    if (s.empty()) {
+        return std::nullopt;
+    }
+    return s;
+}
+
 future<> encryption::kms_host::impl::init() {
     if (_initialized) {
         co_return;
@@ -771,7 +819,7 @@ future<> encryption::kms_host::impl::init() {
         kms_log.debug("Looking up master key");
         auto query = rjson::empty_object();
         rjson::add(query, "KeyId", _options.master_key);
-        auto response = co_await post("DescribeKey", query);
+        auto response = co_await post("DescribeKey", _options.aws_assume_role_arn, query);
         kms_log.debug("Master key exists");
     } else {
         kms_log.info("No default master key configured. Not verifying.");
@@ -779,9 +827,10 @@ future<> encryption::kms_host::impl::init() {
     _initialized = true;
 }
 
-future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::create_key(const master_and_info_type& minfo) {
-    auto& master_key = std::get<std::string>(minfo);
-    auto& info = std::get<key_info>(minfo);
+future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::create_key(const attr_cache_key& k) {
+    auto& master_key = k.master_key;
+    auto& aws_assume_role_arn = k.aws_assume_role_arn;
+    auto& info = k.info;
 
     /**
      * AWS KMS does _not_ allow us to actually have "named keys" that can be used externally,
@@ -821,9 +870,13 @@ future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::
 
     // avoid creating too many keys and too many calls. If we are not shard 0, delegate there.
     if (this_shard_id() != 0) {
-        auto [data, id] = co_await smp::submit_to(0, [this, info, master_key]() -> future<std::tuple<bytes, id_type>> {
+        auto [data, id] = co_await smp::submit_to(0, [this, info, master_key, aws_assume_role_arn]() -> future<std::tuple<bytes, id_type>> {
             auto host = _ctxt.get_kms_host(_name);
-            auto [k, id] = co_await host->_impl->get_or_create_key(info, master_key);
+            option_override oov {
+                .master_key = make_opt(master_key),
+                .aws_assume_role_arn = make_opt(aws_assume_role_arn),
+            };
+            auto [k, id] = co_await host->_impl->get_or_create_key(info, &oov);
             co_return std::make_tuple(k != nullptr ? k->key() : bytes{}, id);
         });
         co_return key_and_id_type{ 
@@ -843,7 +896,7 @@ future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::
     rjson::add(query, "KeyId", std::string(master_key.begin(), master_key.end()));
     rjson::add(query, "NumberOfBytes", info.len/8);
 
-    auto response = co_await post("GenerateDataKey", query);
+    auto response = co_await post("GenerateDataKey", aws_assume_role_arn, query);
     auto data = base64_decode(rjson::get<std::string>(response, "Plaintext"));
     auto enc = rjson::get<std::string>(response, "CiphertextBlob");
     auto kid = rjson::get<std::string>(response, "KeyId");
@@ -857,12 +910,12 @@ future<encryption::kms_host::impl::key_and_id_type> encryption::kms_host::impl::
     co_return key_and_id_type{ key, id };
 }
 
-future<bytes> encryption::kms_host::impl::find_key(const id_type& id) {
+future<bytes> encryption::kms_host::impl::find_key(const id_cache_key& k) {
     // avoid creating too many keys and too many calls. If we are not shard 0, delegate there.
     if (this_shard_id() != 0) {
-        co_return co_await smp::submit_to(0, [this, id]() -> future<bytes> {
+        co_return co_await smp::submit_to(0, [this, k]() -> future<bytes> {
             auto host = _ctxt.get_kms_host(_name);
-            auto bytes = co_await host->_impl->_id_cache.get(id);
+            auto bytes = co_await host->_impl->_id_cache.get(k);
             co_return bytes;
         });
     }
@@ -870,6 +923,7 @@ future<bytes> encryption::kms_host::impl::find_key(const id_type& id) {
     // See create_key. ID consists of <master id>:<encrypted key blob>.
     // master id can (and will) contain ':', but blob will not.
     // (we are being wasteful, and keeping the base64 encoding - easier to read)
+    auto& id = k.id;
     auto pos = id.find_last_of(':');
     if (pos == id_type::npos) {
         throw std::invalid_argument(format("Not a valid key id: {}", id));
@@ -884,7 +938,7 @@ future<bytes> encryption::kms_host::impl::find_key(const id_type& id) {
     rjson::add(query, "CiphertextBlob", enc);
     rjson::add(query, "KeyId", kid);
 
-    auto response = co_await post("Decrypt", query);
+    auto response = co_await post("Decrypt", k.aws_assume_role_arn, query);
     auto data = base64_decode(rjson::get<std::string>(response, "Plaintext"));
 
     // we know nothing about key type etc, so just return data.
@@ -930,11 +984,11 @@ const encryption::kms_host::host_options& encryption::kms_host::options() const 
     return _impl->options();
 }
 
-future<std::tuple<shared_ptr<encryption::symmetric_key>, encryption::kms_host::id_type>> encryption::kms_host::get_or_create_key(const key_info& info, std::optional<std::string> master_key) {
-    return _impl->get_or_create_key(info, master_key);
+future<std::tuple<shared_ptr<encryption::symmetric_key>, encryption::kms_host::id_type>> encryption::kms_host::get_or_create_key(const key_info& info, const option_override* oov) {
+    return _impl->get_or_create_key(info, oov);
 }
 
-future<shared_ptr<encryption::symmetric_key>> encryption::kms_host::get_key_by_id(const id_type& id, const key_info& info) {
-    return _impl->get_key_by_id(id, info);
+future<shared_ptr<encryption::symmetric_key>> encryption::kms_host::get_key_by_id(const id_type& id, const key_info& info, const option_override* oov) {
+    return _impl->get_key_by_id(id, info, oov);
 }
 
