@@ -9,7 +9,6 @@
 #pragma once
 
 #include "cql3/statements/function_statement.hh"
-#include "cql3/functions/user_function.hh"
 #include "audit/audit.hh"
 #include "cql3/cql3_type.hh"
 
