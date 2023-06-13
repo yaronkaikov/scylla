@@ -38,6 +38,7 @@ public:
         std::string aws_secret_access_key;
         std::string aws_region;
         std::string aws_profile;
+        std::string aws_assume_role_arn;
 
         // key to use for keys
         std::string master_key;

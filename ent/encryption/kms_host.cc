@@ -18,8 +18,10 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/json/formatter.hh>
+#include <seastar/http/url.hh>
 
 #include <boost/beast/http.hpp>
+#include <rapidxml.h>
 
 #include <fmt/chrono.h>
 #include <fmt/ranges.h>
@@ -82,7 +84,9 @@ namespace kms_errors {
 }
 
 namespace beast = boost::beast;     // from <boost/beast.hpp>
-namespace http = beast::http;       // from <boost/beast/http.hpp>
+// Note: switch http -> bhttp to deal with namespace ambiguity.
+namespace bhttp = beast::http;       // from <boost/beast/http.hpp>
+namespace shttp = seastar::http;
 
 class encryption::kms_host::impl {
 public:
@@ -159,7 +163,7 @@ private:
     };
 
     struct aws_query;
-    using result_type = http::response<http::string_body>;
+    using result_type = bhttp::response<bhttp::string_body>;
 
     future<result_type> post(aws_query);
     future<rjson::value> post(std::string_view target, const rjson::value& query);
@@ -192,13 +196,13 @@ public:
     httpclient& add_header(std::string_view key, std::string_view value);
 
     using result_type = kms_host::impl::result_type;
-    using request_type = http::request<http::string_body>;
+    using request_type = bhttp::request<bhttp::string_body>;
 
     future<result_type> send();
     future<result_type> post();
     future<result_type> get();
 
-    using method_type = http::verb;
+    using method_type = bhttp::verb;
 
     void method(method_type);
     void content(std::string_view);
@@ -243,12 +247,12 @@ future<encryption::kms_host::impl::httpclient::result_type> encryption::kms_host
     auto out = s.output();
     auto in = s.input();
 
-    http::serializer<true, http::string_body, typename decltype(_req)::fields_type> ser(_req);
+    bhttp::serializer<true, bhttp::string_body, typename decltype(_req)::fields_type> ser(_req);
 
     beast::error_code ec;
     std::exception_ptr ex;
 
-    http::parser<false, http::string_body> p(result_type{});
+    bhttp::parser<false, bhttp::string_body> p(result_type{});
 
     try {
         while (!ser.is_done()) {
@@ -283,7 +287,7 @@ future<encryption::kms_host::impl::httpclient::result_type> encryption::kms_host
                 // parse
                 boost::asio::const_buffer wrap(buf.get(), buf.size());
                 p.put(wrap, ec);
-                if (ec.failed() && ec != http::error::need_more) {
+                if (ec.failed() && ec != bhttp::error::need_more) {
                     break;
                 }
                 ec.clear();
@@ -324,7 +328,7 @@ void encryption::kms_host::impl::httpclient::method(method_type m) {
 
 void encryption::kms_host::impl::httpclient::content(std::string_view body) {
     _req.body().assign(body.begin(), body.end());
-    _req.set(http::field::content_length, std::to_string(_req.body().size()));
+    _req.set(bhttp::field::content_length, std::to_string(_req.body().size()));
 }
 
 void encryption::kms_host::impl::httpclient::target(std::string_view target) {
@@ -473,19 +477,71 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
 
     static auto get_response_error = [](const result_type& res) -> std::string {
         switch (res.result()) {
-        case http::status::unauthorized: case http::status::forbidden: return "AccessDenied";
-        case http::status::not_found: return "ResourceNotFound";
-        case http::status::too_many_requests: return "SlowDown";
-        case http::status::internal_server_error: return "InternalError";
-        case http::status::service_unavailable: return "ServiceUnavailable";
-        case http::status::request_timeout: case http::status::gateway_timeout:
-        case http::status::network_connect_timeout_error: 
+        case bhttp::status::unauthorized: case bhttp::status::forbidden: return "AccessDenied";
+        case bhttp::status::not_found: return "ResourceNotFound";
+        case bhttp::status::too_many_requests: return "SlowDown";
+        case bhttp::status::internal_server_error: return "InternalError";
+        case bhttp::status::service_unavailable: return "ServiceUnavailable";
+        case bhttp::status::request_timeout: case bhttp::status::gateway_timeout:
+        case bhttp::status::network_connect_timeout_error: 
             return "RequestTimeout";
         default:
             return format("{}", res.result());
         }
     };
 
+    if (!_options.aws_assume_role_arn.empty()) {
+        auto sts_host = make_aws_host(_options.aws_region, "sts");
+        auto now = db_clock::now();
+        auto rs_id = utils::UUID_gen::get_time_UUID(std::chrono::system_clock::time_point(now.time_since_epoch()));
+        auto role_session = "ScyllaDB-" + rs_id.to_sstring();
+
+        kms_log.debug("Assume role: {} (RoleSessionID={})", _options.aws_assume_role_arn, role_session);
+
+        auto res = co_await post(aws_query{
+            .host = sts_host,
+            .service = "sts",
+            .content_type = "application/x-www-form-urlencoded; charset=utf-8",
+            .content = "Action=AssumeRole&Version=2011-06-15&RoleArn=" 
+                + shttp::internal::url_encode(_options.aws_assume_role_arn)
+                + "&RoleSessionName=" + role_session,
+            .aws_access_key_id = aws_access_key_id,
+            .aws_secret_access_key = aws_secret_access_key,
+            .port = _options.port,
+        });
+
+        if (res.result() != bhttp::status::ok) {
+            throw kms_error(get_response_error(res), "AssumeRole");
+        }
+
+        rapidxml::xml_document<> doc;
+        try {
+            doc.parse<0>(res.body().data());
+
+            using node_type = rapidxml::xml_node<char>;
+            static auto get_xml_node = [](node_type* node, const char* what) {
+                auto res = node->first_node(what);
+                if (!res) {
+                    throw kms_error("XML parse error", what);
+                }
+                return res;
+            };
+
+            auto arrsp = get_xml_node(&doc, "AssumeRoleResponse");
+            auto arres = get_xml_node(arrsp, "AssumeRoleResult");
+            auto creds = get_xml_node(arres, "Credentials");
+            auto keyid = get_xml_node(creds, "AccessKeyId");
+            auto key = get_xml_node(creds, "SecretAccessKey");
+            auto token = get_xml_node(creds, "SessionToken");
+
+            aws_access_key_id = keyid->value();
+            aws_secret_access_key = key->value();
+            session = token->value();
+
+        } catch (const rapidxml::parse_error& e) {
+            std::throw_with_nested(kms_error("XML parse error", "AssumeRole"));
+        }
+    }
 
     auto res = co_await post(aws_query{
         .host = _options.host,
@@ -505,14 +561,14 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
         try {
             body = rjson::parse(std::string_view(res.body().data(), res.body().size()));
         } catch (...) {
-            if (res.result() == http::status::ok) {
+            if (res.result() == bhttp::status::ok) {
                 throw;
             }
             // assume non-json formatted error. fall back to parsing below
         }
     } 
 
-    if (res.result() != http::status::ok) {
+    if (res.result() != bhttp::status::ok) {
         // try to format as good an error as we can.
         static const char* message_lc_header = "message";
         static const char* message_cc_header = "Message";
@@ -848,6 +904,7 @@ encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name
         opts.aws_secret_access_key = m("aws_secret_access_key").value_or("");
         opts.aws_region = m("aws_region").value_or("");
         opts.aws_profile = m("aws_profile").value_or("");
+        opts.aws_assume_role_arn = m("aws_assume_role_arn").value_or("");
 
         // use "endpoint" semantics to match AWS configs.
         opts.endpoint = m("endpoint").value_or("");
