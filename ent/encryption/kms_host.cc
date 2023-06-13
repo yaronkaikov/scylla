@@ -81,6 +81,9 @@ namespace kms_errors {
     [[maybe_unused]] static const char* AlreadyExistsException = "AlreadyExistsException";
 }
 
+namespace beast = boost::beast;     // from <boost/beast.hpp>
+namespace http = beast::http;       // from <boost/beast/http.hpp>
+
 class encryption::kms_host::impl {
 public:
     // set a rather long expiry. normal KMS policies are 365-day rotation of keys.
@@ -155,7 +158,11 @@ private:
         }
     };
 
-    future<rjson::value> post(std::string_view, const rjson::value&);
+    struct aws_query;
+    using result_type = http::response<http::string_body>;
+
+    future<result_type> post(aws_query);
+    future<rjson::value> post(std::string_view target, const rjson::value& query);
 
     future<key_and_id_type> create_key(const master_and_info_type&);
     future<bytes> find_key(const id_type&);
@@ -172,10 +179,6 @@ private:
     bool _initialized = false;
 };
 
-
-namespace beast = boost::beast;     // from <boost/beast.hpp>
-namespace http = beast::http;       // from <boost/beast/http.hpp>
-
 /**
  * Not in seastar. Because nowhere near complete, thought through or
  * capable of dealing with anything but tiny aws messages.
@@ -188,7 +191,7 @@ public:
 
     httpclient& add_header(std::string_view key, std::string_view value);
 
-    using result_type = http::response<http::string_body>;
+    using result_type = kms_host::impl::result_type;
     using request_type = http::request<http::string_body>;
 
     future<result_type> send();
@@ -345,76 +348,52 @@ future<shared_ptr<encryption::symmetric_key>> encryption::kms_host::impl::get_ke
     co_return make_shared<symmetric_key>(info, data);
 }
 
-// helper to build AWS request and parse result.
-future<rjson::value> encryption::kms_host::impl::post(std::string_view target, const rjson::value& query) {
-    auto creds = _creds;
-    // if we are https, we need at least a credentials object that says "use system trust"
-    if (!creds && _options.https) {
-        creds = ::make_shared<seastar::tls::certificate_credentials>();
+static std::string make_aws_host(std::string_view aws_region, std::string_view service) {
+    static const char AWS_GLOBAL[] = "aws-global";
+    static const char US_EAST_1[] = "us-east-1"; // US East (N. Virginia)
+    static const char CN_NORTH_1[] = "cn-north-1"; // China (Beijing)
+    static const char CN_NORTHWEST_1[] = "cn-northwest-1"; // China (Ningxia)
+    static const char US_ISO_EAST_1[] = "us-iso-east-1";  // US ISO East
+    static const char US_ISOB_EAST_1[] = "us-isob-east-1"; // US ISOB East (Ohio)
 
-        if (!_options.priority_string.empty()) {
-            creds->set_priority_string(_options.priority_string);
-        } else {
-            creds->set_priority_string(db::config::default_tls_priority);
-        }
+    // Fallback to us-east-1 if global endpoint does not exists.
+    auto region = aws_region == AWS_GLOBAL ? US_EAST_1 : aws_region;
 
-        if (!_options.certfile.empty()) {
-            co_await creds->set_x509_key_file(_options.certfile, _options.keyfile, seastar::tls::x509_crt_format::PEM);
-        }
-        if (!_options.truststore.empty()) {
-            co_await creds->set_x509_trust_file(_options.truststore, seastar::tls::x509_crt_format::PEM);
-        } else {
-            co_await creds->set_system_trust();
-        }
-        _creds = creds;
+    std::stringstream ss;
+    ss << service << "." << region;
+
+    if (region == CN_NORTH_1 || region == CN_NORTHWEST_1) {
+        ss << ".amazonaws.com.cn";
+    } else if (region == US_ISO_EAST_1) {
+        ss << ".c2s.ic.gov";
+    } else if (region == US_ISOB_EAST_1) {
+        ss << ".sc2s.sgov.gov";
+    } else {
+        ss << ".amazonaws.com";
     }
+    return ss.str();
+}
 
-    // some of this could be shared with alternator
-    static constexpr const char* CONTENT_TYPE_HEADER = "content-type";
-    static constexpr const char* HOST_HEADER = "host";
-    static constexpr const char* AWS_DATE_HEADER = "X-Amz-Date";
-    static constexpr const char* AWS_AUTHORIZATION_HEADER = "authorization";
+struct encryption::kms_host::impl::aws_query {
+    std::string_view host; 
 
-    static constexpr const char* AMZ_TARGET_HEADER = "x-amz-target";
-    static constexpr const char* AWS_HMAC_SHA256 = "AWS4-HMAC-SHA256";
-    static constexpr const char* AWS4_REQUEST = "aws4_request";
-    static constexpr const char* SIGNING_KEY = "AWS4";
-    static constexpr const char* CREDENTIAL = "Credential";
-    static constexpr const char* SIGNATURE = "Signature";
-    static constexpr const char* SIGNED_HEADERS = "SignedHeaders";
-    [[maybe_unused]] static constexpr const char* ACTION_HEADER = "Action";
+    std::string_view service;
+    std::string_view target;
+    std::string_view content_type;
+    std::string_view content; 
 
-    static constexpr const char* ISO_8601_BASIC = "{:%Y%m%dT%H%M%SZ}";
-    static constexpr const char* SIMPLE_DATE_FORMAT_STR = "{:%Y%m%d}";
-    static constexpr auto NEWLINE = '\n';
+    std::string_view aws_access_key_id; 
+    std::string_view aws_secret_access_key;
+    std::string_view security_token;
 
+    uint16_t port;
+};
+
+future<rjson::value> encryption::kms_host::impl::post(std::string_view target, const rjson::value& query) {
     if (_options.host.empty()) {
         // resolve region -> endpoint
         assert(!_options.aws_region.empty());
-        static const char AWS_GLOBAL[] = "aws-global";
-        static const char US_EAST_1[] = "us-east-1"; // US East (N. Virginia)
-        static const char CN_NORTH_1[] = "cn-north-1"; // China (Beijing)
-        static const char CN_NORTHWEST_1[] = "cn-northwest-1"; // China (Ningxia)
-        static const char US_ISO_EAST_1[] = "us-iso-east-1";  // US ISO East
-        static const char US_ISOB_EAST_1[] = "us-isob-east-1"; // US ISOB East (Ohio)
-
-        // Fallback to us-east-1 if global endpoint does not exists.
-        auto region = _options.aws_region == AWS_GLOBAL ? US_EAST_1 : _options.aws_region;
-
-        std::stringstream ss;
-        ss << "kms" << "." << region;
-
-        if (region == CN_NORTH_1 || region == CN_NORTHWEST_1) {
-            ss << ".amazonaws.com.cn";
-        } else if (region == US_ISO_EAST_1) {
-            ss << ".c2s.ic.gov";
-        } else if (region == US_ISOB_EAST_1) {
-            ss << ".sc2s.sgov.gov";
-        } else {
-            ss << ".amazonaws.com";
-        }
-
-        _options.host = ss.str();
+        _options.host = make_aws_host(_options.aws_region, "kms");
     }
 
     // if we did not get full auth info in config, we can try to 
@@ -488,122 +467,37 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
         }
     }
 
-    kms_log.trace("Building request: {} ({}:{})", target, _options.host, _options.port);
+    auto aws_access_key_id = _options.aws_access_key_id;
+    auto aws_secret_access_key = _options.aws_secret_access_key;
+    auto session = ""s;
 
-    httpclient client(_options.host, _options.port, std::move(creds));
-    auto action = "TrentService."s + std::string(target);
-
-    auto now = db_clock::now();
-    auto t_now = fmt::gmtime(db_clock::to_time_t(now));
-    auto timestamp = fmt::format(ISO_8601_BASIC, t_now);
-
-    // see https://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
-    // see AWS SDK.
-    // see https://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html
-    std::stringstream signedHeadersStream;
-    std::stringstream canonicalRequestStream;
-
-    canonicalRequestStream 
-        << "POST" << NEWLINE 
-        << "/" << NEWLINE << NEWLINE
-        ;
-
-    auto to_lower = [](std::string_view s) {
-        std::string tmp(s.size(), 0);
-        std::transform(s.begin(), s.end(), tmp.begin(), ::tolower);
-        return tmp;
-    };
-
-    auto add_signed_header = [&](std::string_view name, std::string_view value) {
-        client.add_header(name, value);
-        auto lname = to_lower(name);
-        canonicalRequestStream << lname << ":" << value << NEWLINE;
-        if (signedHeadersStream.tellp() != 0) {
-            signedHeadersStream << ';';
+    static auto get_response_error = [](const result_type& res) -> std::string {
+        switch (res.result()) {
+        case http::status::unauthorized: case http::status::forbidden: return "AccessDenied";
+        case http::status::not_found: return "ResourceNotFound";
+        case http::status::too_many_requests: return "SlowDown";
+        case http::status::internal_server_error: return "InternalError";
+        case http::status::service_unavailable: return "ServiceUnavailable";
+        case http::status::request_timeout: case http::status::gateway_timeout:
+        case http::status::network_connect_timeout_error: 
+            return "RequestTimeout";
+        default:
+            return format("{}", res.result());
         }
-        signedHeadersStream << lname;
     };
 
-    // headers must be sorted!
-    auto host = _options.endpoint.empty() 
-        ? _options.host 
-        : _options.endpoint.substr(_options.endpoint.find_last_of('/')+1)
-        ;
 
-    add_signed_header(CONTENT_TYPE_HEADER, "application/x-amz-json-1.1");
-    add_signed_header(HOST_HEADER, host);
-    add_signed_header(AWS_DATE_HEADER, timestamp);
-    add_signed_header(AMZ_TARGET_HEADER, action);
-
-    client.add_header("Accept-Encoding", "identity");
-    client.add_header("Accept", "*/*");
-
-    auto make_hash = [&](std::string_view s) {
-        auto sha256 = calculate_sha256(bytes_view(reinterpret_cast<const int8_t*>(s.data()), s.size()));
-        auto hash = to_hex(sha256);
-        return hash;
-    };
-
-    auto content = rjson::print(query);
-    auto hash = make_hash(content);
-
-    auto signedHeadersValue = signedHeadersStream.str();
-    canonicalRequestStream << NEWLINE << signedHeadersValue << NEWLINE << hash;
-    auto canonicalRequestString = canonicalRequestStream.str();
-    auto canonicalRequestHash = make_hash(canonicalRequestString);
-
-    kms_log.trace("Canonical request: {}", canonicalRequestString);
-
-    auto simpleDate = fmt::format(SIMPLE_DATE_FORMAT_STR, t_now);
-    auto serviceName = "kms";
-
-    std::stringstream stringToSignStream;
-    stringToSignStream << AWS_HMAC_SHA256 << NEWLINE 
-        << timestamp << NEWLINE 
-        << simpleDate << "/" << _options.aws_region << "/"
-        << serviceName << "/" << AWS4_REQUEST << NEWLINE 
-        << canonicalRequestHash
-        ;
-    auto stringToSign = stringToSignStream.str();
-
-    // these log messages intentionally made to mimic aws sdk/boto3
-    kms_log.trace("StringToSign: {}", stringToSign);
-
-    std::string finalSignature;
-
-    {
-        auto tobv = [](std::string_view s) {
-            return bytes_view(reinterpret_cast<const int8_t*>(s.data()), s.size());
-        };
-
-        auto signingKey = SIGNING_KEY + _options.aws_secret_access_key;
-        auto kDate = hmac_sha256(tobv(simpleDate), tobv(signingKey));
-        auto kRegion = hmac_sha256(tobv(_options.aws_region), kDate);
-        auto kService = hmac_sha256(tobv(serviceName), kRegion);
-        auto hashResult = hmac_sha256(tobv(AWS4_REQUEST), kService);
-        auto finalHash = hmac_sha256(tobv(stringToSign), hashResult);
-        finalSignature = to_hex(finalHash);
-    }
-
-    std::stringstream authStream;
-    authStream << AWS_HMAC_SHA256 << " " 
-        << CREDENTIAL << "=" << _options.aws_access_key_id << "/" << simpleDate << "/" << _options.aws_region 
-        << "/" << serviceName << "/" << AWS4_REQUEST << ", " << SIGNED_HEADERS 
-        << "=" << signedHeadersValue << ", " << SIGNATURE << "=" << finalSignature
-        ;
-
-    auto awsAuthString = authStream.str();
-
-    client.add_header(AWS_AUTHORIZATION_HEADER, awsAuthString);
-    client.target("/");
-    client.content(content);
-    client.method(httpclient::method_type::post);
-
-    kms_log.trace("Request: {}", client.request());
-
-    auto res = co_await client.send();
-
-    kms_log.trace("Result: status={}, response={}", res.result_int(), res);
+    auto res = co_await post(aws_query{
+        .host = _options.host,
+        .service = "kms",
+        .target = target,
+        .content_type = "application/x-amz-json-1.1",
+        .content = rjson::print(query),
+        .aws_access_key_id = aws_access_key_id,
+        .aws_secret_access_key = aws_secret_access_key,
+        .security_token = session,
+        .port = _options.port,
+    });
 
     auto body = rjson::empty_object();
 
@@ -636,25 +530,180 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, c
             o = rjson::get_opt<std::string>(body, type_header);
         }
         // this should never happen with aws, but...
-        auto type = o ? *o : [&]() -> std::string {
-            switch (res.result()) {
-            case http::status::unauthorized: case http::status::forbidden: return "AccessDenied";
-            case http::status::not_found: return "ResourceNotFound";
-            case http::status::too_many_requests: return "SlowDown";
-            case http::status::internal_server_error: return "InternalError";
-            case http::status::service_unavailable: return "ServiceUnavailable";
-            case http::status::request_timeout: case http::status::gateway_timeout:
-            case http::status::network_connect_timeout_error: 
-                return "RequestTimeout";
-            default:
-                return format("{}", res.result());
-            }
-        }();
+        auto type = o ? *o : get_response_error(res);
 
         throw kms_error(type, msg);
     }
 
-    co_return body;
+    co_return body;    
+}
+
+// helper to build AWS request and parse result.
+future<encryption::kms_host::impl::result_type> encryption::kms_host::impl::post(aws_query query) {
+    auto creds = _creds;
+    // if we are https, we need at least a credentials object that says "use system trust"
+    if (!creds && _options.https) {
+        creds = ::make_shared<seastar::tls::certificate_credentials>();
+
+        if (!_options.priority_string.empty()) {
+            creds->set_priority_string(_options.priority_string);
+        } else {
+            creds->set_priority_string(db::config::default_tls_priority);
+        }
+
+        if (!_options.certfile.empty()) {
+            co_await creds->set_x509_key_file(_options.certfile, _options.keyfile, seastar::tls::x509_crt_format::PEM);
+        }
+        if (!_options.truststore.empty()) {
+            co_await creds->set_x509_trust_file(_options.truststore, seastar::tls::x509_crt_format::PEM);
+        } else {
+            co_await creds->set_system_trust();
+        }
+        _creds = creds;
+    }
+
+    // some of this could be shared with alternator
+    static constexpr const char* CONTENT_TYPE_HEADER = "content-type";
+    static constexpr const char* HOST_HEADER = "host";
+    static constexpr const char* X_AWS_DATE_HEADER = "X-Amz-Date";
+    static constexpr const char* AWS_AUTHORIZATION_HEADER = "authorization";
+    static constexpr const char* AMZ_SDK_INVOCATION_ID = "amz-sdk-invocation-id";
+    static constexpr const char* X_AMZ_SECURITY_TOKEN = "X-Amz-Security-Token";
+
+    static constexpr const char* AMZ_TARGET_HEADER = "x-amz-target";
+    static constexpr const char* AWS_HMAC_SHA256 = "AWS4-HMAC-SHA256";
+    static constexpr const char* AWS4_REQUEST = "aws4_request";
+    static constexpr const char* SIGNING_KEY = "AWS4";
+    static constexpr const char* CREDENTIAL = "Credential";
+    static constexpr const char* SIGNATURE = "Signature";
+    static constexpr const char* SIGNED_HEADERS = "SignedHeaders";
+    [[maybe_unused]] static constexpr const char* ACTION_HEADER = "Action";
+
+    static constexpr const char* ISO_8601_BASIC = "{:%Y%m%dT%H%M%SZ}";
+    static constexpr const char* SIMPLE_DATE_FORMAT_STR = "{:%Y%m%d}";
+    static constexpr auto NEWLINE = '\n';
+
+    auto now = db_clock::now();
+    auto req_id = utils::UUID_gen::get_time_UUID(std::chrono::system_clock::time_point(now.time_since_epoch()));
+
+    kms_log.trace("Building request: {} ({}:{}) {}", query.target, query.host, query.port, req_id);
+
+    httpclient client(std::string(query.host), query.port, std::move(creds));
+
+    auto t_now = fmt::gmtime(db_clock::to_time_t(now));
+    auto timestamp = fmt::format(ISO_8601_BASIC, t_now);
+
+    // see https://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
+    // see AWS SDK.
+    // see https://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html
+    std::stringstream signedHeadersStream;
+    std::stringstream canonicalRequestStream;
+
+    canonicalRequestStream 
+        << "POST" << NEWLINE 
+        << "/" << NEWLINE << NEWLINE
+        ;
+
+    auto to_lower = [](std::string_view s) {
+        std::string tmp(s.size(), 0);
+        std::transform(s.begin(), s.end(), tmp.begin(), ::tolower);
+        return tmp;
+    };
+
+    auto add_signed_header = [&](std::string_view name, std::string_view value) {
+        client.add_header(name, value);
+        auto lname = to_lower(name);
+        canonicalRequestStream << lname << ":" << value << NEWLINE;
+        if (signedHeadersStream.tellp() != 0) {
+            signedHeadersStream << ';';
+        }
+        signedHeadersStream << lname;
+    };
+
+    // headers must be sorted!
+
+    add_signed_header(CONTENT_TYPE_HEADER, query.content_type);
+    add_signed_header(HOST_HEADER, query.host);
+    add_signed_header(X_AWS_DATE_HEADER, timestamp);
+    if (!query.target.empty()) {
+        add_signed_header(AMZ_TARGET_HEADER, "TrentService."s + std::string(query.target));
+    }
+
+    if (!query.security_token.empty()) {
+        //add_signed_header(X_AMZ_SECURITY_TOKEN, query.security_token);
+        client.add_header(X_AMZ_SECURITY_TOKEN, query.security_token);
+    }
+
+    client.add_header(AMZ_SDK_INVOCATION_ID, req_id.to_sstring());
+    client.add_header("Accept-Encoding", "identity");
+    client.add_header("Accept", "*/*");
+
+    auto make_hash = [&](std::string_view s) {
+        auto sha256 = calculate_sha256(bytes_view(reinterpret_cast<const int8_t*>(s.data()), s.size()));
+        auto hash = to_hex(sha256);
+        return hash;
+    };
+
+    auto hash = make_hash(query.content);
+
+    auto signedHeadersValue = signedHeadersStream.str();
+    canonicalRequestStream << NEWLINE << signedHeadersValue << NEWLINE << hash;
+    auto canonicalRequestString = canonicalRequestStream.str();
+    auto canonicalRequestHash = make_hash(canonicalRequestString);
+
+    kms_log.trace("Canonical request: {}", canonicalRequestString);
+
+    auto simpleDate = fmt::format(SIMPLE_DATE_FORMAT_STR, t_now);
+
+    std::stringstream stringToSignStream;
+    stringToSignStream << AWS_HMAC_SHA256 << NEWLINE 
+        << timestamp << NEWLINE 
+        << simpleDate << "/" << _options.aws_region << "/"
+        << query.service << "/" << AWS4_REQUEST << NEWLINE 
+        << canonicalRequestHash
+        ;
+    auto stringToSign = stringToSignStream.str();
+
+    // these log messages intentionally made to mimic aws sdk/boto3
+    kms_log.trace("StringToSign: {}", stringToSign);
+
+    std::string finalSignature;
+
+    {
+        auto tobv = [](std::string_view s) {
+            return bytes_view(reinterpret_cast<const int8_t*>(s.data()), s.size());
+        };
+
+        auto signingKey = SIGNING_KEY + std::string(query.aws_secret_access_key);
+        auto kDate = hmac_sha256(tobv(simpleDate), tobv(signingKey));
+        auto kRegion = hmac_sha256(tobv(_options.aws_region), kDate);
+        auto kService = hmac_sha256(tobv(query.service), kRegion);
+        auto hashResult = hmac_sha256(tobv(AWS4_REQUEST), kService);
+        auto finalHash = hmac_sha256(tobv(stringToSign), hashResult);
+        finalSignature = to_hex(finalHash);
+    }
+
+    std::stringstream authStream;
+    authStream << AWS_HMAC_SHA256 << " " 
+        << CREDENTIAL << "=" << query.aws_access_key_id << "/" << simpleDate << "/" << _options.aws_region 
+        << "/" << query.service << "/" << AWS4_REQUEST << ", " << SIGNED_HEADERS 
+        << "=" << signedHeadersValue << ", " << SIGNATURE << "=" << finalSignature
+        ;
+
+    auto awsAuthString = authStream.str();
+
+    client.add_header(AWS_AUTHORIZATION_HEADER, awsAuthString);
+    client.target("/");
+    client.content(query.content);
+    client.method(httpclient::method_type::post);
+
+    kms_log.trace("Request: {}", client.request());
+
+    auto res = co_await client.send();
+
+    kms_log.trace("Result: status={}, response={}", res.result_int(), res);
+
+    co_return res;
 }
 
 future<> encryption::kms_host::impl::init() {
