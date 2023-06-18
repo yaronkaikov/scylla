@@ -15,8 +15,9 @@ namespace audit {
 const sstring audit_cf_storage_helper::KEYSPACE_NAME("audit");
 const sstring audit_cf_storage_helper::TABLE_NAME("audit_log");
 
-audit_cf_storage_helper::audit_cf_storage_helper(cql3::query_processor& qp)
+audit_cf_storage_helper::audit_cf_storage_helper(cql3::query_processor& qp, service::migration_manager& mm)
     : _qp(qp)
+    , _mm(mm)
     , _table(KEYSPACE_NAME, TABLE_NAME,
              fmt::format("CREATE TABLE IF NOT EXISTS {}.{} ("
                        "date timestamp, "
@@ -50,7 +51,7 @@ audit_cf_storage_helper::audit_cf_storage_helper(cql3::query_processor& qp)
 }
 
 future<> audit_cf_storage_helper::start(const db::config&) {
-    return table_helper::setup_keyspace(_qp, KEYSPACE_NAME, "1", _dummy_query_state, { &_table });
+    return table_helper::setup_keyspace(_qp, _mm, KEYSPACE_NAME, "1", _dummy_query_state, { &_table });
 }
 
 future<> audit_cf_storage_helper::stop() {
@@ -63,14 +64,14 @@ future<> audit_cf_storage_helper::write(const audit_info* audit_info,
                                     db::consistency_level cl,
                                     const sstring& username,
                                     bool error) {
-    return _table.insert(_qp, _dummy_query_state, make_data, audit_info, node_ip, client_ip, cl, username, error);
+    return _table.insert(_qp, _mm, _dummy_query_state, make_data, audit_info, node_ip, client_ip, cl, username, error);
 }
 
 future<> audit_cf_storage_helper::write_login(const sstring& username,
                                               socket_address node_ip,
                                               socket_address client_ip,
                                               bool error) {
-    return _table.insert(_qp, _dummy_query_state, make_login_data, node_ip, client_ip, username, error);
+    return _table.insert(_qp, _mm, _dummy_query_state, make_login_data, node_ip, client_ip, username, error);
 }
 
 cql3::query_options audit_cf_storage_helper::make_data(const audit_info* audit_info,
@@ -129,7 +130,7 @@ cql3::query_options audit_cf_storage_helper::make_login_data(socket_address node
     return cql3::query_options(cql3::default_cql_config, db::consistency_level::ONE, std::nullopt, std::move(values), false, cql3::query_options::specific_options::DEFAULT);
 }
 
-using registry = class_registrator<storage_helper, audit_cf_storage_helper, cql3::query_processor&>;
+using registry = class_registrator<storage_helper, audit_cf_storage_helper, cql3::query_processor&, service::migration_manager&>;
 static registry registrator1("audit_cf_storage_helper");
 
 }

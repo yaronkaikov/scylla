@@ -139,12 +139,12 @@ future<> audit::create_audit(const db::config& cfg) {
                                   std::move(audited_categories));
 }
 
-future<> audit::start_audit(const db::config& cfg, sharded<cql3::query_processor>& qp) {
+future<> audit::start_audit(const db::config& cfg, sharded<cql3::query_processor>& qp, sharded<service::migration_manager>& mm) {
     if (!audit_instance().local_is_initialized()) {
         return make_ready_future<>();
     }
-    return audit_instance().invoke_on_all([&cfg, &qp] (audit& local_audit) {
-        return local_audit.start(cfg, qp.local());
+    return audit_instance().invoke_on_all([&cfg, &qp, &mm] (audit& local_audit) {
+        return local_audit.start(cfg, qp.local(), mm.local());
     });
 }
 
@@ -170,9 +170,9 @@ audit_info_ptr audit::create_no_audit_info() {
     return audit_info_ptr();
 }
 
-future<> audit::start(const db::config& cfg, cql3::query_processor& qp) {
+future<> audit::start(const db::config& cfg, cql3::query_processor& qp, service::migration_manager& mm) {
     try {
-        _storage_helper_ptr = create_object<storage_helper>(_storage_helper_class_name, qp);
+        _storage_helper_ptr = create_object<storage_helper>(_storage_helper_class_name, qp, mm);
     } catch (no_such_class& e) {
         logger.error("Can't create audit storage helper {}: not supported", _storage_helper_class_name);
         throw;

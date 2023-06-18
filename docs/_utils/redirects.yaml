@@ -7,6 +7,12 @@
 
 /master/glossary.html: /master/reference/glossary.html
 
+# Removing the reverse queries troubleshootign page
+# needs to be replaced with the following when 5.3 is released:
+# stable/troubleshooting/reverse-queries.html: stable/troubleshooting/index.html
+
+master/troubleshooting/reverse-queries.html: master/troubleshooting/index.html
+
 # unifying the Ubunut upgrade guide for different Ubuntu versions: from 5.0 to 2022.1
 
 /stable/upgrade/upgrade-to-enterprise/upgrade-guide-from-5.0-to-2022.1/upgrade-guide-from-5.0-to-2022.1-ubuntu-18-04.html: /stable/upgrade/upgrade-to-enterprise/upgrade-guide-from-5.0-to-2022.1/upgrade-guide-from-5.0-to-2022.1-ubuntu.html

@@ -11,12 +11,18 @@
 #include "storage_helper.hh"
 #include "db/config.hh"
 
+namespace service {
+
+class migration_manager;
+
+};
+
 namespace audit {
 
 class audit_syslog_storage_helper : public storage_helper {
     int _syslog_fd;
 public:
-    explicit audit_syslog_storage_helper(cql3::query_processor&) {};
+    explicit audit_syslog_storage_helper(cql3::query_processor&, service::migration_manager&) {};
     virtual ~audit_syslog_storage_helper();
     virtual future<> start(const db::config& cfg) override;
     virtual future<> stop() override;

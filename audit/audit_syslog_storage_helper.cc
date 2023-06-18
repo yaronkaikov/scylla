@@ -121,7 +121,7 @@ future<> audit_syslog_storage_helper::write_login(const sstring& username,
     return make_ready_future<>();
 }
 
-using registry = class_registrator<storage_helper, audit_syslog_storage_helper, cql3::query_processor&>;
+using registry = class_registrator<storage_helper, audit_syslog_storage_helper, cql3::query_processor&, service::migration_manager&>;
 static registry registrator1("audit_syslog_storage_helper");
 
 }

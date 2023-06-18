@@ -18,12 +18,19 @@ class query_processor;
 
 }
 
+namespace service {
+
+class migration_manager;
+
+}
+
 namespace audit {
 
 class audit_cf_storage_helper : public storage_helper {
     static const sstring KEYSPACE_NAME;
     static const sstring TABLE_NAME;
     cql3::query_processor& _qp;
+    service::migration_manager& _mm;
     table_helper _table;
     service::query_state _dummy_query_state;
     static cql3::query_options make_data(const audit_info* audit_info,
@@ -37,7 +44,7 @@ class audit_cf_storage_helper : public storage_helper {
                                                const sstring& username,
                                                bool error);
 public:
-    explicit audit_cf_storage_helper(cql3::query_processor& qp);
+    explicit audit_cf_storage_helper(cql3::query_processor& qp, service::migration_manager& mm);
     virtual ~audit_cf_storage_helper() {}
     virtual future<> start(const db::config& cfg) override;
     virtual future<> stop() override;
