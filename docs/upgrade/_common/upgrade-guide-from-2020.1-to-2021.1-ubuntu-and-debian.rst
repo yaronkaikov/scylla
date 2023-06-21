@@ -102,6 +102,27 @@ To upgrade:
 
 Answer ‘y’ to the first two questions.
 
+
+ **Installing the New Version on Cloud**
+        
+If you're using the ScyllaDB official image (recommended), see :doc:`Upgrade ScyllaDB Image </upgrade/ami-upgrade/>` for upgrade instructions. 
+If you're using your own image and installed ScyllaDB packages for Ubuntu or Debian, you need to apply an extended upgrade 
+procedure:
+
+#. Update the ScyllaDB deb repo (see above).
+#. Configure Java 1.8 (see above).
+#. Install the new ScyllaDB version with the additional ``scylla-enterprise-machine-image`` package:
+
+   .. code-block:: console
+
+      sudo apt-get clean all
+      sudo apt-get update
+      sudo apt-get dist-upgrade scylla-enterprise
+      sudo apt-get install -y scylla-enterprise-machine-image
+
+#. Run ``scylla_setup`` without ``running io_setup``.
+#. Run ``sudo /opt/scylladb/scylla-machine-image/scylla_cloud_io_setup``.
+
 Start the node
 --------------
 

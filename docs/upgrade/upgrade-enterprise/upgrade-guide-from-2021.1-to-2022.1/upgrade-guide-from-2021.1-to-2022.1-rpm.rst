@@ -87,6 +87,25 @@ Before upgrading, check what version you are running now using ``rpm -qa scylla\
      sudo yum clean all
      sudo yum update scylla\* -y
 
+
+**Installing the New Version on Cloud**
+        
+If you're using the ScyllaDB official image (recommended), see :doc:`Upgrade Guide - ScyllaDB Image 2021.1 to 2022.1 </upgrade/upgrade-enterprise/upgrade-guide-from-2021.1-to-2022.1/upgrade-guide-from-2021.1-to-2022.1-image/>` for upgrade instructions.
+If you're using your own image and installed ScyllaDB packages for CentOS/RHEL, you need to apply an extended upgrade 
+procedure:
+
+#. Update the ScyllaDB deb repo (see above).
+#. Install the new ScyllaDB version with the additional ``scylla-enterprise-machine-image`` package:
+
+   .. code-block:: console
+
+      sudo yum clean all
+      sudo yum update scylla\* -y
+      sudo yum update scylla-enterprise-machine-image
+
+#. Run ``scylla_setup`` without ``running io_setup``.
+#. Run ``sudo /opt/scylladb/scylla-machine-image/scylla_cloud_io_setup``.
+
 Start the node
 --------------
 

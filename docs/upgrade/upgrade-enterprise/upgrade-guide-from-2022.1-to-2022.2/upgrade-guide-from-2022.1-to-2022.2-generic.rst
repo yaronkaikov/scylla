@@ -143,6 +143,27 @@ Download and install the new release
 
         Answer ‘y’ to the first two questions.
 
+        **Installing the New Version on Cloud**
+        
+        If you're using the ScyllaDB official image (recommended), see the **EC2/GCP/Azure Ubuntu Image** tab for upgrade instructions.
+        If you're using your own image and installed ScyllaDB packages for Ubuntu or Debian, you need to apply an extended upgrade 
+        procedure:
+
+        #. Update the ScyllaDB deb repo (see above).
+        #. Configure Java 1.8 (see above).
+        #. Install the new ScyllaDB version with the additional ``scylla-enterprise-machine-image`` package:
+
+            .. code-block:: console
+
+               sudo apt-get clean all
+               sudo apt-get update
+               sudo apt-get dist-upgrade scylla-enterprise
+               sudo apt-get dist-upgrade scylla-enterprise-machine-image
+
+        #. Run ``scylla_setup`` without ``running io_setup``.
+        #. Run ``sudo /opt/scylladb/scylla-machine-image/scylla_cloud_io_setup``.
+
+
    .. group-tab:: RHEL/CentOS
 
         Before upgrading, check what version you are running now using ``rpm -qa | grep scylla-enterprise-server``. You should use the same version as this version in case you want to |ROLLBACK|_ the upgrade. If you are not running a |SRC_VERSION|.x version, stop right here! This guide only covers |SRC_VERSION|.x to |NEW_VERSION|.y upgrades.
@@ -156,6 +177,26 @@ Download and install the new release
 
                sudo yum clean all
                sudo yum update scylla\* -y
+
+        
+        **Installing the New Version on Cloud**
+        
+        If you're using the ScyllaDB official image (recommended), see the **EC2/GCP/Azure Ubuntu Image** tab for upgrade instructions.
+        If you're using your own image and installed ScyllaDB packages for CentOS/RHEL, you need to apply an extended upgrade 
+        procedure:
+
+        #. Update the ScyllaDB deb repo (see above).
+        #. Install the new ScyllaDB version with the additional ``scylla-enterprise-machine-image`` package:
+
+            .. code-block:: console
+
+               sudo yum clean all
+               sudo yum update scylla\* -y
+               sudo yum update scylla-enterprise-machine-image
+
+        #. Run ``scylla_setup`` without ``running io_setup``.
+        #. Run ``sudo /opt/scylladb/scylla-machine-image/scylla_cloud_io_setup``.
+
 
    .. group-tab:: EC2/GCP/Azure Ubuntu Image
 
