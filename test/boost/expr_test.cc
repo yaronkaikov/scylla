@@ -16,6 +16,8 @@
 #include "types/set.hh"
 #include "types/user.hh"
 #include "test/lib/expr_test_utils.hh"
+#include "cql3/expr/evaluate.hh"
+#include "cql3/expr/expr-utils.hh"
 
 using namespace cql3;
 using namespace cql3::expr;
@@ -3239,6 +3241,125 @@ BOOST_AUTO_TEST_CASE(evaluate_conjunction_of_conjunctions_with_invalid) {
     expression conj_of_conjs = conjunction{.children = {conj1, conj2, conj3, conj4}};
 
     BOOST_REQUIRE_THROW(evaluate(conj_of_conjs, inputs), exceptions::invalid_request_exception);
+}
+
+BOOST_AUTO_TEST_CASE(evaluate_field_selection) {
+    // The user defined type has 5 fields:
+    // CREATE TYPE test_ks.my_type (
+    //   int_field int,
+    //   float_field float,
+    //   text_field text,
+    //   bigint_field bigint,
+    //   int_field2 int,
+    // )
+    shared_ptr<const user_type_impl> udt_type = user_type_impl::get_instance(
+        "test_ks", "my_type", {"int_field", "float_field", "text_field", "bigint_field", "int_field2"},
+        {int32_type, float_type, utf8_type, long_type, int32_type}, true);
+
+    // Create a UDT value:
+    // {int_field: 123, float_field: null, text_field: 'abcdef', bigint_field: blobasbigint(0x), int_field2: 1337}
+    usertype_constructor::elements_map_type udt_value_elements;
+    udt_value_elements.emplace(column_identifier("int_field", false), make_int_const(123));
+    udt_value_elements.emplace(column_identifier("float_field", false), constant::make_null(float_type));
+    udt_value_elements.emplace(column_identifier("text_field", false), make_text_const("abcdef"));
+    udt_value_elements.emplace(column_identifier("bigint_field", false), make_empty_const(long_type));
+    udt_value_elements.emplace(column_identifier("int_field2", false), make_int_const(1337));
+    expression udt_value =
+        constant(evaluate(usertype_constructor{.elements = std::move(udt_value_elements), .type = udt_type},
+                          evaluation_inputs{}),
+                 udt_type);
+
+    auto make_field_selection = [&](expression value, const char* selected_field) -> expression {
+        return field_selection{
+            .structure = value, .field = make_shared<column_identifier_raw>(selected_field, true), .type = udt_type};
+    };
+
+    // Evaluate the fields, check that field values are correct
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(udt_value, "int_field"), evaluation_inputs{}), make_int_raw(123));
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(udt_value, "float_field"), evaluation_inputs{}),
+                        cql3::raw_value::make_null());
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(udt_value, "text_field"), evaluation_inputs{}),
+                        make_text_raw("abcdef"));
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(udt_value, "bigint_field"), evaluation_inputs{}),
+                        make_empty_raw());
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(udt_value, "int_field2"), evaluation_inputs{}),
+                        make_int_raw(1337));
+
+    // Evaluate a nonexistent field, should throw an exception
+    BOOST_REQUIRE_THROW(evaluate(make_field_selection(udt_value, "field_testing"), evaluation_inputs{}),
+                        exceptions::invalid_request_exception);
+
+    // Create a UDT value with values for the first 3 fields.
+    // There's no value for the 4th and 5th field, so they should be NULL.
+    // This is normal behavior, some fields might not have a value if the UDT value was serialized before
+    // adding new fields to the type.
+    // {int_field: 123, float_field: null, text_field: ''}
+    expression short_udt_value =
+        constant(make_tuple_raw({make_int_raw(123), cql3::raw_value::make_null(), make_text_raw("")}), udt_type);
+
+    // Evaluate the first 3 fields, check that the value is correct
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(short_udt_value, "int_field"), evaluation_inputs{}),
+                        make_int_raw(123));
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(short_udt_value, "float_field"), evaluation_inputs{}),
+                        cql3::raw_value::make_null());
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(short_udt_value, "text_field"), evaluation_inputs{}),
+                        make_text_raw(""));
+
+    // The serialized value doesn't contain any data for the 4th or 5th field, so they should be NULL.
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(short_udt_value, "bigint_field"), evaluation_inputs{}),
+                        cql3::raw_value::make_null());
+    BOOST_REQUIRE_EQUAL(evaluate(make_field_selection(short_udt_value, "int_field2"), evaluation_inputs{}),
+                        cql3::raw_value::make_null());
+
+    // Evaluate a nonexistent field, should throw an exception
+    BOOST_REQUIRE_THROW(evaluate(make_field_selection(short_udt_value, "field_testing"), evaluation_inputs{}),
+                        exceptions::invalid_request_exception);
+}
+
+BOOST_AUTO_TEST_CASE(evaluate_column_mutation_attribute) {
+    auto s = make_simple_test_schema();
+    auto ttls = std::array{ int32_t(1), int32_t(2) };
+    auto timestamps = std::array{ int64_t(12345), int64_t(23456) };
+    auto ttl_of_s = column_mutation_attribute{
+        .kind = column_mutation_attribute::attribute_kind::ttl,
+        .column = column_value(&s->static_column_at(0)),
+    };
+    auto writetime_of_s = column_mutation_attribute{
+        .kind = column_mutation_attribute::attribute_kind::writetime,
+        .column = column_value(&s->static_column_at(0)),
+    };
+    auto ttl_of_r = column_mutation_attribute{
+        .kind = column_mutation_attribute::attribute_kind::ttl,
+        .column = column_value(&s->regular_column_at(0)),
+    };
+    auto writetime_of_r = column_mutation_attribute{
+        .kind = column_mutation_attribute::attribute_kind::writetime,
+        .column = column_value(&s->regular_column_at(0)),
+    };
+
+    auto null = cql3::raw_value::make_null();
+
+    auto [inputs1, inputs_data1] = make_evaluation_inputs(s, {
+        {"pk", mutation_column_value{make_int_raw(3)}},
+        {"ck", mutation_column_value{make_int_raw(4)}},
+        {"s", mutation_column_value{make_int_raw(3), 12345, 7}},
+        {"r", mutation_column_value{make_int_raw(3), 23456, 8}}});
+    BOOST_REQUIRE_EQUAL(evaluate(ttl_of_s, inputs1), make_int_raw(7));
+    BOOST_REQUIRE_EQUAL(evaluate(writetime_of_s, inputs1), make_bigint_raw(12345));
+    BOOST_REQUIRE_EQUAL(evaluate(ttl_of_r, inputs1), make_int_raw(8));
+    BOOST_REQUIRE_EQUAL(evaluate(writetime_of_r, inputs1), make_bigint_raw(23456));
+
+    auto [inputs2, inputs_data2] = make_evaluation_inputs(s, {
+        {"pk", make_int_raw(3)},
+        {"ck", make_int_raw(4)},
+        {"s", null},
+        {"r", null}});
+
+    BOOST_REQUIRE_EQUAL(evaluate(ttl_of_s, inputs2), null);
+    BOOST_REQUIRE_EQUAL(evaluate(writetime_of_s, inputs2), null);
+    BOOST_REQUIRE_EQUAL(evaluate(ttl_of_r, inputs2), null);
+    BOOST_REQUIRE_EQUAL(evaluate(writetime_of_r, inputs2), null);
+
 }
 
 // It should be possible to prepare an empty conjunction

@@ -8,6 +8,9 @@
 
 #include "expression.hh"
 
+#include "cql3/expr/evaluate.hh"
+#include "cql3/expr/expr-utils.hh"
+
 #include <seastar/core/on_internal_error.hh>
 
 #include <boost/algorithm/cxx11/all_of.hpp>
@@ -76,11 +79,11 @@ binary_operator::binary_operator(expression lhs, oper_t op, expression rhs, comp
 // Since column_identifier_raw is forward-declared in expression.hh, delay destructor instantiation here
 unresolved_identifier::~unresolved_identifier() = default;
 
-static cql3::raw_value evaluate(const bind_variable&, const evaluation_inputs&);
-static cql3::raw_value evaluate(const tuple_constructor&, const evaluation_inputs&);
-static cql3::raw_value evaluate(const collection_constructor&, const evaluation_inputs&);
-static cql3::raw_value evaluate(const usertype_constructor&, const evaluation_inputs&);
-static cql3::raw_value evaluate(const function_call&, const evaluation_inputs&);
+static cql3::raw_value do_evaluate(const bind_variable&, const evaluation_inputs&);
+static cql3::raw_value do_evaluate(const tuple_constructor&, const evaluation_inputs&);
+static cql3::raw_value do_evaluate(const collection_constructor&, const evaluation_inputs&);
+static cql3::raw_value do_evaluate(const usertype_constructor&, const evaluation_inputs&);
+static cql3::raw_value do_evaluate(const function_call&, const evaluation_inputs&);
 
 namespace {
 
@@ -110,13 +113,13 @@ managed_bytes_opt
 extract_column_value(const column_definition* cdef, const evaluation_inputs& inputs) {
     switch (cdef->kind) {
         case column_kind::partition_key:
-            return managed_bytes((*inputs.partition_key)[cdef->id]);
+            return managed_bytes(inputs.partition_key[cdef->id]);
         case column_kind::clustering_key:
-            if (cdef->id >= inputs.clustering_key->size()) {
+            if (cdef->id >= inputs.clustering_key.size()) {
                 // partial clustering key, or LWT non-existing row
                 return std::nullopt;
             }
-            return managed_bytes((*inputs.clustering_key)[cdef->id]);
+            return managed_bytes(inputs.clustering_key[cdef->id]);
         case column_kind::static_column:
             [[fallthrough]];
         case column_kind::regular_column: {
@@ -126,7 +129,7 @@ extract_column_value(const column_definition* cdef, const evaluation_inputs& inp
                         format("Column definition {} does not match any column in the query selection",
                         cdef->name_as_text()));
             }
-            return managed_bytes_opt((*inputs.static_and_regular_columns)[index]);
+            return managed_bytes_opt(inputs.static_and_regular_columns[index]);
         }
         default:
             throw exceptions::unsupported_operation_exception("Unknown column kind");
@@ -1126,7 +1129,11 @@ std::ostream& operator<<(std::ostream& os, const expression::printer& pr) {
                 on_internal_error(expr_logger, "unexpected cast_style");
             },
             [&] (const field_selection& fs)  {
-                fmt::print(os, "({}.{})", to_printer(fs.structure), fs.field);
+                if (pr.debug_mode) {
+                    fmt::print(os, "({}.{})", to_printer(fs.structure), fs.field);
+                } else {
+                    fmt::print(os, "{}.{}", to_printer(fs.structure), fs.field);
+                }
             },
             [&] (const bind_variable&) {
                 // FIXME: store and present bind variable name
@@ -1581,7 +1588,8 @@ std::optional<bool> get_bool_value(const constant& constant_val) {
     return constant_val.view().deserialize<bool>(*boolean_type);
 }
 
-cql3::raw_value evaluate(const binary_operator& binop, const evaluation_inputs& inputs) {
+static
+cql3::raw_value do_evaluate(const binary_operator& binop, const evaluation_inputs& inputs) {
     if (binop.order == comparison_order::clustering) {
         throw exceptions::invalid_request_exception("Can't evaluate a binary operator with SCYLLA_CLUSTERING_BOUND");
     }
@@ -1641,7 +1649,8 @@ cql3::raw_value evaluate(const binary_operator& binop, const evaluation_inputs& 
 // It works this way in Postgres as well, for example:
 // `SELECT true AND NULL AND 1/0 = 0` will throw a division by zero error
 // but `SELECT false AND 1/0 = 0` will successfully evaluate to FALSE.
-cql3::raw_value evaluate(const conjunction& conj, const evaluation_inputs& inputs) {
+static
+cql3::raw_value do_evaluate(const conjunction& conj, const evaluation_inputs& inputs) {
     bool has_null = false;
 
     for (const expression& element : conj.children) {
@@ -1668,57 +1677,122 @@ cql3::raw_value evaluate(const conjunction& conj, const evaluation_inputs& input
     return raw_value::make_value(boolean_type->decompose(true));
 }
 
-cql3::raw_value evaluate(const expression& e, const evaluation_inputs& inputs) {
-    return expr::visit(overloaded_functor {
-        [&](const binary_operator& binop) -> cql3::raw_value {
-            return evaluate(binop, inputs);
-        },
-        [&](const conjunction& conj) -> cql3::raw_value {
-            return evaluate(conj, inputs);
-        },
-        [](const unresolved_identifier&) -> cql3::raw_value {
-            on_internal_error(expr_logger, "Can't evaluate unresolved_identifier");
-        },
-        [](const column_mutation_attribute&) -> cql3::raw_value {
-            on_internal_error(expr_logger, "Can't evaluate a column_mutation_attribute");
-        },
-        [&](const cast& c) -> cql3::raw_value {
-            // std::invoke trick allows us to use "return" in switch can have the compiler warn us if we missed an enum
-            std::invoke([&] {
-                switch (c.style) {
-                case cast::cast_style::c: return;
-                case cast::cast_style::sql: on_internal_error(expr_logger, "SQL-style cast should have been converted to a function_call");
-                }
-                on_internal_error(expr_logger, "illegal cast_style");
-            });
+static
+cql3::raw_value do_evaluate(const field_selection& field_select, const evaluation_inputs& inputs) {
+    const user_type_impl* udt_type = dynamic_cast<const user_type_impl*>(&field_select.type->without_reversed());
+    if (udt_type == nullptr) {
+        on_internal_error(expr_logger, "evaluate(field_selection): type is not a user defined type");
+    }
 
-            auto ret = evaluate(c.arg, inputs);
-            auto type = std::get_if<data_type>(&c.type);
-            if (!type) {
-                on_internal_error(expr_logger, "attempting to evaluate an unprepared cast");
+    const sstring& selected_field_name = field_select.field->text();
+    std::optional<std::size_t> selected_field_idx = udt_type->idx_of_field(to_bytes_view(selected_field_name));
+    if (!selected_field_idx.has_value()) {
+        throw exceptions::invalid_request_exception(
+            format("Unknown field '{}' in expression {}, user type {} doesn't have a field with this name.",
+                   selected_field_name, field_select, udt_type->get_name_as_string()));
+    }
+
+    cql3::raw_value udt_value = evaluate(field_select.structure, inputs);
+    if (udt_value.is_null()) {
+        // `<null>.field` should evaluate to NULL.
+        return cql3::raw_value::make_null();
+    }
+
+    cql3::raw_value field_value = udt_value.view().with_value(
+        [&](const FragmentedView auto& udt_serialized_bytes) -> cql3::raw_value {
+            // std::optional<FragmentedView> read_field
+            auto read_field = read_nth_user_type_field(udt_serialized_bytes, *selected_field_idx);
+
+            if (read_field.has_value()) {
+                return cql3::raw_value::make_value(managed_bytes(*read_field));
+            } else {
+                return cql3::raw_value::make_null();
             }
-            return ret;
-        },
-        [](const field_selection&) -> cql3::raw_value {
-            on_internal_error(expr_logger, "Can't evaluate a field_selection");
-        },
+    });
 
-        [&](const column_value& cv) -> cql3::raw_value {
-            return raw_value::make_value(get_value(cv, inputs));
-        },
-        [&](const subscript& s) -> cql3::raw_value {
-            return raw_value::make_value(get_value(s, inputs));
-        },
-        [](const untyped_constant&) -> cql3::raw_value {
-            on_internal_error(expr_logger, "Can't evaluate a untyped_constant ");
-        },
+    return field_value;
+}
 
-        [](const constant& c) { return c.value; },
-        [&](const bind_variable& bind_var) { return evaluate(bind_var, inputs); },
-        [&](const tuple_constructor& tup) { return evaluate(tup, inputs); },
-        [&](const collection_constructor& col) { return evaluate(col, inputs); },
-        [&](const usertype_constructor& user_val) { return evaluate(user_val, inputs); },
-        [&](const function_call& fun_call) { return evaluate(fun_call, inputs); }
+static
+cql3::raw_value
+do_evaluate(const column_mutation_attribute& cma, const evaluation_inputs& inputs) {
+    auto col = expr::as_if<column_value>(&cma.column);
+    if (!col) {
+        on_internal_error(expr_logger, fmt::format("evaluating column_mutation_attribute of non-column {}", cma.column));
+    }
+    int32_t index = inputs.selection->index_of(*col->col);
+    switch (cma.kind) {
+    case column_mutation_attribute::attribute_kind::ttl: {
+        auto ttl_v = inputs.static_and_regular_ttls[index];
+        if (ttl_v <= 0) {
+            return cql3::raw_value::make_null();
+        }
+        return raw_value::make_value(data_value(ttl_v).serialize());
+    }
+    case column_mutation_attribute::attribute_kind::writetime: {
+        auto ts_v = inputs.static_and_regular_timestamps[index];
+        if (ts_v == api::missing_timestamp) {
+            return cql3::raw_value::make_null();
+        }
+        return raw_value::make_value(data_value(ts_v).serialize());
+    }
+    }
+    on_internal_error(expr_logger, "evaluating column_mutation_attribute with unexpected kind");
+}
+
+static
+cql3::raw_value
+do_evaluate(const cast& c, const evaluation_inputs& inputs) {
+    // std::invoke trick allows us to use "return" in switch can have the compiler warn us if we missed an enum
+    std::invoke([&] {
+        switch (c.style) {
+        case cast::cast_style::c: return;
+        case cast::cast_style::sql: on_internal_error(expr_logger, "SQL-style cast should have been converted to a function_call");
+        }
+        on_internal_error(expr_logger, "illegal cast_style");
+    });
+
+    auto ret = evaluate(c.arg, inputs);
+    auto type = std::get_if<data_type>(&c.type);
+    if (!type) {
+        on_internal_error(expr_logger, "attempting to evaluate an unprepared cast");
+    }
+    return ret;
+}
+
+static
+cql3::raw_value
+do_evaluate(const unresolved_identifier& ui, const evaluation_inputs& inputs) {
+    on_internal_error(expr_logger, "Can't evaluate unresolved_identifier");
+}
+
+static
+cql3::raw_value
+do_evaluate(const untyped_constant& uc, const evaluation_inputs& inputs) {
+    on_internal_error(expr_logger, "Can't evaluate a untyped_constant ");
+}
+
+static
+cql3::raw_value
+do_evaluate(const column_value& cv, const evaluation_inputs& inputs) {
+    return raw_value::make_value(get_value(cv, inputs));
+}
+
+static
+cql3::raw_value
+do_evaluate(const subscript& s, const evaluation_inputs& inputs) {
+    return raw_value::make_value(get_value(s, inputs));
+}
+
+static
+cql3::raw_value
+do_evaluate(const constant& c, const evaluation_inputs& inputs) {
+    return c.value;
+}
+
+cql3::raw_value evaluate(const expression& e, const evaluation_inputs& inputs) {
+    return expr::visit([&] (const ExpressionElement auto& ee) -> cql3::raw_value {
+        return do_evaluate(ee, inputs);
     }, e);
 }
 
@@ -1821,7 +1895,7 @@ static managed_bytes reserialize_value(View value_bytes,
         fmt::format("Reserializing type that shouldn't need reserialization: {}", type.name()));
 }
 
-static cql3::raw_value evaluate(const bind_variable& bind_var, const evaluation_inputs& inputs) {
+static cql3::raw_value do_evaluate(const bind_variable& bind_var, const evaluation_inputs& inputs) {
     if (bind_var.receiver.get() == nullptr) {
         on_internal_error(expr_logger,
             "evaluate(bind_variable) called with nullptr receiver, should be prepared first");
@@ -1852,7 +1926,7 @@ static cql3::raw_value evaluate(const bind_variable& bind_var, const evaluation_
     return raw_value::make_value(value);
 }
 
-static cql3::raw_value evaluate(const tuple_constructor& tuple, const evaluation_inputs& inputs) {
+static cql3::raw_value do_evaluate(const tuple_constructor& tuple, const evaluation_inputs& inputs) {
     if (tuple.type.get() == nullptr) {
         on_internal_error(expr_logger,
             "evaluate(tuple_constructor) called with nullptr type, should be prepared first");
@@ -1984,7 +2058,7 @@ static cql3::raw_value evaluate_map(const collection_constructor& collection, co
     return raw_value::make_value(std::move(serialized_map));
 }
 
-static cql3::raw_value evaluate(const collection_constructor& collection, const evaluation_inputs& inputs) {
+static cql3::raw_value do_evaluate(const collection_constructor& collection, const evaluation_inputs& inputs) {
     if (collection.type.get() == nullptr) {
         on_internal_error(expr_logger,
             "evaluate(collection_constructor) called with nullptr type, should be prepared first");
@@ -2003,7 +2077,7 @@ static cql3::raw_value evaluate(const collection_constructor& collection, const 
     std::abort();
 }
 
-static cql3::raw_value evaluate(const usertype_constructor& user_val, const evaluation_inputs& inputs) {
+static cql3::raw_value do_evaluate(const usertype_constructor& user_val, const evaluation_inputs& inputs) {
     if (user_val.type.get() == nullptr) {
         on_internal_error(expr_logger,
             "evaluate(usertype_constructor) called with nullptr type, should be prepared first");
@@ -2037,7 +2111,7 @@ static cql3::raw_value evaluate(const usertype_constructor& user_val, const eval
     return val_bytes;
 }
 
-static cql3::raw_value evaluate(const function_call& fun_call, const evaluation_inputs& inputs) {
+static cql3::raw_value do_evaluate(const function_call& fun_call, const evaluation_inputs& inputs) {
     const shared_ptr<functions::function>* fun = std::get_if<shared_ptr<functions::function>>(&fun_call.func);
     if (fun == nullptr) {
         throw std::runtime_error("Can't evaluate function call with name only, should be prepared earlier");
@@ -2681,7 +2755,7 @@ verify_no_aggregate_functions(const expression& expr, std::string_view context_f
         return std::visit(find_agg, fc.func);
     });
     if (found_agg) {
-        throw exceptions::invalid_request_exception(fmt::format("Aggregation function are not supported in the {}", context_for_errors));
+        throw exceptions::invalid_request_exception(fmt::format("Aggregation functions are not supported in the {}", context_for_errors));
     }
 }
 

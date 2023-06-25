@@ -34,6 +34,7 @@ enum class node_state: uint16_t {
     replacing,           // the node replaces another dead node in the cluster and it data is being streamed to it
     rebuilding,          // the node is being rebuild and is streaming data from other replicas
     normal,              // the node does not do any streaming and serves the slice of the ring that belongs to it
+    left_token_ring,     // the node left the token ring, but not group0 yet; we wait until other nodes stop writing to it
     left                 // the node left the cluster and group0
 };
 
@@ -63,6 +64,7 @@ struct replica_state {
     std::optional<ring_slice> ring; // if engaged contain the set of tokens the node owns together with their state
     size_t shard_count;
     uint8_t ignore_msb;
+    std::set<sstring> supported_features;
 };
 
 struct topology {
@@ -107,6 +109,9 @@ struct topology {
     // It's used as partition key in CDC_GENERATIONS_V3 table.
     std::optional<utils::UUID> new_cdc_generation_data_uuid;
 
+    // Features that are considered enabled by the cluster
+    std::set<sstring> enabled_features;
+
     // Find only nodes in non 'left' state
     const std::pair<const raft::server_id, replica_state>* find(raft::server_id id) const;
     // Return true if node exists in any state including 'left' one
@@ -138,9 +143,12 @@ struct raft_topology_cmd {
           barrier_and_drain,    // same + drain requests which use previous versions
           stream_ranges,        // reqeust to stream data, return when streaming is
                                 // done
-          fence                 // erect the fence against requests with stale versions
+          fence,                // erect the fence against requests with stale versions
+          shutdown,             // a decommissioning node should shut down
       };
       command cmd;
+
+      raft_topology_cmd(command c) : cmd(c) {}
 };
 
 // returned as a result of raft_bootstrap_cmd

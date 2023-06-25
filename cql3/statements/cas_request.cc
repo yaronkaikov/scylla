@@ -13,6 +13,8 @@
 #include "cas_request.hh"
 #include <seastar/core/sleep.hh>
 #include "cql3/result_set.hh"
+#include "cql3/expr/evaluate.hh"
+#include "cql3/expr/expr-utils.hh"
 #include "transport/messages/result_message.hh"
 #include "types/map.hh"
 #include "service/storage_proxy.hh"
@@ -174,9 +176,9 @@ cas_request::build_cas_result_set(seastar::shared_ptr<cql3::metadata> metadata,
         auto ckey_bytes = old_row.ckey->explode();
 
         auto eval_inputs = expr::evaluation_inputs{
-            .partition_key = &pkey_bytes,
-            .clustering_key = &ckey_bytes,
-            .static_and_regular_columns = &old_row.row->cells,
+            .partition_key = pkey_bytes,
+            .clustering_key = ckey_bytes,
+            .static_and_regular_columns = old_row.row->cells,
             .selection = _rows.selection.get(),
         };
 

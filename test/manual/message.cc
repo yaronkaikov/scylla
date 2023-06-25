@@ -177,7 +177,7 @@ int main(int ac, char ** av) {
         return create_scheduling_group("sl_default_sg", 1.0).then([&sl_controller, &auth_service] (scheduling_group default_scheduling_group){
             return sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, default_scheduling_group);
         }).then([listen, &messaging, &sl_controller] {
-            return messaging.start(std::ref(sl_controller), listen);
+            return messaging.start(std::ref(sl_controller), locator::host_id{}, listen, 7000);
         }).then([config, stay_alive, &messaging] () {
             auto testers = new distributed<tester>;
             return testers->start(std::ref(messaging)).then([testers]{

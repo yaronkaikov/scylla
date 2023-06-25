@@ -32,6 +32,8 @@
 #include "cql3/functions/functions.hh"
 #include "cql3/functions/user_function.hh"
 #include "cql3/functions/user_aggregate.hh"
+#include "cql3/expr/evaluate.hh"
+#include "cql3/expr/expr-utils.hh"
 #include "cql3/util.hh"
 #include "types/list.hh"
 #include "types/set.hh"
@@ -100,15 +102,16 @@ namespace {
     });
 }
 
-schema_ctxt::schema_ctxt(const db::config& cfg, std::shared_ptr<data_dictionary::user_types_storage> uts)
-    : _extensions(cfg.extensions())
+schema_ctxt::schema_ctxt(const db::config& cfg, std::shared_ptr<data_dictionary::user_types_storage> uts, replica::database* db)
+    : _db(db)
+    , _extensions(cfg.extensions())
     , _murmur3_partitioner_ignore_msb_bits(cfg.murmur3_partitioner_ignore_msb_bits())
     , _schema_registry_grace_period(cfg.schema_registry_grace_period())
     , _user_types(std::move(uts))
 {}
 
-schema_ctxt::schema_ctxt(const replica::database& db)
-    : schema_ctxt(db.get_config(), db.as_user_types_storage())
+schema_ctxt::schema_ctxt(replica::database& db)
+    : schema_ctxt(db.get_config(), db.as_user_types_storage(), &db)
 {}
 
 schema_ctxt::schema_ctxt(distributed<replica::database>& db)

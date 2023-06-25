@@ -73,7 +73,7 @@ int main(int ac, char ** av) {
             sharded<qos::service_level_controller> sl_controller;
             scheduling_group default_scheduling_group = create_scheduling_group("sl_default_sg", 1.0).get();
             sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, default_scheduling_group).get();
-            messaging.start(std::ref(sl_controller), listen).get();
+            messaging.start(std::ref(sl_controller), locator::host_id{}, listen, 7000).get();
             auto stop_messaging = deferred_stop(messaging);
 
             gms::gossip_config gcfg;

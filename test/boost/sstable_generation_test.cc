@@ -3,7 +3,7 @@
  */
 
 /*
- * SPDX-License-Identifier: AGPL-3.0-or-later
+ * SPDX-License-Identifier: ScyllaDB-Proprietary
  */
 
 #define BOOST_TEST_MODULE sstable-generation
