@@ -89,22 +89,41 @@ This key must be pre-created with access policy allowing the above AWS id Encryp
 // END entry definitions
 {}
 
-static class : public encryption::encryption_config, public configurable {
+static class : public configurable {
+    std::unordered_map<const db::config*, std::unique_ptr<encryption::encryption_config>> _cfgs;
+
+    // While it is fine for normal execution to have just one, static (us) encryption config, 
+    // it does not work well with unit testing, where we repeatedly create new cql_test_envs etc,
+    // since new config values will not be overwritten due to the actual named_values being shared here.
+    // Fix this (temporarily) by simply keeping a local map cfg->ecfg and using these.
+    // TODO: improve this by allowing db::config to hold named sub->configs (mapping config file objects).
+    encryption::encryption_config& ensure_config(const db::config& cfg, bool may_exist) {
+        if (!may_exist && _cfgs.count(&cfg)) {
+            throw std::runtime_error("Config already processed");
+        }
+        if (!_cfgs.count(&cfg)) {
+            _cfgs.emplace(&cfg, std::make_unique<encryption::encryption_config>());
+        }
+        return *_cfgs.at(&cfg);
+    }
 public:
     void append_options(db::config& cfg, boost::program_options::options_description_easy_init& init) override {
         // hook into main scylla.yaml.
-        cfg.add(values());
+        cfg.add(ensure_config(cfg, false).values());
     }
     future<notify_func> initialize_ex(const boost::program_options::variables_map& opts, const db::config& cfg, db::extensions& exts, const service_set& services) override {
-        auto ctxt = co_await encryption::register_extensions(cfg, *this, exts, services);
-        co_return [ctxt](system_state e) {
+        auto ctxt = co_await encryption::register_extensions(cfg, ensure_config(cfg, true), exts, services);
+        co_return [this, ctxt, cp = &cfg](system_state e) -> future<> {
             switch (e) {
                 case system_state::started:
-                    return ctxt->start();
+                    co_await ctxt->start();
+                    break;
                 case system_state::stopped:
-                    return ctxt->stop();
+                    co_await ctxt->stop();
+                    _cfgs.erase(cp);
+                    break;
                 default:
-                    return make_ready_future<>();
+                    break;
             }
         };
     }
