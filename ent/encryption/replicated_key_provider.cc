@@ -363,7 +363,6 @@ future<> replicated_key_provider::maybe_initialize_tables() {
 
 future<> replicated_key_provider::do_initialize_tables(const ::replica::database& db, service::migration_manager& mm) {
     if (db.has_schema(KSNAME, TABLENAME)) {
-        co_await db.find_keyspace(KSNAME).ensure_populated();
         co_return;
     }
 
