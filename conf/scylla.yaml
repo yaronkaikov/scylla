@@ -528,10 +528,10 @@ commitlog_total_space_in_mb: -1
 # by default, Scylla does not audit anything.
 # It is possible to enable auditing to the following places:
 #   - audit.audit_log column family by setting the flag to "table"
-audit: "table"
+# audit: "none"
 #
 # List of statement categories that should be audited.
-audit_categories: "DCL,DDL,AUTH,ADMIN"
+# audit_categories: "DCL,DDL,AUTH"
 #
 # List of tables that should be audited.
 # audit_tables: "<keyspace_name>.<table_name>,<keyspace_name>.<table_name>"
