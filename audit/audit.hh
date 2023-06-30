@@ -122,7 +122,7 @@ public:
     bool should_log(const audit_info* audit_info) const;
     bool should_log_login() const { return _audited_categories.contains(statement_category::AUTH); }
     future<> log(const audit_info* audit_info, service::query_state& query_state, const cql3::query_options& options, bool error);
-    future<> log_login(const sstring& username, socket_address client_ip, bool error);
+    future<> log_login(const sstring& username, socket_address client_ip, bool error) noexcept;
 };
 
 future<> inspect(shared_ptr<cql3::cql_statement> statement, service::query_state& query_state, const cql3::query_options& options, bool error);
