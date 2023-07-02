@@ -94,6 +94,7 @@
 #include "utils/error_injection.hh"
 #include "utils/exceptions.hh"
 #include "utils/tuple_utils.hh"
+#include "utils/rpc_utils.hh"
 #include "replica/exceptions.hh"
 #include "db/operation_type.hh"
 #include "locator/util.hh"
@@ -134,7 +135,7 @@ static future<ResultTuple> encode_replica_exception_for_rpc(gms::feature_service
     std::exception_ptr eptr = f.get_exception();
     if (features.typed_errors_in_read_rpc) {
         if (auto ex = replica::try_encode_replica_exception(eptr); ex) {
-            return make_ready_future<ResultTuple>(utils::tuple_insert<ResultTuple>(SourceTuple{}, std::move(ex)));
+            return make_ready_future<ResultTuple>(utils::tuple_insert<ResultTuple>(utils::make_default_rpc_tuple<SourceTuple>(), std::move(ex)));
         }
     }
     return make_exception_future<ResultTuple>(std::move(eptr));
@@ -3360,8 +3361,6 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const locator::eff
                 cl_for_paxos, participants + 1, live_endpoints.size());
     }
 
-    bool dead = participants != live_endpoints.size();
-
     // Apart from the ballot, paxos_state::prepare() also sends the current value of the requested key.
     // If the values received from different replicas match, we skip a separate query stage thus saving
     // one network round trip. To generate less traffic, only closest replicas send data, others send
@@ -3369,7 +3368,7 @@ storage_proxy::get_paxos_participants(const sstring& ks_name, const locator::eff
     // list of participants by proximity to this instance.
     sort_endpoints_by_proximity(erm.get_topology(), live_endpoints);
 
-    return paxos_participants{std::move(live_endpoints), required_participants, dead};
+    return paxos_participants{std::move(live_endpoints), required_participants};
 }
 
 

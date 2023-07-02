@@ -11,6 +11,7 @@ Security
    Reset Authenticator Password </troubleshooting/password-reset>
    enable-authorization
    authorization
+   certificate-authentication
    rbac-usecase
    auditing
    client-node-encryption
@@ -41,6 +42,7 @@ Security
   * :doc:`Role Based Access Control (RBAC) </operating-scylla/security/rbac-usecase/>`
   * :doc:`Grant Authorization CQL Reference </operating-scylla/security/authorization/>`
   * :doc:`Reset Authenticator Password </troubleshooting/password-reset/>`
+  * :doc:`Certificate Based Authentication </operating-scylla/security/certificate-authentication/>`
   * :doc:`LDAP Authentication <ldap-authentication>`
   * :doc:`LDAP Authorization (Role Management) </operating-scylla/security/ldap-authorization>`
 

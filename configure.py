@@ -10,6 +10,7 @@
 
 import os, os.path, textwrap, argparse, sys, shlex, subprocess, tempfile, re, platform, copy, pathlib
 from distutils.spawn import find_executable
+from pkg_resources import parse_version
 
 curdir = os.getcwd()
 
@@ -156,6 +157,41 @@ def flag_supported(flag, compiler):
     split = adjusted.split(' ')
     return try_compile(flags=['-Werror'] + split, compiler=compiler)
 
+
+class OptimizationLevel:
+    warned = False
+
+    @classmethod
+    def _warn(cls, safe_level) -> None:
+        if cls.warned:
+            # only prints this warning for a single time
+            return
+        print('\033[91mWARN\033[00m: '
+              f'Changing optimization level to "-O{safe_level}" '
+              'due to https://github.com/llvm/llvm-project/issues/62842. '
+              'Please note -O0 is so slow that some tests might fail.')
+        cls.warned = True
+
+    def __call__(self, cxx_compiler, default_level):
+        # workaround https://github.com/llvm/llvm-project/issues/62842
+        if 'clang' not in cxx_compiler:
+            return default_level
+
+        proc = subprocess.run([cxx_compiler, '--version'],
+                              capture_output=True,
+                              check=True,
+                              text=True)
+        matched = re.match(r'clang version (\d+\.\d+.\d+)', proc.stdout)
+        if matched is None:
+            raise Exception(f'Unable to tell version of {cxx_compiler}')
+        if parse_version(matched.group(1)) < parse_version('16.0.0'):
+            return default_level
+        safe_level = '0'
+        if default_level == safe_level:
+            return default_level
+        self._warn(safe_level)
+        return safe_level
+optimization_level = OptimizationLevel()
 
 def linker_flags(compiler):
     src_main = 'int main(int argc, char **argv) { return 0; }'
@@ -519,6 +555,7 @@ scylla_tests = set([
     'test/boost/locator_topology_test',
     'test/boost/string_format_test',
     'test/boost/tagged_integer_test',
+    'test/boost/group0_cmd_merge_test',
     'test/boost/encrypted_file_test',
     'test/boost/encryption_at_rest_test',
     'test/manual/ec2_snitch_test',
@@ -749,6 +786,7 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/rjson.cc',
                 'utils/human_readable.cc',
                 'utils/histogram_metrics_helper.cc',
+                'utils/pretty_printers.cc',
                 'converting_mutation_partition_applier.cc',
                 'readers/combined.cc',
                 'readers/multishard.cc',
@@ -1043,6 +1081,7 @@ scylla_core = (['message/messaging_service.cc',
                 'auth/transitional.cc',
                 'auth/role_or_anonymous.cc',
                 'auth/sasl_challenge.cc',
+                'auth/certificate_authenticator.cc',
                 'auth/saslauthd_authenticator.cc',
                 'tracing/tracing.cc',
                 'tracing/trace_keyspace_helper.cc',
@@ -1469,7 +1508,8 @@ for mode_level in args.mode_o_levels:
     modes[mode]['optimization-level'] = level
 
 for mode in modes:
-    modes[mode]['cxxflags'] += f' -O{modes[mode]["optimization-level"]}'
+    level = optimization_level(args.cxx, modes[mode]["optimization-level"])
+    modes[mode]['cxxflags'] += f' -O{level}'
 
 optimization_flags = [
     '--param inline-unit-growth=300', # gcc
