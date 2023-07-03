@@ -132,7 +132,7 @@ public:
             _options.host = m[2].length() > 0 ? m[2].str() : m[3].str();
             _options.port = m[4].length() > 0 ? std::stoi(m[4].str()) : 0;
         }
-        if (_options.endpoint.empty() && _options.host.empty() && _options.aws_region.empty()) {
+        if (_options.endpoint.empty() && _options.host.empty() && _options.aws_region.empty() && !_options.aws_use_ec2_region) {
             throw std::invalid_argument("No AWS region or endpoint specified");
         }
         if (_options.port == 0) {
@@ -515,6 +515,15 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, s
         co_return std::make_tuple(std::move(res), token);
     };
 
+    std::string gtoken;
+
+    if (_options.aws_region.empty() && _options.host.empty()) {
+        assert(_options.aws_use_ec2_region);
+        httpclient::result_type res;
+        std::tie(res, gtoken) = co_await query_ec2_meta("/latest/meta-data/placement/region");
+        _options.aws_region = res.body();
+    }
+
     if (_options.host.empty()) {
         // resolve region -> endpoint
         assert(!_options.aws_region.empty());
@@ -604,7 +613,7 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, s
     auto session = ""s;
 
     if (_options.aws_use_ec2_credentials) {
-        auto [res, token] = co_await query_ec2_meta("/latest/meta-data/iam/security-credentials/");
+        auto [res, token] = co_await query_ec2_meta("/latest/meta-data/iam/security-credentials/", gtoken);
         auto role = res.body();
 
         std::tie(res, std::ignore) = co_await query_ec2_meta("/latest/meta-data/iam/security-credentials/" + role, token);
@@ -1049,6 +1058,7 @@ encryption::kms_host::kms_host(encryption_context& ctxt, const std::string& name
         opts.aws_profile = m("aws_profile").value_or("");
         opts.aws_assume_role_arn = m("aws_assume_role_arn").value_or("");
         opts.aws_use_ec2_credentials = is_true(m("aws_use_ec2_credentials").value_or("false"));
+        opts.aws_use_ec2_region = is_true(m("aws_use_ec2_region").value_or("false"));
 
         // use "endpoint" semantics to match AWS configs.
         opts.endpoint = m("endpoint").value_or("");

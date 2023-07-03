@@ -41,6 +41,7 @@ public:
         std::string aws_assume_role_arn;
 
         bool        aws_use_ec2_credentials;
+        bool        aws_use_ec2_region;
 
         // key to use for keys
         std::string master_key;

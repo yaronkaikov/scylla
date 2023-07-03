@@ -710,6 +710,7 @@ strict_is_not_null_in_views: true
 #       aws_secret_access_key: <aws secret access key> (optional)
 #       aws_profile: <aws credentials profile> (optional)
 #       aws_use_ec2_credentials: <bool> (default false) If true, KMS queries will use the credentials provided by ec2 instance role metadata as initial access key. 
+#       aws_use_ec2_region: <bool> (default false) If true, KMS queries will use the AWS region indicated by ec2 instance metadata
 #       aws_assume_role_arn: <aws role arn> (optional) If set, any KMS query will first attempt to assume this role. 
 #       master_key: <named KMS key for encrypting data keys> (required)
 #       certificate: <identifying certificate> (optional)
