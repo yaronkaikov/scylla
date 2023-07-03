@@ -75,12 +75,18 @@ KMIP requests will fail over/retry 'max_command_retries' times (default 3)
 
 The unique name of kms host that can be referenced in table schema.
 
-host.yourdomain.com={ endpoint=<http(s)://host[:port]>, aws_access_key_id=<AWS access id>, aws_secret_access_key=<AWS secret key>, aws_region=<AWS region>, master_key=<alias or id>, keyfile=/path/to/keyfile, truststore=/path/to/truststore.pem, key_cache_millis=<cache ms>, timeout=<timeout ms> }:...
+host.yourdomain.com={ endpoint=<http(s)://host[:port]>, aws_access_key_id=<AWS access id>, aws_secret_access_key=<AWS secret key>, aws_profile<profile>, aws_region=<AWS region>, aws_use_ec2_credentials<bool>, aws_use_ec2_region=<bool>, aws_assume_role_arn=<AWS role arn>, master_key=<alias or id>, keyfile=/path/to/keyfile, truststore=/path/to/truststore.pem, key_cache_millis=<cache ms>, timeout=<timeout ms> }:...
 
 Actual connection can be either an explicit endpoint (<host>:<port>), or selected automatic via aws_region.
 
+If aws_use_ec2_region is true, regions is instead queried from EC2 metadata.
+
 Authentication can be explicit with aws_access_key_id and aws_secret_access_key. Either secret or both can be ommitted
 in which case the provider will try to read them from AWS credentials in ~/.aws/credentials
+
+If aws_use_ec2_credentials is true, authentication is instead queried from EC2 metadata.
+
+If aws_assume_role_arn is set, scylla will issue an AssumeRole command and use the resulting security token for key operations.
 
 master_key is an AWS KMS key id or alias from which all keys used for actual encryption of scylla data will be derived.
 This key must be pre-created with access policy allowing the above AWS id Encrypt, Decrypt and GenerateDataKey operations.
