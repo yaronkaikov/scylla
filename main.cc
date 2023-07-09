@@ -1222,7 +1222,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 fd.stop().get();
             });
 
-            raft_gr.start(cfg->consistent_cluster_management(),
+            raft_gr.start(cfg->consistent_cluster_management(), raft::server_id{cfg->host_id.id},
                 std::ref(raft_address_map), std::ref(messaging), std::ref(gossiper), std::ref(fd)).get();
 
             // group0 client exists only on shard 0.
@@ -1333,10 +1333,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     startlog.error("Bad configuration: consistent_cluster_management requires schema commit log to be enabled");
                     throw bad_configuration_error();
                 }
-                auto my_raft_id = raft::server_id{cfg->host_id.uuid()};
                 supervisor::notify("starting Raft Group Registry service");
-                raft_gr.invoke_on_all([my_raft_id] (service::raft_group_registry& raft_gr) {
-                    return raft_gr.start(my_raft_id);
+                raft_gr.invoke_on_all([] (service::raft_group_registry& raft_gr) {
+                    return raft_gr.start();
                 }).get();
             } else {
                 if (cfg->check_experimental(db::experimental_features_t::feature::BROADCAST_TABLES)) {
@@ -1632,9 +1631,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // Set up group0 service earlier since it is needed by group0 setup just below
             ss.local().set_group0(group0_service);
 
-            // Setup group0 early in case the node is bootsrapped already and the group exists
+            // Setup group0 early in case the node is bootstrapped already and the group exists.
             // Need to do it before allowing incomming messaging service connections since
-            // storage proxy's and migration manager's verbs may access group0
+            // storage proxy's and migration manager's verbs may access group0.
+            // This will also disable migration manager schema pulls if needed.
             group0_service.setup_group0_if_exist(sys_ks.local(), ss.local(), qp.local(), mm.local(), cdc_generation_service.local()).get();
 
             // It's essential to load fencing_version prior to starting the messaging service,

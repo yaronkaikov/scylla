@@ -7,10 +7,12 @@
  */
 #pragma once
 
+#include "seastarx.hh"
+#include "log.hh"
+#include "db/consistency_level.hh"
 #include <seastar/core/sharded.hh>
+#include <seastar/util/log.hh>
 
-#include "service/query_state.hh"
-#include "cql3/query_options.hh"
 #include "enum_set.hh"
 
 #include <memory>
@@ -25,12 +27,14 @@ namespace cql3 {
 
 class cql_statement;
 class query_processor;
+class query_options;
 
 }
 
 namespace service {
 
 class migration_manager;
+class query_state;
 
 }
 

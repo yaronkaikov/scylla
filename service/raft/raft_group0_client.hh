@@ -55,6 +55,8 @@ public:
     bool with_raft() const;
 };
 
+void release_guard(group0_guard guard);
+
 class group0_concurrent_modification : public std::runtime_error {
 public:
     group0_concurrent_modification()
@@ -127,7 +129,9 @@ public:
     // and add_entry would again forward to shard 0.
     future<group0_guard> start_operation(seastar::abort_source* as = nullptr);
 
-    group0_command prepare_command(broadcast_table_query query);
+    template<typename Command>
+    requires std::same_as<Command, broadcast_table_query> || std::same_as<Command, write_mutations>
+    group0_command prepare_command(Command change, std::string_view description);
     template<typename Command>
     requires std::same_as<Command, schema_change> || std::same_as<Command, topology_change>
     group0_command prepare_command(Command change, group0_guard& guard, std::string_view description);
@@ -154,11 +158,6 @@ public:
     // in the final state anyway). Thus, when `synchronize` or `use_post_raft_procedures` is returned,
     // the holder does not actually hold any lock.
     future<std::pair<rwlock::holder, group0_upgrade_state>> get_group0_upgrade_state();
-
-    // Returns true iff the upgrade state is `use_post_raft_procedures`
-    // The function does not take upgrade lock since after the state becomes
-    // `use_post_raft_procedures` it can never go back
-    bool using_raft();
 
     // Ensures that nobody holds any `rwlock::holder`s returned from `get_group0_upgrade_state()`
     // then changes the state to `s`.

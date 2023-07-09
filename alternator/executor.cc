@@ -109,16 +109,20 @@ json::json_return_type make_streamed(rjson::value&& value) {
         // move objects to coroutine frame.
         auto los = std::move(os);
         auto lrs = std::move(rs);
+        std::exception_ptr ex;
         try {
             co_await rjson::print(*lrs, los);
-            co_await los.close();
         } catch (...) {
             // at this point, we cannot really do anything. HTTP headers and return code are
             // already written, and quite potentially a portion of the content data.
             // just log + rethrow. It is probably better the HTTP server closes connection
             // abruptly or something...
-            elogger.error("Unhandled exception in data streaming: {}", std::current_exception());
-            throw;
+            ex = std::current_exception();
+            elogger.error("Exception during streaming HTTP response: {}", ex);
+        }
+        co_await los.close();
+        if (ex) {
+            co_await coroutine::return_exception_ptr(std::move(ex));
         }
         co_return;
     };
@@ -4360,6 +4364,17 @@ future<executor::request_return_type> executor::list_tables(client_state& client
 
 future<executor::request_return_type> executor::describe_endpoints(client_state& client_state, service_permit permit, rjson::value request, std::string host_header) {
     _stats.api_operations.describe_endpoints++;
+    // The alternator_describe_endpoints configuration can be used to disable
+    // the DescribeEndpoints operation, or set it to return a fixed string
+    std::string override = _proxy.data_dictionary().get_config().alternator_describe_endpoints();
+    if (!override.empty()) {
+        if (override == "disabled") {
+            _stats.unsupported_operations++;
+            return make_ready_future<request_return_type>(api_error::unknown_operation(
+                "DescribeEndpoints disabled by configuration (alternator_describe_endpoints=disabled)"));
+        }
+        host_header = std::move(override);
+    }
     rjson::value response = rjson::empty_object();
     // Without having any configuration parameter to say otherwise, we tell
     // the user to return to the same endpoint they used to reach us. The only

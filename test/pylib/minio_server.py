@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 #
 # Copyright (C) 2022-present ScyllaDB
 #
@@ -7,9 +8,11 @@
    Provides helpers to setup and manage minio server for testing.
 """
 import os
+import argparse
 import asyncio
 from asyncio.subprocess import Process
 from typing import Optional
+import logging
 import pathlib
 import subprocess
 import shutil
@@ -52,6 +55,30 @@ class MinioServer:
         self.log_file.write('\n'.encode())
         self.log_file.flush()
 
+    async def mc(self, *args, ignore_failure=False, timeout=0):
+        retry_until: float = time.time() + timeout
+        retry_step: float = 0.1
+        cmd = ['mc',
+               '--debug',
+               '--config-dir', self.mcdir]
+        cmd.extend(args)
+
+        while True:
+            try:
+                subprocess.check_call(cmd, stdout=self.log_file, stderr=self.log_file)
+            except subprocess.CalledProcessError:
+                if ignore_failure:
+                    self.log_to_file('ignoring')
+                    break
+                command = ' '.join(args)
+                self.log_to_file(f'failed to run "mc {command}"')
+                if time.time() >= retry_until:
+                    raise
+                self.log_to_file(f'retry after {retry_step} seconds')
+                await asyncio.sleep(retry_step)
+            else:
+                break
+
     async def start(self):
         if self.srv_exe is None:
             self.logger.info("Minio not installed, get it from https://dl.minio.io/server/minio/release/linux-amd64/minio and put into PATH")
@@ -85,18 +112,15 @@ class MinioServer:
             await asyncio.sleep(0.1)
 
         try:
+            alias = 'local'
             self.log_to_file(f'Configuring access to {self.address}:{self.port}')
-            try:
-                subprocess.check_call(['mc', '--debug', '-C', self.mcdir, 'config', 'host', 'rm', 'local'], stdout=self.log_file, stderr=self.log_file)
-            except:
-                self.log_to_file('Failed to remove local alias, ignoring')
-                pass
-
-            subprocess.check_call(['mc', '--debug', '-C', self.mcdir, 'config', 'host', 'add', 'local', f'http://{self.address}:{self.port}', self.default_user, self.default_pass], stdout=self.log_file, stderr=self.log_file)
-
+            await self.mc('config', 'host', 'rm', alias, ignore_failure=True)
+            # wait for the server to be ready when running the first command which should not fail
+            await self.mc('config', 'host', 'add', alias, f'http://{self.address}:{self.port}', self.default_user, self.default_pass, timeout=30)
             self.log_to_file(f'Configuring bucket {self.bucket_name}')
-            subprocess.check_call(['mc', '--debug', '-C', self.mcdir, 'mb', f'local/{self.bucket_name}'], stdout=self.log_file, stderr=self.log_file)
-            subprocess.check_call(['mc', '--debug', '-C', self.mcdir, 'anonymous', 'set', 'public', f'local/{self.bucket_name}'], stdout=self.log_file, stderr=self.log_file)
+            await self.mc('mb', f'{alias}/{self.bucket_name}')
+            await self.mc('anonymous', 'set', 'public', f'{alias}/{self.bucket_name}')
+
         except Exception as e:
             self.logger.info(f'MC failed: {e}')
             await self.stop()
@@ -116,3 +140,44 @@ class MinioServer:
             self.logger.info('Killed minio server')
             self.cmd = None
             shutil.rmtree(self.tempdir)
+
+
+class HostRegistry:
+    def __init__(self, host: str) -> None:
+        self._host = host
+
+    async def lease_host(self) -> str:
+        assert self._host is not None
+        host = self._host
+        self._host = None
+        return host
+
+    async def release_host(self, host: str) -> None:
+        assert self._host is None
+        self._host = host
+
+
+async def main():
+    parser = argparse.ArgumentParser(description="Start a MinIO server")
+    parser.add_argument('--tempdir')
+    parser.add_argument('--host', default='127.0.0.1')
+    args = parser.parse_args()
+    host_registry = HostRegistry(args.host)
+    with tempfile.TemporaryDirectory(suffix='-minio', dir=args.tempdir) as tempdir:
+        if args.tempdir is None:
+            print(f'{tempdir=}')
+        server = MinioServer(tempdir, host_registry, logging.getLogger('minio'))
+        await server.start()
+        print(f'export S3_SERVER_ADDRESS_FOR_TEST={server.address}')
+        print(f'export S3_SERVER_PORT_FOR_TEST={server.port}')
+        print(f'export S3_PUBLIC_BUCKET_FOR_TEST={server.bucket_name}')
+        try:
+            _ = input('server started. press any key to stop: ')
+        except KeyboardInterrupt:
+            pass
+        finally:
+            await server.stop()
+
+if __name__ == '__main__':
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())

@@ -860,7 +860,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , developer_mode(this, "developer_mode", value_status::Used, DEVELOPER_MODE_DEFAULT, "Relax environment checks. Setting to true can reduce performance and reliability significantly.")
     , skip_wait_for_gossip_to_settle(this, "skip_wait_for_gossip_to_settle", value_status::Used, -1, "An integer to configure the wait for gossip to settle. -1: wait normally, 0: do not wait at all, n: wait for at most n polls. Same as -Dcassandra.skip_wait_for_gossip_to_settle in cassandra.")
     , force_gossip_generation(this, "force_gossip_generation", liveness::LiveUpdate, value_status::Used, -1 , "Force gossip to use the generation number provided by user")
-    , experimental(this, "experimental", value_status::Used, false, "[Deprecated] Set to true to unlock all experimental features (except 'raft' feature, which should be enabled explicitly via 'experimental-features' option). Please use 'experimental-features', instead.")
+    , experimental(this, "experimental", value_status::Used, false, "[Deprecated] Set to true to unlock all experimental features (except 'consistent-topology-changes' feature, which should be enabled explicitly via 'experimental-features' option). Please use 'experimental-features', instead.")
     , experimental_features(this, "experimental_features", value_status::Used, {}, experimental_features_help_string())
     , lsa_reclamation_step(this, "lsa_reclamation_step", value_status::Used, 1, "Minimum number of segments to reclaim in a single step")
     , prometheus_port(this, "prometheus_port", value_status::Used, 9180, "Prometheus port, set to zero to disable")
@@ -959,6 +959,13 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , alternator_ttl_period_in_seconds(this, "alternator_ttl_period_in_seconds", value_status::Used,
         60*60*24,
         "The default period for Alternator's expiration scan. Alternator attempts to scan every table within that period.")
+    , alternator_describe_endpoints(this, "alternator_describe_endpoints", liveness::LiveUpdate, value_status::Used,
+        "",
+        "Overrides the behavior of Alternator's DescribeEndpoints operation. "
+        "An empty value (the default) means DescribeEndpoints will return "
+        "the same endpoint used in the request. The string 'disabled' "
+        "disables the DescribeEndpoints operation. Any other string is the "
+        "fixed value that will be returned by DescribeEndpoints operations.")
     , abort_on_ebadf(this, "abort_on_ebadf", value_status::Used, true, "Abort the server on incorrect file descriptor access. Throws exception when disabled.")
     , redis_port(this, "redis_port", value_status::Used, 0, "Port on which the REDIS transport listens for clients.")
     , redis_ssl_port(this, "redis_ssl_port", value_status::Used, 0, "Port on which the REDIS TLS native transport listens for clients.")
@@ -1155,7 +1162,7 @@ db::fs::path db::config::get_conf_sub(db::fs::path sub) {
 bool db::config::check_experimental(experimental_features_t::feature f) const {
     if (experimental()
         && f != experimental_features_t::feature::UNUSED
-        && f != experimental_features_t::feature::RAFT
+        && f != experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES
         && f != experimental_features_t::feature::BROADCAST_TABLES
         && f != experimental_features_t::feature::TABLETS) {
             return true;
@@ -1200,7 +1207,7 @@ std::map<sstring, db::experimental_features_t::feature> db::experimental_feature
         {"cdc", feature::UNUSED},
         {"alternator-streams", feature::ALTERNATOR_STREAMS},
         {"alternator-ttl", feature::UNUSED },
-        {"raft", feature::RAFT},
+        {"consistent-topology-changes", feature::CONSISTENT_TOPOLOGY_CHANGES},
         {"broadcast-tables", feature::BROADCAST_TABLES},
         {"keyspace-storage-options", feature::KEYSPACE_STORAGE_OPTIONS},
         {"tablets", feature::TABLETS},
