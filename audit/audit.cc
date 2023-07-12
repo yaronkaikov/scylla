@@ -199,20 +199,20 @@ future<> audit::log(const audit_info* audit_info, service::query_state& query_st
     const sstring& username = client_state.user() ? client_state.user()->name.value_or(anonymous_username) : no_username;
     socket_address client_ip = client_state.get_client_address().addr();
     return futurize_invoke(std::mem_fn(&storage_helper::write), _storage_helper_ptr, audit_info, node_ip, client_ip, cl, username, error)
-        .handle_exception([audit_info, node_ip, username, error] (auto ep) {
-            logger.error("Unexpected exception when writing log with: keyspace {} table {} query '{}' client_ip {} username {} error {} exception {}",
-                audit_info->keyspace(), audit_info->table(), audit_info->query(),
-                node_ip, username, error, ep);
+        .handle_exception([audit_info, node_ip, client_ip, cl, username, error] (auto ep) {
+            logger.error("Unexpected exception when writing log with: node_ip {} category {} cl {} error {} keyspace {} query '{}' client_ip {} table {} username {} exception {}",
+                node_ip, audit_info->category_string(), cl, error, audit_info->keyspace(),
+                audit_info->query(), client_ip, audit_info->table(),username, ep);
     });
 }
 
 future<> audit::log_login(const sstring& username, socket_address client_ip, bool error) noexcept {
     socket_address node_ip = utils::fb_utilities::get_broadcast_address().addr();
-    try {
-        return _storage_helper_ptr->write_login(username, node_ip, client_ip, error);
-    } catch (...) {
-        return make_exception_future(std::current_exception());
-    }
+    return futurize_invoke(std::mem_fn(&storage_helper::write_login), _storage_helper_ptr, username, node_ip, client_ip, error)
+        .handle_exception([username, node_ip, client_ip, error] (auto ep) {
+            logger.error("Unexpected exception when writing login log with: node_ip {} client_ip {} username {} error {} exception {}",
+                node_ip, client_ip, username, error, ep);
+    });
 }
 
 future<> inspect(shared_ptr<cql3::cql_statement> statement, service::query_state& query_state, const cql3::query_options& options, bool error) {
@@ -234,11 +234,7 @@ future<> inspect_login(const sstring& username, socket_address client_ip, bool e
     if (!audit::audit_instance().local_is_initialized() || !audit::local_audit_instance().should_log_login()) {
         return make_ready_future<>();
     }
-    return audit::local_audit_instance().log_login(username, client_ip, error)
-            .handle_exception([&username, client_ip, error] (auto ep) {
-                logger.error("Unexpected exception when writing login log with: username {} client_ip {} error {} exception {}",
-                    username, client_ip, error, ep);
-            });
+    return audit::local_audit_instance().log_login(username, client_ip, error);
 }
 
 bool audit::should_log_table(const sstring& keyspace, const sstring& name) const {
