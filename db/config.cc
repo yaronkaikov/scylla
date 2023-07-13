@@ -1028,8 +1028,9 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , audit(this, "audit", value_status::Used, "none",
         "Controls the audit feature:\n"
         "\n"
-        "\tnone : No auditing enabled.\n"
-        "\ttable : Audit messages written to column family named audit.audit_log.\n")
+        "\tnone   : No auditing enabled.\n"
+        "\tsyslog : Audit messages sent to Syslog.\n"
+        "\ttable  : Audit messages written to column family named audit.audit_log.\n")
     , audit_categories(this, "audit_categories", value_status::Used, "DCL,DDL,AUTH", "Comma separated list of operation categories that should be audited.")
     , audit_tables(this, "audit_tables", value_status::Used, "", "Comma separated list of table names (<keyspace>.<table>) that will be audited.")
     , audit_keyspaces(this, "audit_keyspaces", value_status::Used, "", "Comma separated list of keyspaces that will be audited. All tables in those keyspaces will be audited")
