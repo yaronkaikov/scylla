@@ -9,6 +9,7 @@
 #include "compaction_manager.hh"
 #include "compaction_strategy.hh"
 #include "compaction_backlog_manager.hh"
+#include "compaction_weight_registration.hh"
 #include "sstables/sstables.hh"
 #include "sstables/sstables_manager.hh"
 #include <seastar/core/metrics.hh>
@@ -40,7 +41,7 @@ public:
         , _cs(cs)
     { }
 
-    compacting_sstable_registration(compaction_manager& cm, compaction::compaction_state& cs, std::vector<sstables::shared_sstable> compacting)
+    compacting_sstable_registration(compaction_manager& cm, compaction::compaction_state& cs, const std::vector<sstables::shared_sstable>& compacting)
         : compacting_sstable_registration(cm, cs)
     {
         register_compacting(compacting);
@@ -931,14 +932,11 @@ future<> compaction_manager::drain() {
 }
 
 future<> compaction_manager::stop() {
+    do_stop();
     if (auto cm = std::exchange(_task_manager_module, nullptr)) {
         co_await cm->stop();
     }
-    // never started
-    if (_state == state::none) {
-        co_return;
-    } else {
-        do_stop();
+    if (_state != state::none) {
         co_return co_await std::move(*_stop_future);
     }
 }
@@ -958,6 +956,7 @@ future<> compaction_manager::really_do_stop() {
     cmlog.info("Stopped");
 }
 
+// Should return immediately when _state == state::none.
 void compaction_manager::do_stop() noexcept {
     if (_state == state::none || _stop_future) {
         return;

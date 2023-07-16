@@ -37,7 +37,6 @@
 #include "range.hh"
 #include "partition_slice_builder.hh"
 #include "compaction/compaction_strategy_impl.hh"
-#include "compaction/date_tiered_compaction_strategy.hh"
 #include "compaction/time_window_compaction_strategy.hh"
 #include "compaction/leveled_compaction_strategy.hh"
 #include "compaction/incremental_backlog_tracker.hh"
@@ -1314,102 +1313,6 @@ SEASTAR_TEST_CASE(compaction_with_fully_expired_table) {
     });
 }
 
-SEASTAR_TEST_CASE(basic_date_tiered_strategy_test) {
-  return test_env::do_with_async([] (test_env& env) {
-    schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
-    builder.set_min_compaction_threshold(4);
-    auto s = builder.build(schema_builder::compact_storage::no);
-    auto cf = env.make_table_for_tests(s);
-    auto stop_cf = deferred_stop(cf);
-
-    std::vector<sstables::shared_sstable> candidates;
-    std::unordered_set<sstables::shared_sstable> expected;
-    int min_threshold = cf->schema()->min_compaction_threshold();
-    auto now = db_clock::now();
-    auto past_hour = now - std::chrono::seconds(3600);
-    int64_t timestamp_for_now = now.time_since_epoch().count() * 1000;
-    int64_t timestamp_for_past_hour = past_hour.time_since_epoch().count() * 1000;
-
-    const auto key = tests::generate_partition_key(s);
-    for (auto i = 1; i <= min_threshold; i++) {
-        auto sst = add_sstable_for_overlapping_test(env, cf, key.key(), key.key(),
-            build_stats(timestamp_for_now, timestamp_for_now, std::numeric_limits<int32_t>::max()));
-        candidates.push_back(sst);
-        expected.insert(sst);
-    }
-    // add sstable that belong to a different time tier.
-    auto sst = add_sstable_for_overlapping_test(env, cf, key.key(), key.key(),
-        build_stats(timestamp_for_past_hour, timestamp_for_past_hour, std::numeric_limits<int32_t>::max()));
-    candidates.push_back(sst);
-
-    auto gc_before = gc_clock::now() - cf->schema()->gc_grace_seconds();
-    std::map<sstring, sstring> options;
-    date_tiered_manifest manifest(options);
-    auto sstables = manifest.get_next_sstables(cf.as_table_state(), candidates, gc_before);
-    BOOST_REQUIRE(sstables.size() == 4);
-    for (auto& sst : sstables) {
-        BOOST_REQUIRE(expected.erase(sst));
-    }
-    BOOST_REQUIRE(expected.empty());
-  });
-}
-
-SEASTAR_TEST_CASE(date_tiered_strategy_test_2) {
-  return test_env::do_with_async([] (test_env& env) {
-    schema_builder builder(make_shared_schema({}, some_keyspace, some_column_family,
-        {{"p1", utf8_type}}, {}, {}, {}, utf8_type));
-    builder.set_min_compaction_threshold(4);
-    auto s = builder.build(schema_builder::compact_storage::no);
-    auto cf = env.make_table_for_tests(s);
-    auto stop_cf = deferred_stop(cf);
-
-    // deterministic timestamp for Fri, 01 Jan 2016 00:00:00 GMT.
-    auto tp = db_clock::from_time_t(1451606400);
-    int64_t timestamp = tp.time_since_epoch().count() * 1000; // in microseconds.
-
-    std::vector<sstables::shared_sstable> candidates;
-    std::unordered_set<sstables::shared_sstable> expected;
-    int min_threshold = cf->schema()->min_compaction_threshold();
-
-    const auto key = tests::generate_partition_key(s);
-    // add sstables that belong to same time window until min threshold is satisfied.
-    for (auto i = 1; i <= min_threshold; i++) {
-        auto sst = add_sstable_for_overlapping_test(env, cf, key.key(), key.key(),
-            build_stats(timestamp, timestamp, std::numeric_limits<int32_t>::max()));
-        candidates.push_back(sst);
-        expected.insert(sst);
-    }
-    // belongs to the time window
-    auto tp2 = tp + std::chrono::seconds(1800);
-    timestamp = tp2.time_since_epoch().count() * 1000;
-    auto sst = add_sstable_for_overlapping_test(env, cf, key.key(), key.key(),
-        build_stats(timestamp, timestamp, std::numeric_limits<int32_t>::max()));
-    candidates.push_back(sst);
-    expected.insert(sst);
-
-    // doesn't belong to the time window above
-    auto tp3 = tp + std::chrono::seconds(4000);
-    timestamp = tp3.time_since_epoch().count() * 1000;
-    auto sst2 = add_sstable_for_overlapping_test(env, cf, key.key(), key.key(),
-        build_stats(timestamp, timestamp, std::numeric_limits<int32_t>::max()));
-    candidates.push_back(sst2);
-
-    std::map<sstring, sstring> options;
-    // Use a 1-hour time window.
-    options.emplace(sstring("base_time_seconds"), sstring("3600"));
-
-    date_tiered_manifest manifest(options);
-    auto gc_before = gc_clock::time_point(std::chrono::seconds(0)); // disable gc before.
-    auto sstables = manifest.get_next_sstables(cf.as_table_state(), candidates, gc_before);
-    BOOST_REQUIRE(sstables.size() == size_t(min_threshold + 1));
-    for (auto sst : sstables) {
-        BOOST_REQUIRE(expected.erase(sst));
-    }
-    BOOST_REQUIRE(expected.empty());
-  });
-}
-
 SEASTAR_TEST_CASE(time_window_strategy_time_window_tests) {
     using namespace std::chrono;
 
@@ -1816,12 +1719,14 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         // make sure sstable picked for tombstone compaction removal won't be promoted or demoted.
         BOOST_REQUIRE(descriptor.sstables.front()->get_sstable_level() == 1U);
 
-        // check tombstone compaction is disabled by default for DTCS
-        cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::date_tiered, {});
-        descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *strategy_c, { sst });
+        // check tombstone compaction is disabled by default for TWCS
+        auto twcs_table = env.make_table_for_tests(make_schema(sstables::compaction_strategy_type::time_window));
+        auto close_twcs_table = deferred_stop(twcs_table);
+        cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::time_window, {});
+        descriptor = cs.get_sstables_for_compaction(twcs_table.as_table_state(), *strategy_c, { sst });
         BOOST_REQUIRE(descriptor.sstables.size() == 0);
-        cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::date_tiered, options);
-        descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *strategy_c, { sst });
+        cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::time_window, options);
+        descriptor = cs.get_sstables_for_compaction(twcs_table.as_table_state(), *strategy_c, { sst });
         BOOST_REQUIRE(descriptor.sstables.size() == 1);
         BOOST_REQUIRE(descriptor.sstables.front() == sst);
 
@@ -1968,6 +1873,8 @@ SEASTAR_TEST_CASE(sstable_cleanup_correctness_test) {
 
             auto total_partitions = 10000U;
             auto local_keys = tests::generate_partition_keys(total_partitions, s);
+            dht::decorated_key::less_comparator cmp(s);
+            std::sort(local_keys.begin(), local_keys.end(), cmp);
             std::vector<mutation> mutations;
             for (auto i = 0U; i < total_partitions; i++) {
                 mutations.push_back(make_insert(local_keys.at(i)));
@@ -1980,7 +1887,7 @@ SEASTAR_TEST_CASE(sstable_cleanup_correctness_test) {
             cf->start();
 
             auto local_ranges = compaction::make_owned_ranges_ptr(db.get_keyspace_local_ranges(ks_name));
-            auto descriptor = sstables::compaction_descriptor({std::move(sst)}, compaction_descriptor::default_level,
+            auto descriptor = sstables::compaction_descriptor({sst}, compaction_descriptor::default_level,
                 compaction_descriptor::default_max_sstable_bytes, run_identifier, compaction_type_options::make_cleanup(), std::move(local_ranges));
             auto ret = compact_sstables(std::move(descriptor), cf, sst_gen).get0();
 
@@ -1988,6 +1895,25 @@ SEASTAR_TEST_CASE(sstable_cleanup_correctness_test) {
             BOOST_REQUIRE(ret.new_sstables.front()->get_estimated_key_count() >= total_partitions);
             BOOST_REQUIRE((ret.new_sstables.front()->get_estimated_key_count() - total_partitions) <= uint64_t(s->min_index_interval()));
             BOOST_REQUIRE(ret.new_sstables.front()->run_identifier() == run_identifier);
+
+            dht::token_range_vector ranges;
+            ranges.push_back(dht::token_range::make_singular(local_keys.at(0).token()));
+            ranges.push_back(dht::token_range::make_singular(local_keys.at(10).token()));
+            ranges.push_back(dht::token_range::make_singular(local_keys.at(100).token()));
+            ranges.push_back(dht::token_range::make_singular(local_keys.at(900).token()));
+            local_ranges = compaction::make_owned_ranges_ptr(std::move(ranges));
+            descriptor = sstables::compaction_descriptor({sst}, compaction_descriptor::default_level,
+                                            compaction_descriptor::default_max_sstable_bytes, run_identifier,
+                                            compaction_type_options::make_cleanup(), std::move(local_ranges));
+            ret = compact_sstables(std::move(descriptor), cf, sst_gen).get0();
+            BOOST_REQUIRE(ret.new_sstables.size() == 1);
+            auto reader = ret.new_sstables[0]->as_mutation_source().make_reader_v2(s, env.make_reader_permit(), query::full_partition_range, s->full_slice());
+            assert_that(std::move(reader))
+                    .produces(local_keys[0])
+                    .produces(local_keys[10])
+                    .produces(local_keys[100])
+                    .produces(local_keys[900])
+                    .produces_end_of_stream();
         });
     });
 }

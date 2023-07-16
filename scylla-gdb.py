@@ -5,6 +5,7 @@ import gdb
 import gdb.printing
 import uuid
 import argparse
+import datetime
 import re
 from operator import attrgetter
 from collections import defaultdict
@@ -16,6 +17,7 @@ import os
 import subprocess
 import time
 import socket
+import string
 
 
 def align_up(ptr, alignment):
@@ -1008,6 +1010,73 @@ class uuid_printer(gdb.printing.PrettyPrinter):
         return str(uuid.UUID(int=(msb << 64) | lsb))
 
 
+class sstable_generation_printer(gdb.printing.PrettyPrinter):
+    'print an sstables::generation_type'
+    BASE36_ALPHABET = string.digits + string.ascii_lowercase
+    DECIMICRO_RATIO = 10_000_000
+
+    def __init__(self, val):
+        self.val = val['_value']
+
+    def _to_uuid(self):
+        msb = uint64_t(self.val['most_sig_bits'])
+        lsb = uint64_t(self.val['least_sig_bits'])
+        bytes = msb.to_bytes(8) + lsb.to_bytes(8)
+        return uuid.UUID(bytes=bytes)
+
+    @classmethod
+    def _encode_n_with_base36(cls, n):
+        assert n >= 0
+        output = ''
+        alphabet_len = len(cls.BASE36_ALPHABET)
+        while n:
+            n, index = divmod(n, alphabet_len)
+            output += cls.BASE36_ALPHABET[index]
+        return output[::-1]
+
+    @classmethod
+    def _encode_uuid_with_base36(cls, timeuuid):
+        # see also scripts/base36-uuid.py for more context on the encoding
+        # of the sstable (generation) identifiers.
+        seconds, decimicro = divmod(timeuuid.time, cls.DECIMICRO_RATIO)
+        delta = datetime.timedelta(seconds=seconds)
+        encoded_days = cls._encode_n_with_base36(delta.days)
+        encoded_seconds = cls._encode_n_with_base36(delta.seconds)
+        encoded_decimicro = cls._encode_n_with_base36(decimicro)
+        lsb = int.from_bytes(timeuuid.bytes[8:])
+        encoded_lsb = cls._encode_n_with_base36(lsb)
+        return (f'{encoded_days:0>4}_'
+                f'{encoded_seconds:0>4}_'
+                f'{encoded_decimicro:0>5}'
+                f'{encoded_lsb:0>13}')
+
+    def to_string(self):
+        if self.val.type == gdb.lookup_type('int64_t'):
+            # before the uuid-generation change
+            return str(self.val)
+
+        # after the uuid-generation change
+        assert self.val.type == gdb.lookup_type('utils::UUID')
+        timeuuid = self._to_uuid()
+        # a uuid encoded generation can present one of the following types:
+        # 1. null: the generation is empty.
+        # 2. an integer: if the sstable is created with
+        #    "uuid_sstable_identifiers_enabled" option disabled.
+        # 3. a uuid: if the option above is enabled as it is by default.
+        if timeuuid.int == 0:
+            return "<null>"
+        elif timeuuid.time == 0:
+            # encodes an integer
+            # just for the sake of correctness, as always use int64_t for
+            # representing sstable generation even the generations are
+            # always positive.
+            lsb = int.from_bytes(timeuuid.bytes[8:], signed=True)
+            return str(lsb)
+        else:
+            # encodes a uuid
+            return self._encode_uuid_with_base36(timeuuid)
+
+
 class boost_intrusive_list_printer(gdb.printing.PrettyPrinter):
     def __init__(self, val):
         self.val = intrusive_list(val)
@@ -1076,6 +1145,7 @@ def build_pretty_printer():
     pp.add_printer('row', r'^row$', row_printer)
     pp.add_printer('managed_vector', r'^managed_vector<.*>$', managed_vector_printer)
     pp.add_printer('uuid', r'^utils::UUID$', uuid_printer)
+    pp.add_printer('sstable_generation', r'^sstables::generation_type$', sstable_generation_printer)
     pp.add_printer('boost_intrusive_list', r'^boost::intrusive::list<.*>$', boost_intrusive_list_printer)
     pp.add_printer('inet_address_printer', r'^gms::inet_address$', inet_address_printer)
     pp.add_printer('nonwrapping_interval', r'^nonwrapping_interval<.*$', nonwrapping_interval_printer)
@@ -1447,8 +1517,53 @@ class scylla_tables(gdb.Command):
                 schema = schema_ptr(value['_schema'])
                 if args.user and schema.is_system():
                     continue
+                if args.keyspace and schema.ks_name != args.keyspace:
+                    continue
                 schema_version = str(schema['_raw']['_version'])
                 gdb.write('{:5} {} v={} {:45} (replica::table*){}\n'.format(shard, key, schema_version, schema.table_name(), value.address))
+
+
+class scylla_table(gdb.Command):
+    """Prints various info about individial table
+        Example:
+          scylla table ks.cf
+    """
+    def __init__(self):
+        gdb.Command.__init__(self, 'scylla table', gdb.COMMAND_USER, gdb.COMPLETE_COMMAND)
+
+    def _find_table(self, ks, cf):
+        db = find_db()
+        cfs = db['_column_families']
+        for (key, value) in unordered_map(cfs):
+            value = seastar_lw_shared_ptr(value).get().dereference()
+            schema = schema_ptr(value['_schema'])
+            if schema.ks_name == ks and schema.cf_name == cf:
+                return value, schema
+
+        return None, None
+
+    @staticmethod
+    def phased_barrier_count(table, barrier_name):
+        g = seastar_lw_shared_ptr(table[barrier_name]['_gate']).get()
+        return int(g['_count'])
+
+    def invoke(self, arg, from_tty):
+        if arg is None or arg == '':
+            gdb.write("Specify keyspace.table argument\n")
+            return
+
+        [ ks, cf ] = arg.split('.', 2)
+        [ table, schema ] = self._find_table(ks, cf)
+        if table is None:
+            gdb.write("No such table\n")
+            return
+
+        gdb.write(f'(replica::table*){table.address}\n')
+        gdb.write(f'schema version: {schema["_raw"]["_version"]}\n')
+        gdb.write('pending ops:')
+        for barrier_name in ['_pending_flushes_phaser', '_pending_writes_phaser', '_pending_reads_phaser', '_pending_streams_phaser']:
+            gdb.write(f' {barrier_name}: {scylla_table.phased_barrier_count(table, barrier_name)}')
+        gdb.write('\n')
 
 
 class scylla_task_histogram(gdb.Command):
@@ -1981,8 +2096,7 @@ class scylla_memory(gdb.Command):
         tables_by_count = defaultdict(list)
         for table in for_each_table():
             schema = schema_ptr(table['_schema'])
-            g = seastar_lw_shared_ptr(table[barrier_name]['_gate']).get()
-            count = int(g['_count'])
+            count = scylla_table.phased_barrier_count(table, barrier_name)
             if count > 0:
                 tables_by_count[count].append(str(schema.table_name()).replace('"', ''))
 
@@ -4049,13 +4163,16 @@ class scylla_netw(gdb.Command):
         ms = mss.local()
         gdb.write('Dropped messages: %s\n' % ms['_dropped_messages'])
         gdb.write('Outgoing connections:\n')
-        for (addr, shard_info) in unordered_map(std_vector(ms['_clients'])[0]):
-            ip = ip_to_str(int(get_ip(addr['addr'])), byteorder=sys.byteorder)
-            client = shard_info['rpc_client']['_p']
-            rpc_client = std_unique_ptr(client['_p'])
-            gdb.write('IP: %s, (netw::messaging_service::rpc_protocol_client_wrapper*) %s:\n' % (ip, client))
-            gdb.write('  stats: %s\n' % rpc_client['_stats'])
-            gdb.write('  outstanding: %d\n' % int(rpc_client['_outstanding']['_M_h']['_M_element_count']))
+        idx = 0
+        for clients in std_vector(ms['_clients']):
+            for (addr, shard_info) in unordered_map(clients):
+                ip = ip_to_str(int(get_ip(addr['addr'])), byteorder='big')
+                client = shard_info['rpc_client']['_p']
+                rpc_client = std_unique_ptr(client['_p'])
+                gdb.write('[%d] IP: %s, (netw::messaging_service::rpc_protocol_client_wrapper*) %s:\n' % (idx, ip, client))
+                gdb.write('  stats: %s\n' % rpc_client['_stats'])
+                gdb.write('  outstanding: %d\n' % int(rpc_client['_outstanding']['_M_h']['_M_element_count']))
+            idx += 1
 
         servers = [
             std_unique_ptr(ms['_server']['_M_elems'][0]),
@@ -4192,10 +4309,7 @@ class scylla_sstables(gdb.Command):
         int_type = gdb.lookup_type('int')
         version_number = int(sst['_version'])
         version_name = list(version_to_format)[version_number]
-        try:
-            generation = sst['_generation']['_value']
-        except gdb.error:
-            generation = sst['_generation']
+        generation = sst['_generation']
         return version_to_format[version_name].format(
                 keyspace=str(schema.ks_name)[1:-1],
                 table=str(schema.cf_name)[1:-1],

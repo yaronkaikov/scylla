@@ -168,8 +168,7 @@ class OptimizationLevel:
             return
         print('\033[91mWARN\033[00m: '
               f'Changing optimization level to "-O{safe_level}" '
-              'due to https://github.com/llvm/llvm-project/issues/62842. '
-              'Please note -O0 is so slow that some tests might fail.')
+              'due to https://github.com/llvm/llvm-project/issues/62842.')
         cls.warned = True
 
     def __call__(self, cxx_compiler, default_level):
@@ -949,6 +948,7 @@ scylla_core = (['message/messaging_service.cc',
                 'db/consistency_level.cc',
                 'db/system_keyspace.cc',
                 'db/virtual_table.cc',
+                'db/virtual_tables.cc',
                 'db/system_distributed_keyspace.cc',
                 'db/size_estimates_virtual_reader.cc',
                 'db/schema_tables.cc',
@@ -1461,6 +1461,7 @@ wasm_deps['wasm/test_word_double.wat'] = 'test/resource/wasm/c/test_word_double.
 warnings = [
     '-Wall',
     '-Werror',
+    '-Wimplicit-fallthrough',
     '-Wno-mismatched-tags',  # clang-only
     '-Wno-tautological-compare',
     '-Wno-c++11-narrowing',

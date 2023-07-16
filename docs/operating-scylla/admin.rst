@@ -93,11 +93,16 @@ The :code:`scylla-server` file contains configuration related to starting up the
 
 .. include:: /operating-scylla/scylla-yaml.inc
 
+.. _admin-compression:
+
 Compression
 -----------
 
 In Scylla, you can configure compression at rest and compression in transit.
 For compression in transit, you can configure compression between nodes or between the client and the node.
+
+
+.. _admin-client-node-compression:
 
 Client - Node Compression
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -182,7 +187,7 @@ If clients can connect directly to :code:`rpc_address`, then :code:`broadcast_rp
 
 Core dumps
 ----------
-On RHEL and CentOS, the Automatic Bug Reporting Tool (`ABRT <https://docs.fedoraproject.org/en-US/Fedora_Draft_Documentation/0.1/html/System_Administrators_Guide/ch-abrt.html>`_) conflicts with Scylla coredump configuration. Remove it before installing Scylla: :code:`sudo yum remove -y abrt`
+On RHEL and CentOS, the `Automatic Bug Reporting Tool <https://abrt.readthedocs.io/en/latest/>`_ conflicts with Scylla coredump configuration. Remove it before installing Scylla: :code:`sudo yum remove -y abrt`
 
 Scylla places any core dumps in :code:`var/lib/scylla/coredump`. They are not visible with the :code:`coredumpctl` command. See the :doc:`System Configuration Guide </getting-started/system-configuration/>` for details on core dump configuration scripts. Check with Scylla support before sharing any core dump, as they may contain sensitive data.
 
