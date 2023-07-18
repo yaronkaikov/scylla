@@ -35,7 +35,7 @@
 using namespace encryption;
 namespace fs = std::filesystem;
 
-static future<> test_provider(const std::string& options, const tmpdir& tmp, const std::string& extra_yaml = {}) {
+static future<> test_provider(const std::string& options, const tmpdir& tmp, const std::string& extra_yaml = {}, unsigned n_tables = 1, unsigned n_restarts = 1) {
     auto host_id = locator::host_id::create_random_id();
     auto make_config = [&] {
         auto ext = std::make_shared<db::extensions>();
@@ -63,36 +63,40 @@ static future<> test_provider(const std::string& options, const tmpdir& tmp, con
         auto [cfg, ext] = make_config();
 
         co_await do_with_cql_env_thread([&] (cql_test_env& env) {
-            env.execute_cql(fmt::format("create table t (pk text primary key, v text) WITH scylla_encryption_options={{{}}}", options)).get();
-            env.execute_cql(fmt::format("insert into ks.t (pk, v) values ('{}', '{}')", pk, v)).get();
+            for (auto i = 0u; i < n_tables; ++i) {
+                env.execute_cql(fmt::format("create table t{} (pk text primary key, v text) WITH scylla_encryption_options={{{}}}", i, options)).get();
+                env.execute_cql(fmt::format("insert into ks.t{} (pk, v) values ('{}', '{}')", i, pk, v)).get();
+            }
         }, cfg, {}, cql_test_init_configurables{ *ext });
     }
 
-    {
+    for (auto rs = 0u; rs < n_restarts; ++rs) {
         auto [cfg, ext] = make_config();
 
         co_await do_with_cql_env_thread([&] (cql_test_env& env) {
-            require_rows(env, "select * from ks.t", {{utf8_type->decompose(pk), utf8_type->decompose(v)}});
+            for (auto i = 0u; i < n_tables; ++i) {
+                require_rows(env, fmt::format("select * from ks.t{}", i), {{utf8_type->decompose(pk), utf8_type->decompose(v)}});
 
-            // check that all sstables have the defined provider class (i.e. are encrypted using correct optons)
-            if (options.find("'key_provider'") != std::string::npos) {
-                static std::regex ex(R"foo('key_provider'\s*:\s*'(\w+)')foo");
+                // check that all sstables have the defined provider class (i.e. are encrypted using correct optons)
+                if (options.find("'key_provider'") != std::string::npos) {
+                    static std::regex ex(R"foo('key_provider'\s*:\s*'(\w+)')foo");
 
-                std::smatch m;
-                BOOST_REQUIRE(std::regex_search(options.begin(), options.end(), m, ex));
-                auto provider = m[1].str();
+                    std::smatch m;
+                    BOOST_REQUIRE(std::regex_search(options.begin(), options.end(), m, ex));
+                    auto provider = m[1].str();
 
-                env.db().invoke_on_all([&](replica::database& db) {
-                    auto& cf = db.find_column_family("ks", "t");
-                    auto sstables = cf.get_sstables_including_compacted_undeleted();
+                    env.db().invoke_on_all([&](replica::database& db) {
+                        auto& cf = db.find_column_family("ks", "t" + std::to_string(i));
+                        auto sstables = cf.get_sstables_including_compacted_undeleted();
 
-                    if (sstables) {
-                        for (auto& t : *sstables) {
-                            auto sst_provider = encryption::encryption_provider(*t);
-                            BOOST_REQUIRE_EQUAL(provider, sst_provider);
+                        if (sstables) {
+                            for (auto& t : *sstables) {
+                                auto sst_provider = encryption::encryption_provider(*t);
+                                BOOST_REQUIRE_EQUAL(provider, sst_provider);
+                            }
                         }
-                    }
-                }).get0();
+                    }).get0();
+                }
             }
         }, cfg, {}, cql_test_init_configurables{ *ext });
     }
@@ -117,7 +121,7 @@ static future<> create_key_file(const fs::path& path, const std::vector<key_info
     co_await write_text_file_fully(path.string(), s);
 }
 
-SEASTAR_TEST_CASE(test_replicated_provider) {
+static future<> do_test_replicated_provider(unsigned n_tables, unsigned n_restarts) {
     tmpdir tmp;
     auto keyfile = tmp.path() / "secret_key";
     auto sysdir = tmp.path() / "system_keys";
@@ -125,7 +129,20 @@ SEASTAR_TEST_CASE(test_replicated_provider) {
     auto yaml = fmt::format("system_key_directory: {}", sysdir.string());
 
     co_await create_key_file(syskey, { { "AES/CBC/PKCSPadding", 256 }});
-    co_await test_provider("'key_provider': 'ReplicatedKeyProviderFactory', 'system_key_file': 'system_key', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+
+    BOOST_REQUIRE(fs::exists(syskey));;
+
+    co_await test_provider("'key_provider': 'ReplicatedKeyProviderFactory', 'system_key_file': 'system_key', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml, n_tables, n_restarts);
+
+    BOOST_REQUIRE(fs::exists(tmp.path()));
+}
+
+SEASTAR_TEST_CASE(test_replicated_provider) {
+    co_await do_test_replicated_provider(1, 1);
+}
+
+SEASTAR_TEST_CASE(test_replicated_provider_many_tables) {
+    co_await do_test_replicated_provider(100, 5);
 }
 
 SEASTAR_TEST_CASE(test_kmip_provider) {
