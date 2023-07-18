@@ -385,6 +385,31 @@ done
 for i in $(find libreloc/fipscheck/ -maxdepth 1 -type f); do
     install -m755 "$i" -Dt "$rprefix/libreloc/fipscheck"
 done
+LIBGNUTLS_SO=$(basename libreloc/libgnutls.so.*)
+LIBGNUTLS_HMAC=$(cat libreloc/.libgnutls.so.*.hmac)
+LIBNETTLE_SO=$(basename libreloc/libnettle.so.*)
+LIBNETTLE_HMAC=$(cat libreloc/.libnettle.so.*.hmac)
+LIBHOGWEED_SO=$(basename libreloc/libhogweed.so.*)
+LIBHOGWEED_HMAC=$(cat libreloc/.libhogweed.so.*.hmac)
+LIBGMP_SO=$(basename libreloc/libgmp.so.*)
+LIBGMP_HMAC=$(cat libreloc/.libgmp.so.*.hmac)
+cat << EOS > "$rprefix"/libreloc/.$LIBGNUTLS_SO.hmac
+[global]
+format-version = 1
+[$LIBGNUTLS_SO]
+path = "$prefix"/libreloc/$LIBGNUTLS_SO
+hmac = $LIBGNUTLS_HMAC
+[$LIBNETTLE_SO]
+path = "$prefix"/libreloc/$LIBNETTLE_SO
+hmac = $LIBNETTLE_HMAC
+[$LIBHOGWEED_SO]
+path = "$prefix"/libreloc/$LIBHOGWEED_SO
+hmac = $LIBHOGWEED_HMAC
+[$LIBGMP_SO]
+path = "$prefix"/libreloc/$LIBGMP_SO
+hmac = $LIBGMP_HMAC
+EOS
+
 # some files in libexec are symlinks, which "install" dereferences
 # use cp -P for the symlinks instead.
 install -m755 libexec/* -Dt "$rprefix/libexec"
