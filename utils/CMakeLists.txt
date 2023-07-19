@@ -33,6 +33,7 @@ target_sources(utils
     lister.cc
     logalloc.cc
     managed_bytes.cc
+    memory.cc
     multiprecision_int.cc
     murmur_hash.cc
     pretty_printers.cc

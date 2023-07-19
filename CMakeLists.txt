@@ -77,6 +77,7 @@ target_sources(scylla-main
     tombstone_gc_options.cc
     tombstone_gc.cc
     reader_concurrency_semaphore.cc
+    reader_concurrency_semaphore_group.cc
     row_cache.cc
     schema_mutations.cc
     serializer.cc
@@ -99,6 +100,7 @@ target_link_libraries(scylla-main
     ZLIB::ZLIB)
 add_subdirectory(api)
 add_subdirectory(alternator)
+add_subdirectory(audit)
 add_subdirectory(db)
 add_subdirectory(auth)
 add_subdirectory(cdc)
@@ -138,6 +140,7 @@ add_version_library(scylla_version
 add_executable(scylla
   main.cc)
 target_link_libraries(scylla PRIVATE
+    audit
     scylla-main
     api
     auth
