@@ -286,7 +286,6 @@ public:
         return _protocol_servers;
     }
 private:
-    future<> do_stop_ms();
     future<> shutdown_protocol_servers();
 
     struct replacement_info {
@@ -374,12 +373,6 @@ private:
     future<> bootstrap(cdc::generation_service& cdc_gen_service, std::unordered_set<token>& bootstrap_tokens, std::optional<cdc::generation_id>& cdc_gen_id, const std::optional<replacement_info>& replacement_info);
 
 public:
-    /**
-     * Return the rpc address associated with an endpoint as a string.
-     * @param endpoint The endpoint to get rpc address for
-     * @return the rpc address
-     */
-    sstring get_rpc_address(const inet_address& endpoint) const;
 
     future<std::unordered_map<dht::token_range, inet_address_vector_replica_set>> get_range_to_address_map(const sstring& keyspace) const;
     future<std::unordered_map<dht::token_range, inet_address_vector_replica_set>> get_range_to_address_map(locator::vnode_effective_replication_map_ptr erm) const;
@@ -497,7 +490,6 @@ private:
     future<> replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept;
     sharded<db::system_keyspace>& _sys_ks;
     locator::snitch_signal_slot_t _snitch_reconfigure;
-    std::unordered_set<gms::inet_address> _replacing_nodes_pending_ranges_updater;
 private:
     /**
      * Handle node bootstrap

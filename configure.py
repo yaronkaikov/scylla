@@ -386,6 +386,7 @@ ldap_tests = set([
 
 scylla_tests = set([
     'test/boost/UUID_test',
+    'test/boost/pretty_printers_test',
     'test/boost/cdc_generation_test',
     'test/boost/aggregate_fcts_test',
     'test/boost/allocation_strategy_test',
@@ -746,6 +747,7 @@ scylla_core = (['message/messaging_service.cc',
                 'replica/memtable.cc',
                 'replica/exceptions.cc',
                 'replica/dirty_memory_manager.cc',
+                'replica/mutation_dump.cc',
                 'mutation/atomic_cell.cc',
                 'mutation/canonical_mutation.cc',
                 'mutation/frozen_mutation.cc',
@@ -1126,6 +1128,7 @@ scylla_core = (['message/messaging_service.cc',
                 'lang/wasm_alien_thread_runner.cc',
                 'lang/wasm_instance_cache.cc',
                 'service/raft/group0_state_machine.cc',
+                'service/raft/group0_state_machine_merger.cc',
                 'service/raft/raft_sys_table_storage.cc',
                 'serializer.cc',
                 'release.cc',
@@ -1183,6 +1186,7 @@ api = ['api/api.cc',
        'api/task_manager_test.cc',
        'api/config.cc',
        Json2Code('api/api-doc/config.json'),
+       Json2Code('api/api-doc/metrics.json'),
        'api/error_injection.cc',
        Json2Code('api/api-doc/error_injection.json'),
        'api/authorization_cache.cc',
@@ -1427,6 +1431,8 @@ deps['test/boost/exceptions_fallback_test'] = ['test/boost/exceptions_fallback_t
 deps['test/boost/duration_test'] += ['test/lib/exception_utils.cc']
 deps['test/boost/schema_loader_test'] += ['tools/schema_loader.cc']
 deps['test/boost/rust_test'] += ['rust/inc/src/lib.rs']
+
+deps['test/boost/group0_cmd_merge_test'] += ['test/lib/expr_test_utils.cc']
 
 deps['test/raft/replication_test'] = ['test/raft/replication_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies
 deps['test/raft/raft_server_test'] = ['test/raft/raft_server_test.cc', 'test/raft/replication.cc', 'test/raft/helpers.cc'] + scylla_raft_dependencies

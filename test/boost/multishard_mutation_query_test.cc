@@ -21,16 +21,34 @@
 #include "test/lib/test_utils.hh"
 #include "test/lib/random_utils.hh"
 #include "test/lib/random_schema.hh"
+#include "tombstone_gc_extension.hh"
+#include "db/tags/extension.hh"
+#include "cdc/cdc_extension.hh"
+#include "db/paxos_grace_seconds_extension.hh"
+#include "db/per_partition_rate_limit_extension.hh"
 
 #include "test/lib/scylla_test_case.hh"
 
 #include <source_location>
 
 #include <boost/range/algorithm/sort.hpp>
+#include <utility>
 
 const sstring KEYSPACE_NAME = "ks";
 
 namespace {
+
+static cql_test_config cql_config_with_extensions() {
+    auto ext = std::make_shared<db::extensions>();
+    ext->add_schema_extension<db::tags_extension>(db::tags_extension::NAME);
+    ext->add_schema_extension<cdc::cdc_extension>(cdc::cdc_extension::NAME);
+    ext->add_schema_extension<db::paxos_grace_seconds_extension>(db::paxos_grace_seconds_extension::NAME);
+    ext->add_schema_extension<tombstone_gc_extension>(tombstone_gc_extension::NAME);
+    ext->add_schema_extension<db::per_partition_rate_limit_extension>(db::per_partition_rate_limit_extension::NAME);
+
+    auto cfg = seastar::make_shared<db::config>(ext);
+    return cql_test_config(cfg);
+}
 
 struct generated_table {
     schema_ptr schema;
@@ -200,7 +218,7 @@ SEASTAR_THREAD_TEST_CASE(test_abandoned_read) {
         require_eventually_empty_caches(env.db());
 
         return make_ready_future<>();
-    }).get();
+    }, cql_config_with_extensions()).get();
 }
 
 static std::vector<mutation> read_all_partitions_one_by_one(distributed<replica::database>& db, schema_ptr s, std::vector<dht::decorated_key> pkeys,
@@ -556,7 +574,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_all) {
         check_results_are_equal(results1, results3);
 
         return make_ready_future<>();
-    }).get();
+    }, cql_config_with_extensions()).get();
 }
 
 // Best run with SMP>=2
@@ -616,7 +634,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_all_multi_range) {
         require_eventually_empty_caches(env.db());
 
         return make_ready_future<>();
-    }).get();
+    }, cql_config_with_extensions()).get();
 }
 
 // Best run with SMP>=2
@@ -668,7 +686,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_with_partition_row_limits) {
         } } }
 
         return make_ready_future<>();
-    }).get();
+    }, cql_config_with_extensions()).get();
 }
 
 // Best run with SMP>=2
@@ -692,7 +710,7 @@ SEASTAR_THREAD_TEST_CASE(test_evict_a_shard_reader_on_each_page) {
         auto [results2, npages] = read_all_partitions_with_paged_scan(env.db(), s, 4, stateful_query::yes, [&] (size_t page) {
             const auto new_lookups = aggregate_querier_cache_stat(env.db(), &query::querier_cache::stats::lookups);
             if (page) {
-                tests::require(new_lookups > lookups, seastar::compat::source_location::current());
+                tests::require(std::cmp_greater(new_lookups, lookups), seastar::compat::source_location::current());
             }
             lookups = new_lookups;
 
@@ -719,7 +737,7 @@ SEASTAR_THREAD_TEST_CASE(test_evict_a_shard_reader_on_each_page) {
         require_eventually_empty_caches(env.db());
 
         return make_ready_future<>();
-    }).get();
+    }, cql_config_with_extensions()).get();
 }
 
 // Best run with SMP>=2
@@ -774,7 +792,7 @@ SEASTAR_THREAD_TEST_CASE(test_read_reversed) {
         require_eventually_empty_caches(env.db());
 
         return make_ready_future<>();
-    }).get();
+    }, cql_config_with_extensions()).get();
 }
 
 namespace {
@@ -1076,8 +1094,8 @@ run_fuzzy_test_workload(fuzzy_test_config cfg, distributed<replica::database>& d
 } // namespace
 
 SEASTAR_THREAD_TEST_CASE(fuzzy_test) {
-    auto db_cfg = make_shared<db::config>();
-    db_cfg->enable_commitlog(false);
+    auto cql_cfg = cql_config_with_extensions();
+    cql_cfg.db_config->enable_commitlog(false);
 
     do_with_cql_env_thread([] (cql_test_env& env) -> future<> {
         // REPLACE RANDOM SEED HERE.
@@ -1124,5 +1142,5 @@ SEASTAR_THREAD_TEST_CASE(fuzzy_test) {
         }).get();
 
         return make_ready_future<>();
-    }, db_cfg).get();
+    }, cql_cfg).get();
 }

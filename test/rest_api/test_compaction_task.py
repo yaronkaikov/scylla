@@ -4,11 +4,14 @@ import sys
 sys.path.insert(1, sys.path[0] + '/../cql-pytest')
 from util import new_test_table, new_test_keyspace
 from rest_util import set_tmp_task_ttl
-from task_manager_utils import wait_for_task, list_tasks, check_child_parent_relationship
+from task_manager_utils import wait_for_task, list_tasks, check_child_parent_relationship, drain_module_tasks
+
+module_name = "compaction"
+long_time = 1000000000
 
 # depth parameter means the number of edges in the longest path from root to leaves in task tree.
 def check_compaction_task(cql, this_dc, rest_api, run_compaction, compaction_type, depth):
-    long_time = 1000000000
+    drain_module_tasks(rest_api, module_name)
     with set_tmp_task_ttl(rest_api, long_time):
         with new_test_keyspace(cql, f"WITH REPLICATION = {{ 'class' : 'NetworkTopologyStrategy', '{this_dc}' : 1 }}") as keyspace:
             schema = 'p int, v text, primary key (p)'
@@ -23,7 +26,7 @@ def check_compaction_task(cql, this_dc, rest_api, run_compaction, compaction_typ
                 resp.raise_for_status()
 
                 # Get list of compaction tasks.
-                tasks = [task for task in list_tasks(rest_api, "compaction") if task["type"] == compaction_type]
+                tasks = [task for task in list_tasks(rest_api, module_name) if task["type"] == compaction_type]
                 assert tasks, "compaction task was not created"
 
                 # Check if all tasks finished successfully.
@@ -32,7 +35,9 @@ def check_compaction_task(cql, this_dc, rest_api, run_compaction, compaction_typ
                 assert not failed, f"tasks with ids {failed} failed"
 
                 for top_level_task in statuses:
-                    check_child_parent_relationship(rest_api, top_level_task, depth)
+                    if top_level_task["type"] != "resharding compaction":
+                        check_child_parent_relationship(rest_api, top_level_task, depth)
+    drain_module_tasks(rest_api, module_name)
 
 def test_major_keyspace_compaction_task(cql, this_dc, rest_api):
     task_tree_depth = 3
@@ -59,3 +64,28 @@ def test_rewrite_sstables_keyspace_compaction_task(cql, this_dc, rest_api):
 def test_reshaping_compaction_task(cql, this_dc, rest_api):
     task_tree_depth = 1
     check_compaction_task(cql, this_dc, rest_api, lambda keyspace, table: rest_api.send("POST", f"storage_service/sstables/{keyspace}", {'cf': table, 'load_and_stream': False}), "reshaping compaction", task_tree_depth)
+
+def test_resharding_compaction_task(cql, this_dc, rest_api):
+    task_tree_depth = 1
+    check_compaction_task(cql, this_dc, rest_api, lambda keyspace, table: rest_api.send("POST", f"storage_service/sstables/{keyspace}", {'cf': table, 'load_and_stream': False}), "resharding compaction", task_tree_depth)
+
+def test_regular_compaction_task(cql, this_dc, rest_api):
+    drain_module_tasks(rest_api, module_name)
+    with set_tmp_task_ttl(rest_api, long_time):
+        with new_test_keyspace(cql, f"WITH REPLICATION = {{ 'class' : 'NetworkTopologyStrategy', '{this_dc}' : 1 }}") as keyspace:
+            schema = 'p int, v text, primary key (p)'
+            with new_test_table(cql, keyspace, schema) as t0:
+                stmt = cql.prepare(f"INSERT INTO {t0} (p, v) VALUES (?, ?)")
+                cql.execute(stmt, [0, 'hello'])
+                cql.execute(stmt, [1, 'world'])
+
+                [_, table] = t0.split(".")
+                resp = rest_api.send("POST", f"column_family/autocompaction/{keyspace}:{table}")
+                resp.raise_for_status()
+
+                statuses = [wait_for_task(rest_api, task["task_id"]) for task in list_tasks(rest_api, "compaction") if task["type"] == "regular compaction" and task["keyspace"] == keyspace and task["table"] == table]
+                assert statuses, f"regular compaction task for {t0} was not created"
+
+                failed = [status["task_id"] for status in statuses if status["state"] != "done"]
+                assert not failed, f"Regular compaction tasks with ids = {failed} failed"
+    drain_module_tasks(rest_api, module_name)

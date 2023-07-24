@@ -175,14 +175,13 @@ SEASTAR_TEST_CASE(compaction_manager_basic_test) {
 
     BOOST_REQUIRE(cf->sstables_count() == idx.size());
     cf->trigger_compaction();
-    BOOST_REQUIRE(cm.get_stats().pending_tasks == 1 || cm.get_stats().active_tasks == 1);
-
     // wait for submitted job to finish.
-    auto end = [&cm] { return cm.get_stats().pending_tasks == 0 && cm.get_stats().active_tasks == 0; };
-    while (!end()) {
-        // sleep until compaction manager selects cf for compaction.
-        sleep(std::chrono::milliseconds(100)).get();
-    }
+    do_until([&cm] { return cm.get_stats().completed_tasks > 0; }, [] {
+        return sleep(std::chrono::milliseconds(100));
+    }).wait();
+    // test no more running compactions
+    BOOST_REQUIRE(cm.get_stats().pending_tasks == 0 && cm.get_stats().active_tasks == 0);
+    // test compaction successfully finished
     BOOST_REQUIRE(cm.get_stats().completed_tasks == 1);
     BOOST_REQUIRE(cm.get_stats().errors == 0);
 
@@ -323,7 +322,7 @@ static future<compact_sstables_result> compact_sstables(test_env& env, std::vect
         std::vector<sstables::shared_sstable> created;
 
         if (create_sstables) {
-            for (auto i = 0; i < create_sstables; i++) {
+            for (unsigned i = 0; i < create_sstables; i++) {
                 const column_definition& r1_col = *s->get_column_definition("r1");
 
                 auto sst = sst_gen();
@@ -461,7 +460,7 @@ SEASTAR_TEST_CASE(compact_02) {
 
         static constexpr size_t num_rounds = 4;
         static constexpr size_t sstables_in_round = 4;
-        for (auto i = 0; i < num_rounds; ++i) {
+        for (unsigned i = 0; i < num_rounds; ++i) {
             compact_and_verify(sstables_in_round);
         }
 
@@ -1638,8 +1637,8 @@ SEASTAR_TEST_CASE(size_tiered_beyond_max_threshold_test) {
 
 SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
     return test_env::do_with_async([] (test_env& env) {
-        auto make_schema = [&] (sstables::compaction_strategy_type cst) {
-            auto builder = schema_builder("tests", "tombstone_purge")
+        auto make_schema = [&] (std::string_view cf, sstables::compaction_strategy_type cst) {
+            auto builder = schema_builder("tests", cf)
                     .with_column("p1", utf8_type, column_kind::partition_key)
                     .with_column("c1", utf8_type, column_kind::clustering_key)
                     .with_column("r1", utf8_type);
@@ -1647,23 +1646,23 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
             return builder.build();
         };
 
-        auto s = make_schema(sstables::compaction_strategy_type::size_tiered);
-        auto cf = env.make_table_for_tests(s);
-        auto close_cf = deferred_stop(cf);
-        auto sst_gen = cf.make_sst_factory();
+        auto stcs_schema = make_schema("stcs", sstables::compaction_strategy_type::size_tiered);
+        auto stcs_table = env.make_table_for_tests(stcs_schema);
+        auto close_stcs_table = deferred_stop(stcs_table);
+        auto sst_gen = stcs_table.make_sst_factory();
 
-        auto mt = make_lw_shared<replica::memtable>(s);
+        auto mt = make_lw_shared<replica::memtable>(stcs_schema);
 
         static constexpr float expired = 0.33;
         // we want number of expired keys to be ~ 1.5*sstables::TOMBSTONE_HISTOGRAM_BIN_SIZE so as to
         // test ability of histogram to return a good estimation after merging keys.
         static int total_keys = std::ceil(sstables::TOMBSTONE_HISTOGRAM_BIN_SIZE/expired)*1.5;
 
-        auto insert_key = [&] (bytes k, uint32_t ttl, uint32_t expiration_time) {
-            auto key = partition_key::from_exploded(*s, {k});
-            mutation m(s, key);
-            auto c_key = clustering_key::from_exploded(*s, {to_bytes("c1")});
-            m.set_clustered_cell(c_key, *s->get_column_definition("r1"), make_atomic_cell(utf8_type, bytes("a"), ttl, expiration_time));
+        auto insert_key = [&stcs_schema, &mt] (bytes k, uint32_t ttl, uint32_t expiration_time) {
+            auto key = partition_key::from_exploded(*stcs_schema, {k});
+            mutation m(stcs_schema, key);
+            auto c_key = clustering_key::from_exploded(*stcs_schema, {to_bytes("c1")});
+            m.set_clustered_cell(c_key, *stcs_schema->get_column_definition("r1"), make_atomic_cell(utf8_type, bytes("a"), ttl, expiration_time));
             mt->apply(std::move(m));
         };
 
@@ -1682,7 +1681,7 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         auto sst = make_sstable_containing(sst_gen, mt);
         const auto& stats = sst->get_stats_metadata();
         BOOST_REQUIRE(stats.estimated_tombstone_drop_time.bin.size() == sstables::TOMBSTONE_HISTOGRAM_BIN_SIZE);
-        auto gc_before = gc_clock::now() - s->gc_grace_seconds();
+        auto gc_before = gc_clock::now() - stcs_schema->gc_grace_seconds();
         auto uncompacted_size = sst->data_size();
         // Asserts that two keys are equal to within a positive delta
         BOOST_REQUIRE(std::fabs(sst->estimate_droppable_tombstone_ratio(gc_before) - expired) <= 0.1);
@@ -1691,7 +1690,7 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         BOOST_REQUIRE(std::fabs(run.estimate_droppable_tombstone_ratio(gc_before) - expired) <= 0.1);
 
         auto creator = sst_gen;
-        auto info = compact_sstables(sstables::compaction_descriptor({ sst }), cf, creator).get0();
+        auto info = compact_sstables(sstables::compaction_descriptor({ sst }), stcs_table, creator).get0();
         BOOST_REQUIRE(info.new_sstables.size() == 1);
         BOOST_REQUIRE(info.new_sstables.front()->estimate_droppable_tombstone_ratio(gc_before) == 0.0f);
         BOOST_REQUIRE_CLOSE(info.new_sstables.front()->data_size(), uncompacted_size*(1-expired), 5);
@@ -1703,13 +1702,13 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         // that's needed because sstable with expired data should be old enough.
         sstables::test(sst).set_data_file_write_time(db_clock::time_point::min());
         auto strategy_c = make_strategy_control_for_test(false);
-        auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *strategy_c, { sst });
+        auto descriptor = cs.get_sstables_for_compaction(stcs_table.as_table_state(), *strategy_c, { sst });
         BOOST_REQUIRE(descriptor.sstables.size() == 1);
         BOOST_REQUIRE(descriptor.sstables.front() == sst);
 
         // Makes sure that get_sstables_for_compaction() is called with a table_state which will provide
         // the correct LCS state.
-        auto lcs_table = env.make_table_for_tests(make_schema(sstables::compaction_strategy_type::leveled));
+        auto lcs_table = env.make_table_for_tests(make_schema("lcs", sstables::compaction_strategy_type::leveled));
         auto close_lcs_table = deferred_stop(lcs_table);
         cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::leveled, options);
         sst->set_sstable_level(1);
@@ -1720,7 +1719,7 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
         BOOST_REQUIRE(descriptor.sstables.front()->get_sstable_level() == 1U);
 
         // check tombstone compaction is disabled by default for TWCS
-        auto twcs_table = env.make_table_for_tests(make_schema(sstables::compaction_strategy_type::time_window));
+        auto twcs_table = env.make_table_for_tests(make_schema("twcs", sstables::compaction_strategy_type::time_window));
         auto close_twcs_table = deferred_stop(twcs_table);
         cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::time_window, {});
         descriptor = cs.get_sstables_for_compaction(twcs_table.as_table_state(), *strategy_c, { sst });
@@ -1735,7 +1734,7 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
             std::map<sstring, sstring> options;
             options.emplace("tombstone_threshold", "0.5f");
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, options);
-            auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *strategy_c, { sst });
+            auto descriptor = cs.get_sstables_for_compaction(stcs_table.as_table_state(), *strategy_c, { sst });
             BOOST_REQUIRE(descriptor.sstables.size() == 0);
         }
         // sstable which was recently created won't be included due to min interval
@@ -1744,7 +1743,7 @@ SEASTAR_TEST_CASE(sstable_expired_data_ratio) {
             options.emplace("tombstone_compaction_interval", "3600");
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::size_tiered, options);
             sstables::test(sst).set_data_file_write_time(db_clock::now());
-            auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *strategy_c, { sst });
+            auto descriptor = cs.get_sstables_for_compaction(stcs_table.as_table_state(), *strategy_c, { sst });
             BOOST_REQUIRE(descriptor.sstables.size() == 0);
         }
     });
@@ -3384,9 +3383,11 @@ SEASTAR_TEST_CASE(autocompaction_control_test) {
         // trigger background compaction
         cf->trigger_compaction();
         // wait until compaction finished
-        do_until([&cm] { return cm.get_stats().pending_tasks == 0 && cm.get_stats().active_tasks == 0; }, [] {
+        do_until([&cm] { return cm.get_stats().completed_tasks > 0; }, [] {
             return sleep(std::chrono::milliseconds(100));
         }).wait();
+        // test no more running compactions
+        BOOST_REQUIRE(ss.pending_tasks == 0 && ss.active_tasks == 0);
         // test compaction successfully finished
         BOOST_REQUIRE(ss.errors == 0);
         BOOST_REQUIRE(ss.completed_tasks == 1);
@@ -3845,7 +3846,7 @@ SEASTAR_TEST_CASE(twcs_reshape_with_disjoint_set_test) {
 
             std::vector<sstables::shared_sstable> sstables;
             sstables.reserve(disjoint_sstable_count);
-            for (auto i = 0; i < disjoint_sstable_count; i++) {
+            for (unsigned i = 0; i < disjoint_sstable_count; i++) {
                 auto sst = make_sstable_containing(sst_gen, {make_row(i, std::chrono::hours(i))});
                 sstables.push_back(std::move(sst));
             }
@@ -3860,7 +3861,7 @@ SEASTAR_TEST_CASE(twcs_reshape_with_disjoint_set_test) {
 
             std::vector<sstables::shared_sstable> sstables;
             sstables.reserve(disjoint_sstable_count);
-            for (auto i = 0; i < disjoint_sstable_count; i++) {
+            for (unsigned i = 0; i < disjoint_sstable_count; i++) {
                 auto sst = make_sstable_containing(sst_gen, {make_row(i, std::chrono::hours(24*i))});
                 sstables.push_back(std::move(sst));
                 i++;
@@ -3892,7 +3893,7 @@ SEASTAR_TEST_CASE(twcs_reshape_with_disjoint_set_test) {
             mutations_for_small_files.push_back(make_row(0, std::chrono::hours(1)));
 
             std::vector<mutation> mutations_for_big_files;
-            for (auto i = 0; i < keys.size(); i++) {
+            for (unsigned i = 0; i < keys.size(); i++) {
                 mutations_for_big_files.push_back(make_row(i, std::chrono::hours(1)));
             }
 
@@ -4102,7 +4103,7 @@ SEASTAR_TEST_CASE(max_ongoing_compaction_test) {
         });
 
         // Make tables
-        for (auto idx = 0; idx < num_tables; idx++) {
+        for (unsigned idx = 0; idx < num_tables; idx++) {
             auto s = make_schema(idx);
             schemas.push_back(s);
 
@@ -4132,7 +4133,7 @@ SEASTAR_TEST_CASE(max_ongoing_compaction_test) {
             column_family_test(cf).add_sstable(sst).get();
         };
 
-        for (auto i = 0; i < num_tables; i++) {
+        for (unsigned i = 0; i < num_tables; i++) {
             add_single_fully_expired_sstable_to_table(i);
         }
 
@@ -4144,8 +4145,6 @@ SEASTAR_TEST_CASE(max_ongoing_compaction_test) {
                 BOOST_REQUIRE_EQUAL(t->sstables_count(), expected_before);
                 t->trigger_compaction();
             }
-
-            BOOST_REQUIRE(cm->get_stats().pending_tasks >= 1 || cm->get_stats().active_tasks >= 1);
 
             size_t max_ongoing_compaction = 0;
 
@@ -4859,7 +4858,7 @@ SEASTAR_TEST_CASE(test_print_shared_sstables_vector) {
         mut1.partition().apply_insert(*s, ss.make_ckey(1), ss.new_timestamp());
         ssts[1] = make_sstable_containing(sst_gen, {std::move(mut1)});
 
-        std::string msg = format("{}", ssts);
+        std::string msg = seastar::format("{}", ssts);
         for (const auto& sst : ssts) {
             auto gen_str = format("{}", sst->generation());
             BOOST_REQUIRE(msg.find(gen_str) != std::string::npos);
@@ -5038,14 +5037,14 @@ SEASTAR_TEST_CASE(cleanup_incremental_compaction_test) {
         dht::token_range_vector owned_token_ranges;
 
         std::set<mutation, mutation_decorated_key_less_comparator> merged;
-        for (auto i = 0; i < sstables_nr * 2; i++) {
+        for (unsigned i = 0; i < sstables_nr * 2; i++) {
             merged.insert(make_insert(partition_key::from_exploded(*s, {to_bytes(to_sstring(i))})));
         }
 
         std::unordered_set<sstables::generation_type> gens; // input sstable generations
         run_id run_identifier = run_id::create_random_id();
         auto merged_it = merged.begin();
-        for (auto i = 0; i < sstables_nr; i++) {
+        for (unsigned i = 0; i < sstables_nr; i++) {
             auto mut1 = std::move(*merged_it);
             merged_it++;
             auto mut2 = std::move(*merged_it);
@@ -5082,7 +5081,7 @@ SEASTAR_TEST_CASE(cleanup_incremental_compaction_test) {
 
                     testlog.info("Closing sstable of generation {}, table set size: {}", sst.generation(), input_sstable_count);
                     sstables_closed++;
-                    if (input_sstable_count < last_input_sstable_count) {
+                    if (std::cmp_less(input_sstable_count, last_input_sstable_count)) {
                         sstables_closed_during_cleanup++;
                         last_input_sstable_count = input_sstable_count;
                     }
@@ -5102,5 +5101,54 @@ SEASTAR_TEST_CASE(cleanup_incremental_compaction_test) {
 
         BOOST_REQUIRE(sstables_closed == sstables_nr);
         BOOST_REQUIRE(sstables_closed_during_cleanup >= sstables_nr / 2);
+    });
+}
+
+SEASTAR_TEST_CASE(test_sstables_excluding_staging_correctness) {
+    return test_env::do_with_async([] (test_env& env) {
+        simple_schema ss;
+        auto s = ss.schema();
+        auto pks = ss.make_pkeys(2);
+
+        auto make_mut = [&] (auto pkey) {
+            auto mut1 = mutation(s, pkey);
+            mut1.partition().apply_insert(*s, ss.make_ckey(0), ss.new_timestamp());
+            return mut1;
+        };
+        std::set<mutation, mutation_decorated_key_less_comparator> sorted_muts;
+        sorted_muts.insert(make_mut(pks[0]));
+        sorted_muts.insert(make_mut(pks[1]));
+
+        auto t = env.make_table_for_tests(s, env.tempdir().path().string());
+        t->mark_ready_for_writes();
+        auto close_t = deferred_stop(t);
+
+        auto sst_gen = env.make_sst_factory(s);
+
+        auto staging_sst = make_sstable_containing(sst_gen, {*sorted_muts.begin()});
+        staging_sst->change_state(sstables::staging_dir).get();
+        BOOST_REQUIRE(staging_sst->requires_view_building());
+
+        auto regular_sst = make_sstable_containing(sst_gen, {*sorted_muts.rbegin()});
+
+        t->add_sstable_and_update_cache(staging_sst).get();
+        t->add_sstable_and_update_cache(regular_sst).get();
+
+        {
+            testlog.info("table::as_mutation_source_excluding_staging()");
+            auto ms_excluding_staging = t->as_mutation_source_excluding_staging();
+            assert_that(ms_excluding_staging.make_reader_v2(s, env.make_reader_permit(), query::full_partition_range))
+                .produces(*sorted_muts.rbegin())
+                .produces_end_of_stream();
+        }
+
+        {
+            testlog.info("table::as_mutation_source()");
+            auto ms_inclusive = t->as_mutation_source();
+            assert_that(ms_inclusive.make_reader_v2(s, env.make_reader_permit(), query::full_partition_range))
+                    .produces(*sorted_muts.begin())
+                    .produces(*sorted_muts.rbegin())
+                    .produces_end_of_stream();
+        }
     });
 }

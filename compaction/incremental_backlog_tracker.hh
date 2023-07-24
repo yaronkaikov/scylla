@@ -32,13 +32,20 @@ class incremental_backlog_tracker final : public compaction_backlog_tracker::imp
 
     inflight_component compacted_backlog(const compaction_backlog_tracker::ongoing_compactions& ongoing_compactions) const;
 
+    struct backlog_calculation_result {
+        int64_t total_backlog_bytes;
+        float sstables_backlog_contribution;
+        std::unordered_set<sstables::run_id> sstable_runs_contributing_backlog;
+    };
+
 public:
-    double log4(double x) const {
+    static double log4(double x) {
         static const double inv_log_4 = 1.0f / std::log(4);
         return log(x) * inv_log_4;
     }
 
-    void refresh_sstables_backlog_contribution();
+    static backlog_calculation_result calculate_sstables_backlog_contribution(const std::unordered_map<sstables::run_id, sstable_run>& all,
+            const incremental_compaction_strategy_options& options,  unsigned threshold);
 
     incremental_backlog_tracker(incremental_compaction_strategy_options options);
 
@@ -46,7 +53,7 @@ public:
 
     // Removing could be the result of a failure of an in progress write, successful finish of a
     // compaction, or some one-off operation, like drop
-    virtual void replace_sstables(std::vector<sstables::shared_sstable> old_ssts, std::vector<sstables::shared_sstable> new_ssts) override;
+    virtual void replace_sstables(const std::vector<sstables::shared_sstable>& old_ssts, const std::vector<sstables::shared_sstable>& new_ssts) override;
 
     int64_t total_bytes() const {
         return _total_bytes;

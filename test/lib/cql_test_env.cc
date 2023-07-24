@@ -589,8 +589,6 @@ public:
 
             sharded<locator::shared_token_metadata> token_metadata;
             locator::token_metadata::config tm_cfg;
-            // We assign null ID, the same as main.cc.
-            tm_cfg.topo_cfg.this_host_id = locator::host_id::create_null_id();
             tm_cfg.topo_cfg.this_endpoint = utils::fb_utilities::get_broadcast_address();
             tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
             token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }, tm_cfg).get();
@@ -901,6 +899,15 @@ public:
             });
 
             sys_dist_ks.start(std::ref(qp), std::ref(mm), std::ref(proxy)).get();
+
+            if (cfg_in.need_remote_proxy) {
+                proxy.invoke_on_all(&service::storage_proxy::start_remote, std::ref(ms), std::ref(gossiper), std::ref(mm), std::ref(sys_ks)).get();
+            }
+            auto stop_proxy_remote = defer([&proxy, need = cfg_in.need_remote_proxy] {
+                if (need) {
+                    proxy.invoke_on_all(&service::storage_proxy::stop_remote).get();
+                }
+            });
 
             sl_controller.invoke_on_all([&sys_dist_ks, &sl_controller] (qos::service_level_controller& service) {
                 qos::service_level_controller::service_level_distributed_data_accessor_ptr service_level_data_accessor =

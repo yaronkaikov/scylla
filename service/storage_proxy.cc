@@ -127,18 +127,24 @@ seastar::metrics::label_instance current_scheduling_group_label() {
 
 }
 
-template<typename ResultTuple, typename SourceTuple>
-static future<ResultTuple> encode_replica_exception_for_rpc(gms::feature_service& features, future<SourceTuple>&& f) {
-    if (!f.failed()) {
-        return make_ready_future<ResultTuple>(utils::tuple_insert<ResultTuple>(f.get(), replica::exception_variant{}));
-    }
-    std::exception_ptr eptr = f.get_exception();
+template<typename ResultTuple>
+static future<ResultTuple> encode_replica_exception_for_rpc(gms::feature_service& features, std::exception_ptr eptr) {
     if (features.typed_errors_in_read_rpc) {
         if (auto ex = replica::try_encode_replica_exception(eptr); ex) {
-            return make_ready_future<ResultTuple>(utils::tuple_insert<ResultTuple>(utils::make_default_rpc_tuple<SourceTuple>(), std::move(ex)));
+            ResultTuple encoded_ex = utils::make_default_rpc_tuple<ResultTuple>();
+            std::get<replica::exception_variant>(encoded_ex) = std::move(ex);
+            return make_ready_future<ResultTuple>(std::move(encoded_ex));
         }
     }
     return make_exception_future<ResultTuple>(std::move(eptr));
+}
+
+template<typename ResultTuple, typename SourceTuple>
+static future<ResultTuple> add_replica_exception_to_query_result(gms::feature_service& features, future<SourceTuple>&& f) {
+    if (!f.failed()) {
+        return make_ready_future<ResultTuple>(utils::tuple_insert<ResultTuple>(f.get(), replica::exception_variant{}));
+    }
+    return encode_replica_exception_for_rpc<ResultTuple>(features, f.get_exception());
 }
 
 static bool only_me(const inet_address_vector_replica_set& replicas) {
@@ -157,6 +163,7 @@ class storage_proxy::remote {
     netw::messaging_service& _ms;
     const gms::gossiper& _gossiper;
     migration_manager& _mm;
+    sharded<db::system_keyspace>& _sys_ks;
 
     netw::connection_drop_slot_t _connection_dropped;
     netw::connection_drop_registration_t _condrop_registration;
@@ -164,8 +171,8 @@ class storage_proxy::remote {
     bool _stopped{false};
 
 public:
-    remote(storage_proxy& sp, netw::messaging_service& ms, gms::gossiper& g, migration_manager& mm)
-        : _sp(sp), _ms(ms), _gossiper(g), _mm(mm)
+    remote(storage_proxy& sp, netw::messaging_service& ms, gms::gossiper& g, migration_manager& mm, sharded<db::system_keyspace>& sys_ks)
+        : _sp(sp), _ms(ms), _gossiper(g), _mm(mm), _sys_ks(sys_ks)
         , _connection_dropped(std::bind_front(&remote::connection_dropped, this))
         , _condrop_registration(_ms.when_connection_drops(_connection_dropped))
     {
@@ -201,6 +208,10 @@ public:
 
     bool is_alive(const gms::inet_address& ep) const {
         return _gossiper.is_alive(ep);
+    }
+
+    db::system_keyspace& system_keyspace() {
+        return _sys_ks.local();
     }
 
     // Note: none of the `send_*` functions use `remote` after yielding - by the first yield,
@@ -476,8 +487,10 @@ private:
                         errors.count++;
                         errors.local = replica::try_encode_replica_exception(eptr);
                         seastar::log_level l = seastar::log_level::warn;
-                        if (is_timeout_exception(eptr) || std::holds_alternative<replica::rate_limit_exception>(errors.local.reason)) {
-                            // ignore timeouts and rate limit exceptions so that logs are not flooded.
+                        if (is_timeout_exception(eptr)
+                                || std::holds_alternative<replica::rate_limit_exception>(errors.local.reason)
+                                || std::holds_alternative<abort_requested_exception>(errors.local.reason)) {
+                            // ignore timeouts, abort requests and rate limit exceptions so that logs are not flooded.
                             // database's total_writes_timedout or total_writes_rate_limited counter was incremented.
                             l = seastar::log_level::debug;
                         }
@@ -554,9 +567,9 @@ private:
         return handle_write(src_addr, t, schema_version, std::move(decision), forward, reply_to, shard,
                 response_id, trace_info,
                 fencing_token{},
-               /* apply_fn */ [] (shared_ptr<storage_proxy>& p, tracing::trace_state_ptr tr_state, schema_ptr s,
+               /* apply_fn */ [this] (shared_ptr<storage_proxy>& p, tracing::trace_state_ptr tr_state, schema_ptr s,
                        const paxos::proposal& decision, clock_type::time_point timeout, fencing_token) {
-                     return paxos::paxos_state::learn(*p, std::move(s), decision, timeout, tr_state);
+                     return paxos::paxos_state::learn(*p, _sys_ks.local(), std::move(s), decision, timeout, tr_state);
               },
               /* forward_fn */ [this] (shared_ptr<storage_proxy>&, netw::messaging_service::msg_addr addr, clock_type::time_point timeout, const paxos::proposal& m,
                       gms::inet_address reply_to, unsigned shard, response_id_type response_id,
@@ -594,6 +607,9 @@ private:
                     } else if constexpr (std::is_same_v<Ex, replica::unknown_exception> || std::is_same_v<Ex, replica::no_exception>) {
                         return error::FAILURE;
                     } else if constexpr(std::is_same_v<Ex, replica::stale_topology_exception>) {
+                        msg = e.what();
+                        return error::FAILURE;
+                    } else if constexpr (std::is_same_v<Ex, replica::abort_requested_exception>) {
                         msg = e.what();
                         return error::FAILURE;
                     }
@@ -650,7 +666,11 @@ private:
         auto cmd = make_lw_shared<query::read_command>(std::move(cmd1));
         auto src_ip = src_addr.addr;
         auto timeout = t ? *t : db::no_timeout;
-        schema_ptr s = co_await get_schema_for_read(cmd->schema_version, std::move(src_addr), timeout);
+        auto f_s = co_await coroutine::as_future(get_schema_for_read(cmd->schema_version, std::move(src_addr), timeout));
+        if (f_s.failed()) {
+            co_return co_await encode_replica_exception_for_rpc<Result>(p->features(), f_s.get_exception());
+        }
+        schema_ptr s = f_s.get();
         auto pr2 = ::compat::unwrap(std::move(pr), *s);
         auto do_query = [&]() {
             if constexpr (verb == read_verb::read_data) {
@@ -681,23 +701,21 @@ private:
                 static_assert(verb == static_cast<read_verb>(-1), "Unsupported verb");
             }
         };
-        auto to_future = [&](replica::stale_topology_exception e) {
-            return make_exception_future<typename decltype(do_query())::value_type>(std::move(e));
-        };
+
         const auto fence = fence_opt.value_or(fencing_token{});
 
         if (auto stale = _sp.apply_fence(fence, src_ip)) {
-            co_return co_await encode_replica_exception_for_rpc<Result>(p->features(), to_future(std::move(*stale)));
+            co_return co_await encode_replica_exception_for_rpc<Result>(p->features(), std::make_exception_ptr(std::move(*stale)));
         }
 
         auto f = co_await coroutine::as_future(do_query());
         tracing::trace(trace_state_ptr, "{} handling is done, sending a response to /{}", verb, src_ip);
 
         if (auto stale = _sp.apply_fence(fence, src_ip)) {
-            co_return co_await encode_replica_exception_for_rpc<Result>(p->features(), to_future(std::move(*stale)));
+            co_return co_await encode_replica_exception_for_rpc<Result>(p->features(), std::make_exception_ptr(std::move(*stale)));
         }
 
-        co_return co_await encode_replica_exception_for_rpc<Result>(p->features(), std::move(f));
+        co_return co_await add_replica_exception_to_query_result<Result>(p->features(), std::move(f));
     }
 
     using read_data_result_t = rpc::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature, replica::exception_variant>;
@@ -752,7 +770,7 @@ private:
             cmd.max_result_size.emplace(cinfo.retrieve_auxiliary<uint64_t>("max_result_size"));
         }
 
-        return get_schema_for_read(cmd.schema_version, src_addr, *timeout).then([&sp = _sp, cmd = std::move(cmd), key = std::move(key), ballot,
+        return get_schema_for_read(cmd.schema_version, src_addr, *timeout).then([&sp = _sp, &sys_ks = _sys_ks, cmd = std::move(cmd), key = std::move(key), ballot,
                          only_digest, da, timeout, tr_state = std::move(tr_state), src_ip] (schema_ptr schema) mutable {
             dht::token token = dht::get_token(*schema, key);
             unsigned shard = schema->table().shard_of(token);
@@ -760,9 +778,9 @@ private:
             sp.get_stats().replica_cross_shard_ops += !local;
             return sp.container().invoke_on(shard, sp._write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
                                      cmd = make_lw_shared<query::read_command>(std::move(cmd)), key = std::move(key),
-                                     ballot, only_digest, da, timeout, src_ip] (storage_proxy& sp) {
+                                     ballot, only_digest, da, timeout, src_ip, &sys_ks] (storage_proxy& sp) {
                 tracing::trace_state_ptr tr_state = gt;
-                return paxos::paxos_state::prepare(sp, tr_state, gs, *cmd, key, ballot, only_digest, da, *timeout).then([src_ip, tr_state] (paxos::prepare_response r) {
+                return paxos::paxos_state::prepare(sp, sys_ks.local(), tr_state, gs, *cmd, key, ballot, only_digest, da, *timeout).then([src_ip, tr_state] (paxos::prepare_response r) {
                     tracing::trace(tr_state, "paxos_prepare: handling is done, sending a response to /{}", src_ip);
                     return make_foreign(std::make_unique<paxos::prepare_response>(std::move(r)));
                 });
@@ -782,15 +800,15 @@ private:
             tracing::trace(tr_state, "paxos_accept: message received from /{} ballot {}", src_ip, proposal);
         }
 
-        auto f = get_schema_for_read(proposal.update.schema_version(), src_addr, *timeout).then([&sp = _sp, tr_state = std::move(tr_state),
+        auto f = get_schema_for_read(proposal.update.schema_version(), src_addr, *timeout).then([&sp = _sp, &sys_ks = _sys_ks, tr_state = std::move(tr_state),
                                                               proposal = std::move(proposal), timeout] (schema_ptr schema) mutable {
             dht::token token = proposal.update.decorated_key(*schema).token();
             unsigned shard = schema->table().shard_of(token);
             bool local = shard == this_shard_id();
             sp.get_stats().replica_cross_shard_ops += !local;
             return sp.container().invoke_on(shard, sp._write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
-                                     proposal = std::move(proposal), timeout, token] (storage_proxy& sp) {
-                return paxos::paxos_state::accept(sp, gt, gs, token, proposal, *timeout);
+                                     proposal = std::move(proposal), timeout, token, &sys_ks] (storage_proxy& sp) {
+                return paxos::paxos_state::accept(sp, sys_ks.local(), gt, gs, token, proposal, *timeout);
             });
         });
 
@@ -825,16 +843,16 @@ private:
 
         pruning++;
         auto d = defer([] { pruning--; });
-        return get_schema_for_read(schema_id, src_addr, *timeout).then([&sp = _sp, key = std::move(key), ballot,
+        return get_schema_for_read(schema_id, src_addr, *timeout).then([&sp = _sp, &sys_ks = _sys_ks, key = std::move(key), ballot,
                          timeout, tr_state = std::move(tr_state), src_ip, d = std::move(d)] (schema_ptr schema) mutable {
             dht::token token = dht::get_token(*schema, key);
             unsigned shard = schema->table().shard_of(token);
             bool local = shard == this_shard_id();
             sp.get_stats().replica_cross_shard_ops += !local;
             return smp::submit_to(shard, sp._write_smp_service_group, [gs = global_schema_ptr(schema), gt = tracing::global_trace_state_ptr(std::move(tr_state)),
-                                     key = std::move(key), ballot, timeout, src_ip, d = std::move(d)] () {
+                                     key = std::move(key), ballot, timeout, src_ip, d = std::move(d), &sys_ks] () {
                 tracing::trace_state_ptr tr_state = gt;
-                return paxos::paxos_state::prune(gs, key, ballot,  *timeout, tr_state).then([src_ip, tr_state] () {
+                return paxos::paxos_state::prune(sys_ks.local(), gs, key, ballot,  *timeout, tr_state).then([src_ip, tr_state] () {
                     tracing::trace(tr_state, "paxos_prune: handling is done, sending a response to /{}", src_ip);
                     return netw::messaging_service::no_wait();
                 });
@@ -1187,7 +1205,7 @@ public:
             fencing_token) override {
         tracing::trace(tr_state, "Executing a learn locally");
         // TODO: Enforce per partition rate limiting in paxos
-        return paxos::paxos_state::learn(sp, _schema, *_proposal, timeout, tr_state);
+        return paxos::paxos_state::learn(sp, sp.remote().system_keyspace(), _schema, *_proposal, timeout, tr_state);
     }
     virtual future<> apply_remotely(storage_proxy& sp, gms::inet_address ep, const inet_address_vector_replica_set& forward,
             storage_proxy::response_id_type response_id, storage_proxy::clock_type::time_point timeout,
@@ -1873,7 +1891,7 @@ future<paxos::prepare_summary> paxos_response_handler::prepare_ballot(utils::UUI
                 auto da = digest_algorithm(*_proxy);
                 if (fbu::is_me(peer)) {
                     tracing::trace(tr_state, "prepare_ballot: prepare {} locally", ballot);
-                    response = co_await paxos::paxos_state::prepare(*_proxy, tr_state, _schema, *_cmd, _key.key(), ballot, only_digest, da, _timeout);
+                    response = co_await paxos::paxos_state::prepare(*_proxy, _proxy->remote().system_keyspace(), tr_state, _schema, *_cmd, _key.key(), ballot, only_digest, da, _timeout);
                 } else {
                     response = co_await _proxy->remote().send_paxos_prepare(netw::msg_addr(peer), _timeout, tr_state, *_cmd, _key.key(), ballot, only_digest, da);
                 }
@@ -2032,7 +2050,7 @@ future<bool> paxos_response_handler::accept_proposal(lw_shared_ptr<paxos::propos
             try {
                 if (fbu::is_me(peer)) {
                     tracing::trace(tr_state, "accept_proposal: accept {} locally", *proposal);
-                    accepted = co_await paxos::paxos_state::accept(*_proxy, tr_state, _schema, proposal->update.decorated_key(*_schema).token(), *proposal, _timeout);
+                    accepted = co_await paxos::paxos_state::accept(*_proxy, _proxy->remote().system_keyspace(), tr_state, _schema, proposal->update.decorated_key(*_schema).token(), *proposal, _timeout);
                 } else {
                     accepted = co_await _proxy->remote().send_paxos_accept(netw::msg_addr(peer), _timeout, tr_state, *proposal);
                 }
@@ -2188,7 +2206,7 @@ void paxos_response_handler::prune(utils::UUID ballot) {
     (void)parallel_for_each(_live_endpoints, [this, ballot] (gms::inet_address peer) mutable {
         if (fbu::is_me(peer)) {
             tracing::trace(tr_state, "prune: prune {} locally", ballot);
-            return paxos::paxos_state::prune(_schema, _key.key(), ballot, _timeout, tr_state);
+            return paxos::paxos_state::prune(_proxy->remote().system_keyspace(), _schema, _key.key(), ballot, _timeout, tr_state);
         } else {
             tracing::trace(tr_state, "prune: send prune of {} to {}", ballot, peer);
             return _proxy->remote().send_paxos_prune(netw::msg_addr(peer), _timeout, tr_state, _schema->version(), _key.key(), ballot);
@@ -6220,8 +6238,8 @@ future<> storage_proxy::truncate_blocking(sstring keyspace, sstring cfname, std:
     return remote().send_truncate_blocking(std::move(keyspace), std::move(cfname), timeout_in_ms);
 }
 
-void storage_proxy::start_remote(netw::messaging_service& ms, gms::gossiper& g, migration_manager& mm) {
-    _remote = std::make_unique<struct remote>(*this, ms, g, mm);
+void storage_proxy::start_remote(netw::messaging_service& ms, gms::gossiper& g, migration_manager& mm, sharded<db::system_keyspace>& sys_ks) {
+    _remote = std::make_unique<struct remote>(*this, ms, g, mm, sys_ks);
 }
 
 future<> storage_proxy::stop_remote() {

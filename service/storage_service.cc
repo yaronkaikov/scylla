@@ -2426,17 +2426,6 @@ future<> storage_service::bootstrap(cdc::generation_service& cdc_gen_service, st
     });
 }
 
-sstring
-storage_service::get_rpc_address(const inet_address& endpoint) const {
-    if (endpoint != get_broadcast_address()) {
-        auto* v = _gossiper.get_application_state_ptr(endpoint, gms::application_state::RPC_ADDRESS);
-        if (v) {
-            return v->value();
-        }
-    }
-    return fmt::to_string(endpoint);
-}
-
 future<std::unordered_map<dht::token_range, inet_address_vector_replica_set>>
 storage_service::get_range_to_address_map(const sstring& keyspace) const {
     return get_range_to_address_map(_db.local().find_keyspace(keyspace).get_effective_replication_map());
@@ -2775,22 +2764,10 @@ future<> storage_service::on_alive(gms::inet_address endpoint, gms::endpoint_sta
     bool is_normal_token_owner = get_token_metadata().is_normal_token_owner(endpoint);
     if (is_normal_token_owner) {
         co_await notify_up(endpoint);
-    }
-    bool replacing_pending_ranges = _replacing_nodes_pending_ranges_updater.contains(endpoint);
-    if (replacing_pending_ranges) {
-        _replacing_nodes_pending_ranges_updater.erase(endpoint);
-    }
-
-    if (!is_normal_token_owner || replacing_pending_ranges) {
+    } else {
         auto tmlock = co_await get_token_metadata_lock();
         auto tmptr = co_await get_mutable_token_metadata_ptr();
-        if (replacing_pending_ranges) {
-            slogger.info("Trigger pending ranges updater for replacing node {}", endpoint);
-            co_await handle_state_replacing_update_pending_ranges(tmptr, endpoint);
-        }
-        if (!is_normal_token_owner) {
-            tmptr->update_topology(endpoint, get_dc_rack_for(endpoint));
-        }
+        tmptr->update_topology(endpoint, get_dc_rack_for(endpoint));
         co_await replicate_to_all_cores(std::move(tmptr));
     }
 }
@@ -2989,7 +2966,7 @@ future<> storage_service::stop_transport() {
             _gossiper.container().invoke_on_all(&gms::gossiper::shutdown).get();
             slogger.info("Stop transport: stop_gossiping done");
 
-            do_stop_ms().get();
+            _messaging.invoke_on_all(&netw::messaging_service::shutdown).get();
             slogger.info("Stop transport: shutdown messaging_service done");
 
             _stream_manager.invoke_on_all(&streaming::stream_manager::shutdown).get();
@@ -3546,14 +3523,6 @@ future<> storage_service::stop_gossiping() {
             return ss._gossiper.container().invoke_on_all(&gms::gossiper::stop);
         }
         return make_ready_future<>();
-    });
-}
-
-future<> storage_service::do_stop_ms() {
-    return _messaging.invoke_on_all([] (auto& ms) {
-        return ms.shutdown();
-    }).then([] {
-        slogger.info("messaging_service stopped");
     });
 }
 

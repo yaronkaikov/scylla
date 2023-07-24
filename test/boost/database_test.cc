@@ -15,6 +15,7 @@
 
 #include "test/lib/scylla_test_case.hh"
 #include <seastar/testing/thread_test_case.hh>
+#include <utility>
 
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/result_set_assertions.hh"
@@ -41,6 +42,7 @@
 #include "transport/messages/result_message.hh"
 #include "compaction/compaction_manager.hh"
 #include "db/snapshot-ctl.hh"
+#include "replica/mutation_dump.hh"
 
 using namespace std::chrono_literals;
 using namespace sstables;
@@ -185,7 +187,7 @@ SEASTAR_TEST_CASE(test_truncate_without_snapshot_during_writes) {
         uint32_t num_keys = 1000;
 
         auto f0 = insert_data(0, num_keys);
-        auto f1 = do_until([&] { return count >= num_keys; }, [&, ts = db_clock::now()] {
+        auto f1 = do_until([&] { return std::cmp_greater_equal(count, num_keys); }, [&, ts = db_clock::now()] {
             return replica::database::truncate_table_on_all_shards(e.db(), "ks", "cf", ts, false /* with_snapshot */).then([] {
                 return yield();
             });
@@ -299,20 +301,72 @@ static void test_database(void (*run_tests)(populate_fn_ex, bool), unsigned cgs)
     }).get();
 }
 
-SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_cg0) {
-    test_database(run_mutation_source_tests_plain, 0);
+// plain cg0
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_basic_cg0) {
+    test_database(run_mutation_source_tests_plain_basic, 0);
 }
 
-SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_cg1) {
-    test_database(run_mutation_source_tests_plain, 1);
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_reader_conversion_cg0) {
+    test_database(run_mutation_source_tests_plain_reader_conversion, 0);
 }
 
-SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_cg0) {
-    test_database(run_mutation_source_tests_reverse, 0);
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_fragments_monotonic_cg0) {
+    test_database(run_mutation_source_tests_plain_fragments_monotonic, 0);
 }
 
-SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_cg1) {
-    test_database(run_mutation_source_tests_reverse, 1);
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_read_back_cg0) {
+    test_database(run_mutation_source_tests_plain_read_back, 0);
+}
+
+// plain cg1
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_basic_cg1) {
+    test_database(run_mutation_source_tests_plain_basic, 1);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_reader_conversion_cg1) {
+    test_database(run_mutation_source_tests_plain_reader_conversion, 1);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_fragments_monotonic_cg1) {
+    test_database(run_mutation_source_tests_plain_fragments_monotonic, 1);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_plain_read_back_cg1) {
+    test_database(run_mutation_source_tests_plain_read_back, 1);
+}
+
+// reverse cg0
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_basic_cg0) {
+    test_database(run_mutation_source_tests_reverse_basic, 0);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_reader_conversion_cg0) {
+    test_database(run_mutation_source_tests_reverse_reader_conversion, 0);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_fragments_monotonic_cg0) {
+    test_database(run_mutation_source_tests_reverse_fragments_monotonic, 0);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_read_back_cg0) {
+    test_database(run_mutation_source_tests_reverse_read_back, 0);
+}
+
+// reverse cg1
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_basic_cg1) {
+    test_database(run_mutation_source_tests_reverse_basic, 1);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_reader_conversion_cg1) {
+    test_database(run_mutation_source_tests_reverse_reader_conversion, 1);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_fragments_monotonic_cg1) {
+    test_database(run_mutation_source_tests_reverse_fragments_monotonic, 1);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_database_with_data_in_sstables_is_a_mutation_source_reverse_read_back_cg1) {
+    test_database(run_mutation_source_tests_reverse_read_back, 1);
 }
 
 static void require_exist(const sstring& filename, bool should) {
@@ -1280,7 +1334,7 @@ SEASTAR_TEST_CASE(populate_from_quarantine_works) {
         });
         auto shard = tests::random::get_int<unsigned>(0, smp::count);
         auto found = false;
-        for (auto i = 0; i < smp::count && !found; i++) {
+        for (unsigned i = 0; i < smp::count && !found; i++) {
             found = co_await db.invoke_on((shard + i) % smp::count, [] (replica::database& db) -> future<bool> {
                 auto& cf = db.find_column_family("ks", "cf");
                 bool found = false;
@@ -1329,7 +1383,7 @@ SEASTAR_TEST_CASE(snapshot_with_quarantine_works) {
         // move a random sstable to quarantine
         auto shard = tests::random::get_int<unsigned>(0, smp::count);
         auto found = false;
-        for (auto i = 0; i < smp::count; i++) {
+        for (unsigned i = 0; i < smp::count; i++) {
             co_await db.invoke_on((shard + i) % smp::count, [&] (replica::database& db) -> future<> {
                 auto& cf = db.find_column_family("ks", "cf");
                 co_await cf.parallel_foreach_table_state([&] (compaction::table_state& ts) -> future<> {
@@ -1470,4 +1524,15 @@ SEASTAR_TEST_CASE(drop_table_with_explicit_snapshot) {
         BOOST_REQUIRE_EQUAL(cf_dir_exists, true);
         co_return;
     });
+}
+
+SEASTAR_TEST_CASE(mutation_dump_generated_schema_deterministic_id_version) {
+    simple_schema s;
+    auto os1 = replica::mutation_dump::generate_output_schema_from_underlying_schema(s.schema());
+    auto os2 = replica::mutation_dump::generate_output_schema_from_underlying_schema(s.schema());
+
+    BOOST_REQUIRE_EQUAL(os1->id(), os2->id());
+    BOOST_REQUIRE_EQUAL(os1->version(), os2->version());
+
+    return make_ready_future<>();
 }

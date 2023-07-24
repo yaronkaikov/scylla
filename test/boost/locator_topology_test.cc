@@ -34,7 +34,6 @@ SEASTAR_THREAD_TEST_CASE(test_add_node) {
 
     utils::fb_utilities::set_broadcast_address(ep1);
     topology::config cfg = {
-        .this_host_id = id1,
         .this_endpoint = ep1,
         .local_dc_rack = endpoint_dc_rack::default_location,
     };
@@ -73,7 +72,6 @@ SEASTAR_THREAD_TEST_CASE(test_moving) {
 
     utils::fb_utilities::set_broadcast_address(ep1);
     topology::config cfg = {
-        .this_host_id = id1,
         .this_endpoint = ep1,
         .local_dc_rack = endpoint_dc_rack::default_location,
     };
@@ -104,7 +102,6 @@ SEASTAR_THREAD_TEST_CASE(test_update_node) {
 
     utils::fb_utilities::set_broadcast_address(ep1);
     topology::config cfg = {
-        .this_host_id = host_id::create_null_id(),
         .this_endpoint = ep1,
         .local_dc_rack = endpoint_dc_rack::default_location,
     };
@@ -198,7 +195,6 @@ SEASTAR_THREAD_TEST_CASE(test_remove_endpoint) {
 
     utils::fb_utilities::set_broadcast_address(ep1);
     topology::config cfg = {
-        .this_host_id = id1,
         .this_endpoint = ep1,
         .local_dc_rack = dc_rack1
     };
@@ -263,23 +259,23 @@ SEASTAR_THREAD_TEST_CASE(test_load_sketch) {
         std::vector<unsigned> node2_shards(node2_shard_count, 0);
         std::vector<unsigned> node3_shards(node3_shard_count, 0);
 
-        for (int i = 0; i < node1_shard_count * 3; ++i) {
+        for (unsigned i = 0; i < node1_shard_count * 3; ++i) {
             node1_shards[load.next_shard(host1)] += 1;
         }
-        for (int i = 0; i < node2_shard_count * 3; ++i) {
+        for (unsigned i = 0; i < node2_shard_count * 3; ++i) {
             node2_shards[load.next_shard(host2)] += 1;
         }
-        for (int i = 0; i < node3_shard_count * 3; ++i) {
+        for (unsigned i = 0; i < node3_shard_count * 3; ++i) {
             node3_shards[load.next_shard(host3)] += 1;
         }
 
-        for (int i = 1; i < node1_shard_count; ++i) {
+        for (unsigned i = 1; i < node1_shard_count; ++i) {
             BOOST_REQUIRE_EQUAL(node1_shards[i], node1_shards[0]);
         }
-        for (int i = 1; i < node2_shard_count; ++i) {
+        for (unsigned i = 1; i < node2_shard_count; ++i) {
             BOOST_REQUIRE_EQUAL(node2_shards[i], node2_shards[0]);
         }
-        for (int i = 1; i < node3_shard_count; ++i) {
+        for (unsigned i = 1; i < node3_shard_count; ++i) {
             BOOST_REQUIRE_EQUAL(node3_shards[i], node3_shards[0]);
         }
     }
@@ -334,7 +330,7 @@ SEASTAR_THREAD_TEST_CASE(test_load_sketch) {
             node3_shards[s] += 1;
         }
 
-        for (int i = 1; i < node3_shard_count; ++i) {
+        for (unsigned i = 1; i < node3_shard_count; ++i) {
             BOOST_REQUIRE_EQUAL(node3_shards[i], node3_shards[0]);
         }
     }

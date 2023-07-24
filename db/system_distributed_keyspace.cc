@@ -580,7 +580,7 @@ system_distributed_keyspace::insert_cdc_generation(
 future<std::optional<cdc::topology_description>>
 system_distributed_keyspace::read_cdc_generation(utils::UUID id) {
     std::vector<cdc::token_range_description> entries;
-    auto num_ranges = 0;
+    size_t num_ranges = 0;
     co_await _qp.query_internal(
             // This should be a local read so 20s should be more than enough
             format("SELECT range_end, streams, ignore_msb, num_ranges FROM {}.{} WHERE id = ? USING TIMEOUT 20s", NAME_EVERYWHERE, CDC_GENERATIONS_V2),

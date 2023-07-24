@@ -50,7 +50,7 @@ using wait_for_all_updates = bool_class<wait_for_all_updates_tag>;
 
 class view_update_generator : public async_sharded_service<view_update_generator> {
 public:
-    static constexpr size_t registration_queue_size = 5;
+    static constexpr size_t registration_queue_size = 100;
 
 private:
     replica::database& _db;
@@ -85,6 +85,7 @@ public:
             wait_for_all_updates wait_for_all);
 
     ssize_t available_register_units() const { return _registration_sem.available_units(); }
+    size_t queued_batches_count() const { return _sstables_with_tables.size(); }
 private:
     bool should_throttle() const;
     void setup_metrics();

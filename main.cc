@@ -859,9 +859,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             supervisor::notify("starting tokens manager");
             locator::token_metadata::config tm_cfg;
-            // The local node's host_id is updated after loading from system.local
-            // or making a random one for a new node
-            tm_cfg.topo_cfg.this_host_id = host_id::create_null_id();
             tm_cfg.topo_cfg.this_endpoint = utils::fb_utilities::get_broadcast_address();
             tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
             if (snitch.local()->get_name() == "org.apache.cassandra.locator.SimpleSnitch") {
@@ -1465,7 +1462,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             supervisor::notify("initializing migration manager RPC verbs");
             mm.invoke_on_all(&service::migration_manager::init_messaging_service).get();
             supervisor::notify("initializing storage proxy RPC verbs");
-            proxy.invoke_on_all(&service::storage_proxy::start_remote, std::ref(messaging), std::ref(gossiper), std::ref(mm)).get();
+            proxy.invoke_on_all(&service::storage_proxy::start_remote, std::ref(messaging), std::ref(gossiper), std::ref(mm), std::ref(sys_ks)).get();
             auto stop_proxy_handlers = defer_verbose_shutdown("storage proxy RPC verbs", [&proxy] {
                 proxy.invoke_on_all(&service::storage_proxy::stop_remote).get();
             });

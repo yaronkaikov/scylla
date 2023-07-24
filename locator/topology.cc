@@ -9,6 +9,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include <seastar/core/on_internal_error.hh>
+#include <utility>
 
 #include "log.hh"
 #include "locator/topology.hh"
@@ -72,8 +73,8 @@ topology::topology(config cfg)
         , _cfg(cfg)
         , _sort_by_proximity(!cfg.disable_proximity_sorting)
 {
-    tlogger.trace("topology[{}]: constructing using config: host_id={} endpoint={} dc={} rack={}", fmt::ptr(this),
-            cfg.this_host_id, cfg.this_endpoint, cfg.local_dc_rack.dc, cfg.local_dc_rack.rack);
+    tlogger.trace("topology[{}]: constructing using config: endpoint={} dc={} rack={}", fmt::ptr(this),
+            cfg.this_endpoint, cfg.local_dc_rack.dc, cfg.local_dc_rack.rack);
 }
 
 topology::topology(topology&& o) noexcept
@@ -137,9 +138,7 @@ const node* topology::add_node(host_id id, const inet_address& ep, const endpoin
 }
 
 bool topology::is_configured_this_node(const node& n) const {
-    if (_cfg.this_host_id) { // Selection by host_id
-        return _cfg.this_host_id == n.host_id();
-    } else if (_cfg.this_endpoint != inet_address()) { // Selection by endpoint
+    if (_cfg.this_endpoint != inet_address()) { // Selection by endpoint
         return _cfg.this_endpoint == n.endpoint();;
     }
     return false; // No selection;
@@ -396,7 +395,7 @@ node_holder topology::pop_node(const node* node) {
 
     // shrink _nodes if the last node is popped
     // like when failing to index a newly added node
-    if (node->idx() == _nodes.size() - 1) {
+    if (std::cmp_equal(node->idx(), _nodes.size() - 1)) {
         _nodes.resize(node->idx());
     }
 
@@ -426,7 +425,7 @@ const node* topology::find_node(const inet_address& ep) const noexcept {
 // Finds a node by its index
 // Returns nullptr if not found
 const node* topology::find_node(node::idx_type idx) const noexcept {
-    if (idx >= _nodes.size()) {
+    if (std::cmp_greater_equal(idx, _nodes.size())) {
         return nullptr;
     }
     return _nodes.at(idx).get();
@@ -541,8 +540,7 @@ void topology::for_each_node(std::function<void(const node*)> func) const {
 namespace std {
 
 std::ostream& operator<<(std::ostream& out, const locator::topology& t) {
-    out << "{this_host_id: " << t._cfg.this_host_id
-        << ", this_endpoint: " << t._cfg.this_endpoint
+    out << "{this_endpoint: " << t._cfg.this_endpoint
         << ", dc: " << t._cfg.local_dc_rack.dc
         << ", rack: " << t._cfg.local_dc_rack.rack
         << ", nodes:\n";

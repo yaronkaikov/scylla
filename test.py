@@ -1723,7 +1723,8 @@ async def main() -> int:
 
     await find_tests(options)
     if options.list_tests:
-        print('\n'.join([t.name for t in TestSuite.all_tests()]))
+        print('\n'.join([f"{t.suite.mode:<8} {type(t.suite).__name__[:-9]:<11} {t.name}"
+                         for t in TestSuite.all_tests()]))
         return 0
 
     if options.manual_execution and TestSuite.test_count() > 1:

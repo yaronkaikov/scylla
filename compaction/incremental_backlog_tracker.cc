@@ -22,27 +22,32 @@ incremental_backlog_tracker::inflight_component incremental_backlog_tracker::com
     return in;
 }
 
-void incremental_backlog_tracker::refresh_sstables_backlog_contribution() {
-    _total_backlog_bytes = 0;
-    _sstables_backlog_contribution = 0.0f;
-    _sstable_runs_contributing_backlog = {};
-    if (_all.empty()) {
-        return;
-    }
+incremental_backlog_tracker::backlog_calculation_result
+incremental_backlog_tracker::calculate_sstables_backlog_contribution(const std::unordered_map<sstables::run_id, sstable_run>& all, const incremental_compaction_strategy_options& options,  unsigned threshold) {
+    int64_t total_backlog_bytes = 0;
+    float sstables_backlog_contribution = 0.0f;
+    std::unordered_set<sstables::run_id> sstable_runs_contributing_backlog = {};
 
-    for (auto& bucket : incremental_compaction_strategy::get_buckets(boost::copy_range<std::vector<sstable_run>>(_all | boost::adaptors::map_values), _options)) {
-        if (!incremental_compaction_strategy::is_bucket_interesting(bucket, _threshold)) {
+    if (!all.empty()) {
+      for (auto& bucket : incremental_compaction_strategy::get_buckets(boost::copy_range<std::vector<sstable_run>>(all | boost::adaptors::map_values), options)) {
+        if (!incremental_compaction_strategy::is_bucket_interesting(bucket, threshold)) {
             continue;
         }
         for (const sstable_run& run : bucket) {
             auto data_size = run.data_size();
             if (data_size > 0) {
-                _total_backlog_bytes += data_size;
-                _sstables_backlog_contribution += data_size * log4(data_size);
-                _sstable_runs_contributing_backlog.insert((*run.all().begin())->run_identifier());
+                total_backlog_bytes += data_size;
+                sstables_backlog_contribution += data_size * log4(data_size);
+                sstable_runs_contributing_backlog.insert((*run.all().begin())->run_identifier());
             }
         }
+      }
     }
+    return backlog_calculation_result{
+        .total_backlog_bytes = total_backlog_bytes,
+        .sstables_backlog_contribution = sstables_backlog_contribution,
+        .sstable_runs_contributing_backlog = std::move(sstable_runs_contributing_backlog),
+    };
 }
 
 incremental_backlog_tracker::incremental_backlog_tracker(incremental_compaction_strategy_options options) : _options(std::move(options)) {}
@@ -72,13 +77,17 @@ double incremental_backlog_tracker::backlog(const compaction_backlog_tracker::on
 
 // Removing could be the result of a failure of an in progress write, successful finish of a
 // compaction, or some one-off operation, like drop
-void incremental_backlog_tracker::replace_sstables(std::vector<sstables::shared_sstable> old_ssts, std::vector<sstables::shared_sstable> new_ssts) {
+void incremental_backlog_tracker::replace_sstables(const std::vector<sstables::shared_sstable>& old_ssts, const std::vector<sstables::shared_sstable>& new_ssts) {
+    auto all = _all;
+    auto total_bytes = _total_bytes;
+    auto threshold = _threshold;
+    auto backlog_calculation_result = incremental_backlog_tracker::backlog_calculation_result{};
     for (auto&& sst : new_ssts) {
     if (sst->data_size() > 0) {
-        _all[sst->run_identifier()].insert(sst);
-        _total_bytes += sst->data_size();
+        all[sst->run_identifier()].insert(sst);
+        total_bytes += sst->data_size();
         // Deduce threshold from the last SSTable added to the set
-        _threshold = sst->get_schema()->min_compaction_threshold();
+        threshold = sst->get_schema()->min_compaction_threshold();
     }
     }
 
@@ -86,18 +95,31 @@ void incremental_backlog_tracker::replace_sstables(std::vector<sstables::shared_
     for (auto&& sst : old_ssts) {
     if (sst->data_size() > 0) {
         auto run_identifier = sst->run_identifier();
-        _all[run_identifier].erase(sst);
-        if (_all[run_identifier].all().empty()) {
-            _all.erase(run_identifier);
+        all[run_identifier].erase(sst);
+        if (all[run_identifier].all().empty()) {
+            all.erase(run_identifier);
             exhausted_input_run = true;
         }
-        _total_bytes -= sst->data_size();
+        total_bytes -= sst->data_size();
     }
     }
     // Backlog contribution will only be refreshed when an input SSTable run was exhausted by
     // compaction, so to avoid doing it for each exhausted fragment, which would be both
     // overkill and expensive.
     if (exhausted_input_run) {
-        refresh_sstables_backlog_contribution();
+        backlog_calculation_result = calculate_sstables_backlog_contribution(all, _options, threshold);
     }
+
+    // commit calculations
+    std::invoke([&] () noexcept {
+        _all = std::move(all);
+        _total_bytes = total_bytes;
+        _threshold = threshold;
+
+        if (exhausted_input_run) {
+            _total_backlog_bytes = backlog_calculation_result.total_backlog_bytes;
+            _sstables_backlog_contribution = backlog_calculation_result.sstables_backlog_contribution;
+            _sstable_runs_contributing_backlog = std::move(backlog_calculation_result.sstable_runs_contributing_backlog);
+        }
+    });
 }

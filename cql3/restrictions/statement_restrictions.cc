@@ -120,11 +120,9 @@ static std::vector<expr::expression> extract_partition_range(
             auto s = &cv;
             with_current_binary_operator(*this, [&] (const binary_operator& b) {
                 if (s->col->is_partition_key() && (b.op == oper_t::EQ || b.op == oper_t::IN)) {
-                    const auto found = single_column.find(s->col);
-                    if (found == single_column.end()) {
-                        single_column[s->col] = b;
-                    } else {
-                        found->second = make_conjunction(std::move(found->second), b);
+                    const auto [it, inserted] = single_column.try_emplace(s->col, b);
+                    if (!inserted) {
+                        it->second = make_conjunction(std::move(it->second), b);
                     }
                 }
             });
@@ -139,11 +137,9 @@ static std::vector<expr::expression> extract_partition_range(
 
             with_current_binary_operator(*this, [&] (const binary_operator& b) {
                 if (cval.col->is_partition_key() && (b.op == oper_t::EQ || b.op == oper_t::IN)) {
-                    const auto found = single_column.find(cval.col);
-                    if (found == single_column.end()) {
-                        single_column[cval.col] = b;
-                    } else {
-                        found->second = make_conjunction(std::move(found->second), b);
+                    const auto [it, inserted] = single_column.try_emplace(cval.col, b);
+                    if (!inserted) {
+                        it->second = make_conjunction(std::move(it->second), b);
                     }
                 }
             });
@@ -247,11 +243,9 @@ static std::vector<expr::expression> extract_clustering_prefix_restrictions(
             auto s = &cv;
             with_current_binary_operator(*this, [&] (const binary_operator& b) {
                 if (s->col->is_clustering_key()) {
-                    const auto found = single.find(s->col);
-                    if (found == single.end()) {
-                        single[s->col] = b;
-                    } else {
-                        found->second = make_conjunction(std::move(found->second), b);
+                    const auto [it, inserted] = single.try_emplace(s->col, b);
+                    if (!inserted) {
+                        it->second = make_conjunction(std::move(it->second), b);
                     }
                 }
             });
@@ -262,11 +256,9 @@ static std::vector<expr::expression> extract_clustering_prefix_restrictions(
 
             with_current_binary_operator(*this, [&] (const binary_operator& b) {
                 if (cval.col->is_clustering_key()) {
-                    const auto found = single.find(cval.col);
-                    if (found == single.end()) {
-                        single[cval.col] = b;
-                    } else {
-                        found->second = make_conjunction(std::move(found->second), b);
+                    const auto [it, inserted] = single.try_emplace(cval.col, b);
+                    if (!inserted) {
+                        it->second = make_conjunction(std::move(it->second), b);
                     }
                 }
             });
@@ -355,9 +347,11 @@ statement_restrictions::statement_restrictions(data_dictionary::database db,
         prepare_context& ctx,
         bool selects_only_static_columns,
         bool for_view,
-        bool allow_filtering)
+        bool allow_filtering,
+        check_indexes do_check_indexes)
     : statement_restrictions(schema, allow_filtering)
 {
+    _check_indexes = do_check_indexes;
     for (auto&& relation_expr : boolean_factors(where_clause)) {
         const expr::binary_operator* relation_binop = expr::as_if<expr::binary_operator>(&relation_expr);
 
@@ -383,18 +377,25 @@ statement_restrictions::statement_restrictions(data_dictionary::database db,
         _clustering_prefix_restrictions = extract_clustering_prefix_restrictions(*_where, _schema);
         _partition_range_restrictions = extract_partition_range(*_where, _schema);
     }
-    auto cf = db.find_column_family(schema);
-    auto& sim = cf.get_index_manager();
-    const expr::allow_local_index allow_local(
-            !has_partition_key_unrestricted_components()
-            && partition_key_restrictions_is_all_eq());
     _has_multi_column = find_binop(_clustering_columns_restrictions, expr::is_multi_column);
-    _has_queriable_ck_index = clustering_columns_restrictions_have_supporting_index(sim, allow_local)
-            && !type.is_delete();
-    _has_queriable_pk_index = parition_key_restrictions_have_supporting_index(sim, allow_local)
-            && !type.is_delete();
-    _has_queriable_regular_index = expr::index_supports_some_column(_nonprimary_key_restrictions, sim, allow_local)
-            && !type.is_delete();
+    if (_check_indexes) {
+        auto cf = db.find_column_family(schema);
+        auto& sim = cf.get_index_manager();
+        const expr::allow_local_index allow_local(
+                !has_partition_key_unrestricted_components()
+                && partition_key_restrictions_is_all_eq());
+        _has_multi_column = find_binop(_clustering_columns_restrictions, expr::is_multi_column);
+        _has_queriable_ck_index = clustering_columns_restrictions_have_supporting_index(sim, allow_local)
+                && !type.is_delete();
+        _has_queriable_pk_index = parition_key_restrictions_have_supporting_index(sim, allow_local)
+                && !type.is_delete();
+        _has_queriable_regular_index = expr::index_supports_some_column(_nonprimary_key_restrictions, sim, allow_local)
+                && !type.is_delete();
+    } else {
+        _has_queriable_ck_index = false;
+        _has_queriable_pk_index = false;
+        _has_queriable_regular_index = false;
+    }
 
     // At this point, the select statement if fully constructed, but we still have a few things to validate
     process_partition_key_restrictions(for_view, allow_filtering);
@@ -538,7 +539,7 @@ int statement_restrictions::score(const secondary_index::index& index) const {
 std::pair<std::optional<secondary_index::index>, expr::expression> statement_restrictions::find_idx(const secondary_index::secondary_index_manager& sim) const {
     std::optional<secondary_index::index> chosen_index;
     int chosen_index_score = 0;
-    expr::expression chosen_index_restrictions;
+    expr::expression chosen_index_restrictions = expr::conjunction({});
 
     for (const auto& index : sim.list_indexes()) {
         auto cdef = _schema->get_column_definition(to_bytes(index.target_column()));
@@ -571,9 +572,12 @@ bool statement_restrictions::has_eq_restriction_on_column(const column_definitio
 std::vector<const column_definition*> statement_restrictions::get_column_defs_for_filtering(data_dictionary::database db) const {
     std::vector<const column_definition*> column_defs_for_filtering;
     if (need_filtering()) {
-        auto cf = db.find_column_family(_schema);
-        auto& sim = cf.get_index_manager();
-        auto opt_idx = std::get<0>(find_idx(sim));
+        std::optional<secondary_index::index> opt_idx;
+        if (_check_indexes) {
+            auto cf = db.find_column_family(_schema);
+            auto& sim = cf.get_index_manager();
+            opt_idx = std::get<0>(find_idx(sim));
+        }
         auto column_uses_indexing = [&opt_idx] (const column_definition* cdef, const expr::expression* single_col_restr) {
             return opt_idx && single_col_restr && is_supported_by(*single_col_restr, *opt_idx);
         };
@@ -1857,7 +1861,7 @@ void statement_restrictions::prepare_indexed_global(const schema& idx_tbl_schema
 
     // If we're here, it means the index cannot be on a partition column: process_partition_key_restrictions()
     // avoids indexing when _partition_range_is_simple.  See _idx_tbl_ck_prefix blurb for its composition.
-    _idx_tbl_ck_prefix = std::vector<expr::expression>(1 + _schema->partition_key_size());
+    _idx_tbl_ck_prefix = std::vector<expr::expression>(1 + _schema->partition_key_size(), expr::conjunction({}));
     _idx_tbl_ck_prefix->reserve(_idx_tbl_ck_prefix->size() + idx_tbl_schema.clustering_key_size());
     for (const auto& e : _partition_range_restrictions) {
         const auto col = expr::as<column_value>(find(e, oper_t::EQ)->lhs).col;

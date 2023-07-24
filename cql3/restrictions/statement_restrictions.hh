@@ -25,6 +25,10 @@ namespace cql3 {
 
 namespace restrictions {
 
+///In some cases checking if columns have indexes is undesired of even
+///impossible, because e.g. the query runs on a pseudo-table, which does not
+///have an index-manager, or even a table object.
+using check_indexes = bool_class<class check_indexes_tag>;
 
 /**
  * The restrictions corresponding to the relations specified on the where-clause of CQL query.
@@ -36,21 +40,21 @@ private:
     /**
      * Restrictions on partitioning columns
      */
-    expr::expression _partition_key_restrictions;
+    expr::expression _partition_key_restrictions = expr::conjunction({});
 
     expr::single_column_restrictions_map _single_column_partition_key_restrictions;
 
     /**
      * Restrictions on clustering columns
      */
-    expr::expression _clustering_columns_restrictions;
+    expr::expression _clustering_columns_restrictions = expr::conjunction({});
 
     expr::single_column_restrictions_map _single_column_clustering_key_restrictions;
 
     /**
      * Restriction on non-primary key columns (i.e. secondary index restrictions)
      */
-    expr::expression _nonprimary_key_restrictions;
+    expr::expression _nonprimary_key_restrictions = expr::conjunction({});
 
     expr::single_column_restrictions_map _single_column_nonprimary_key_restrictions;
 
@@ -110,6 +114,8 @@ private:
 
     bool _partition_range_is_simple; ///< False iff _partition_range_restrictions imply a Cartesian product.
 
+
+    check_indexes _check_indexes = check_indexes::yes;
 public:
     /**
      * Creates a new empty <code>StatementRestrictions</code>.
@@ -126,7 +132,8 @@ public:
         prepare_context& ctx,
         bool selects_only_static_columns,
         bool for_view = false,
-        bool allow_filtering = false);
+        bool allow_filtering = false,
+        check_indexes do_check_indexes = check_indexes::yes);
 
     const std::vector<expr::expression>& index_restrictions() const;
 
