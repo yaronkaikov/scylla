@@ -42,6 +42,24 @@ This guide covers upgrading ScyllaDB on Red Hat Enterprise Linux (RHEL) CentOS, 
 
 This guide also applies when you're upgrading ScyllaDB Enterprise official image on EC2, GCP, or Azure. The image is based on Ubuntu 22.04.
 
+Before You Upgrade ScyllaDB Enterprise
+=======================================
+
+**Upgrade Your Driver**
+
+If you're using a :doc:`ScyllaDB driver </using-scylla/drivers/cql-drivers/index>`, upgrade the driver
+before you upgrade ScyllaDB Enterprise. The latest two versions of each driver are supported.
+
+**Upgrade ScyllaDB Monitoring Stack**
+
+If you're using the ScyllaDB Monitoring Stack, verify that your Monitoring Stack version supports 
+the ScyllaDB Enterprise version to which you want to upgrade. See 
+`ScyllaDB Monitoring Stack Support Matrix <https://monitoring.docs.scylladb.com/stable/reference/matrix.html>`_.
+
+We recommend upgrading the Monitoring Stack to the latest version.
+
+
+
 Upgrade Procedure
 =================
 
