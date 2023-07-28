@@ -14,4 +14,4 @@
 .. note::
 
    Scylla Enterprise 2019.1.8 added a new configuration to restrict the memory usage of reverse queries.
-   If you are using reverse queries and hitting an error *"Aborting reverse partition read because partition ... is larger than the maximum safe size of ... for reversible partitions"* see the :doc:`reverse queries FAQ section </troubleshooting/reverse-queries>`.
+   If you are using reverse queries and hitting an error *"Aborting reverse partition read because partition ... is larger than the maximum safe size of ... for reversible partitions"* see the `reverse queries FAQ section <https://enterprise.docs.scylladb.com/branch-2022.2/troubleshooting/reverse-queries.html>`_.
