@@ -340,7 +340,18 @@ future<> gossiper::do_send_ack2_msg(msg_addr from, utils::chunked_vector<gossip_
         std::map<inet_address, endpoint_state> delta_ep_state_map;
         for (auto g_digest : ack_msg_digest) {
             inet_address addr = g_digest.get_endpoint();
-            auto local_ep_state_ptr = this->get_state_for_version_bigger_than(addr, version_type(g_digest.get_max_version()));
+            const auto es = get_endpoint_state_for_endpoint_ptr(addr);
+            if (!es || es->get_heart_beat_state().get_generation() < g_digest.get_generation()) {
+                continue;
+            }
+            // Local generation for addr may have been increased since the
+            // current node sent an initial SYN. Comparing versions across
+            // different generations in get_state_for_version_bigger_than
+            // could result in loosing some app states with smaller versions.
+            const auto version = es->get_heart_beat_state().get_generation() > g_digest.get_generation()
+                ? version_type(0)
+                : g_digest.get_max_version();
+            auto local_ep_state_ptr = this->get_state_for_version_bigger_than(addr, version);
             if (local_ep_state_ptr) {
                 delta_ep_state_map.emplace(addr, *local_ep_state_ptr);
             }
@@ -1459,10 +1470,7 @@ void gossiper::update_timestamp_for_nodes(const std::map<inet_address, endpoint_
 }
 
 void gossiper::mark_alive(inet_address addr, endpoint_state& local_state) {
-    // if (MessagingService.instance().getVersion(addr) < MessagingService.VERSION_20) {
-    //     real_mark_alive(addr, local_state);
-    //     return;
-    // }
+    // Enter the _background_msg gate so stop() would wait on it
     auto inserted = _pending_mark_alive_endpoints.insert(addr).second;
     if (inserted) {
         // The node is not in the _pending_mark_alive_endpoints
@@ -1473,11 +1481,17 @@ void gossiper::mark_alive(inet_address addr, endpoint_state& local_state) {
         return;
     }
 
+    // unmark addr as pending on exception or after background continuation completes
+    auto unmark_pending = deferred_action([this, addr, g = shared_from_this()] () noexcept {
+        _pending_mark_alive_endpoints.erase(addr);
+    });
+
     local_state.mark_dead();
     msg_addr id = get_msg_addr(addr);
     auto generation = _endpoint_state_map[get_broadcast_address()].get_heart_beat_state().get_generation();
+    // Enter the _background_msg gate so stop() would wait on it
+    auto gh = _background_msg.hold();
     logger.debug("Sending a EchoMessage to {}, with generation_number={}", id, generation);
-    // Do it in the background.
     (void)_messaging.send_gossip_echo(id, generation.value(), std::chrono::milliseconds(15000)).then([this, addr] {
         logger.trace("Got EchoMessage Reply");
         // After sending echo message, the Node might not be in the
@@ -1492,9 +1506,7 @@ void gossiper::mark_alive(inet_address addr, endpoint_state& local_state) {
             return real_mark_alive(addr, state);
         }
         return make_ready_future();
-    }).finally([this, addr] {
-        _pending_mark_alive_endpoints.erase(addr);
-    }).handle_exception([addr] (auto ep) {
+    }).handle_exception([addr, gh = std::move(gh), unmark_pending = std::move(unmark_pending)] (auto ep) {
         logger.warn("Fail to send EchoMessage to {}: {}", addr, ep);
     });
 }

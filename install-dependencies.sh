@@ -54,6 +54,9 @@ debian_base_packages=(
 
 fedora_packages=(
     clang
+    compiler-rt
+    libasan
+    libubsan
     gdb
     lua-devel
     yaml-cpp-devel

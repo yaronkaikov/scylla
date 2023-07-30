@@ -244,7 +244,7 @@ public:
 
     static table_schema_version generate_schema_version(table_id table_id, uint16_t offset = 0);
 
-    future<> setup(sharded<locator::snitch_ptr>& snitch, sharded<netw::messaging_service>& ms);
+    future<> setup(sharded<netw::messaging_service>& ms);
     future<> update_schema_version(table_schema_version version);
 
     /*
@@ -257,7 +257,6 @@ public:
      */
     future<> update_tokens(gms::inet_address ep, const std::unordered_set<dht::token>& tokens);
 
-private:
     future<std::unordered_map<gms::inet_address, gms::inet_address>> get_preferred_ips();
 
 public:
@@ -348,8 +347,8 @@ public:
 
     typedef std::vector<db::replay_position> replay_positions;
 
-    static future<> save_truncation_record(table_id, db_clock::time_point truncated_at, db::replay_position);
-    static future<> save_truncation_record(const replica::column_family&, db_clock::time_point truncated_at, db::replay_position);
+    future<> save_truncation_record(table_id, db_clock::time_point truncated_at, db::replay_position);
+    future<> save_truncation_record(const replica::column_family&, db_clock::time_point truncated_at, db::replay_position);
     future<replay_positions> get_truncated_position(table_id);
     future<db_clock::time_point> get_truncated_at(table_id);
 
@@ -445,23 +444,23 @@ public:
     future<> cdc_set_rewritten(std::optional<cdc::generation_id_v1>);
 
     // Load Raft Group 0 id from scylla.local
-    static future<utils::UUID> get_raft_group0_id();
+    future<utils::UUID> get_raft_group0_id();
 
     // Persist Raft Group 0 id. Should be a TIMEUUID.
-    static future<> set_raft_group0_id(utils::UUID id);
+    future<> set_raft_group0_id(utils::UUID id);
 
     // Save advertised gossip feature set to system.local
     future<> save_local_supported_features(const std::set<std::string_view>& feats);
 
     // Get the last (the greatest in timeuuid order) state ID in the group 0 history table.
     // Assumes that the history table exists, i.e. Raft experimental feature is enabled.
-    static future<utils::UUID> get_last_group0_state_id();
+    future<utils::UUID> get_last_group0_state_id();
 
     // Checks whether the group 0 history table contains the given state ID.
     // Assumes that the history table exists, i.e. Raft experimental feature is enabled.
-    static future<bool> group0_history_contains(utils::UUID state_id);
+    future<bool> group0_history_contains(utils::UUID state_id);
 
-    static future<service::topology> load_topology_state();
+    future<service::topology> load_topology_state();
     future<int64_t> get_topology_fence_version();
     future<> update_topology_fence_version(int64_t value);
 

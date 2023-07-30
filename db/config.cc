@@ -472,6 +472,9 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , commitlog_segment_size_in_mb(this, "commitlog_segment_size_in_mb", value_status::Used, 64,
         "Sets the size of the individual commitlog file segments. A commitlog segment may be archived, deleted, or recycled after all its data has been flushed to SSTables. This amount of data can potentially include commitlog segments from every table in the system. The default size is usually suitable for most commitlog archiving, but if you want a finer granularity, 8 or 16 MB is reasonable. See Commit log archive configuration.\n"
         "Related information: Commit log archive configuration")
+    , schema_commitlog_segment_size_in_mb(this, "schema_commitlog_segment_size_in_mb", value_status::Used, 128,
+        "Sets the size of the individual schema commitlog file segments. The default size is larger than the default size of the data commitlog because the segment size puts a limit on the mutation size that can be written at once, and some schema mutation writes are much larger than average.\n"
+        "Related information: Commit log archive configuration")
     /* Note: does not exist on the listing page other than in above comment, wtf? */
     , commitlog_sync_period_in_ms(this, "commitlog_sync_period_in_ms", value_status::Used, 10000,
         "Controls how long the system waits for other writes before performing a sync in \"periodic\" mode.")
@@ -854,6 +857,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , override_decommission(this, "override_decommission", value_status::Used, false, "Set true to force a decommissioned node to join the cluster (cannot be set if consistent-cluster-management is enabled")
     , enable_repair_based_node_ops(this, "enable_repair_based_node_ops", liveness::LiveUpdate, value_status::Used, true, "Set true to use enable repair based node operations instead of streaming based")
     , allowed_repair_based_node_ops(this, "allowed_repair_based_node_ops", liveness::LiveUpdate, value_status::Used, "replace,removenode,rebuild,bootstrap,decommission", "A comma separated list of node operations which are allowed to enable repair based node operations. The operations can be bootstrap, replace, removenode, decommission and rebuild")
+    , enable_compacting_data_for_streaming_and_repair(this, "enable_compacting_data_for_streaming_and_repair", liveness::LiveUpdate, value_status::Used, true, "Enable the compacting reader, which compacts the data for streaming and repair (load'n'stream included) before sending it to, or synchronizing it with peers. Can reduce the amount of data to be processed by removing dead data, but adds CPU overhead.")
     , ring_delay_ms(this, "ring_delay_ms", value_status::Used, 30 * 1000, "Time a node waits to hear from other nodes before joining the ring in milliseconds. Same as -Dcassandra.ring_delay_ms in cassandra.")
     , shadow_round_ms(this, "shadow_round_ms", value_status::Used, 300 * 1000, "The maximum gossip shadow round time. Can be used to reduce the gossip feature check time during node boot up.")
     , fd_max_interval_ms(this, "fd_max_interval_ms", value_status::Used, 2 * 1000, "The maximum failure_detector interval time in milliseconds. Interval larger than the maximum will be ignored. Larger cluster may need to increase the default.")
@@ -888,6 +892,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , uuid_sstable_identifiers_enabled(this,
             "uuid_sstable_identifiers_enabled", liveness::LiveUpdate, value_status::Used, true, "If set to true, each newly created sstable will have a UUID "
             "based generation identifier, and such files are not readable by previous Scylla versions.")
+    , table_digest_insensitive_to_expiry(this, "table_digest_insensitive_to_expiry", liveness::MustRestart, value_status::Used, true,
+            "When enabled, per-table schema digest calculation ignores empty partitions.")
     , enable_dangerous_direct_import_of_cassandra_counters(this, "enable_dangerous_direct_import_of_cassandra_counters", value_status::Used, false, "Only turn this option on if you want to import tables from Cassandra containing counters, and you are SURE that no counters in that table were created in a version earlier than Cassandra 2.1."
         " It is not enough to have ever since upgraded to newer versions of Cassandra. If you EVER used a version earlier than 2.1 in the cluster where these SSTables come from, DO NOT TURN ON THIS OPTION! You will corrupt your data. You have been warned.")
     , enable_shard_aware_drivers(this, "enable_shard_aware_drivers", value_status::Used, true, "Enable native transport drivers to use connection-per-shard for better performance")

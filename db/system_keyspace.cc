@@ -1433,24 +1433,16 @@ future<> system_keyspace::build_bootstrap_info() {
     });
 }
 
-future<> system_keyspace::setup(sharded<locator::snitch_ptr>& snitch, sharded<netw::messaging_service>& ms) {
+future<> system_keyspace::setup(sharded<netw::messaging_service>& ms) {
     assert(this_shard_id() == 0);
 
     co_await setup_version(ms);
-    co_await update_schema_version(_db.get_version());
     co_await build_bootstrap_info();
     co_await check_health();
     co_await db::schema_tables::save_system_keyspace_schema(_qp);
     // #2514 - make sure "system" is written to system_schema.keyspaces.
     co_await db::schema_tables::save_system_schema(_qp, NAME);
     co_await cache_truncation_record();
-
-    if (snitch.local()->prefer_local()) {
-        auto preferred_ips = co_await get_preferred_ips();
-        co_await ms.invoke_on_all([&preferred_ips] (auto& ms) {
-            return ms.init_local_preferred_ip_cache(preferred_ips);
-        });
-    }
 }
 
 struct truncation_record {
@@ -1512,7 +1504,7 @@ future<> system_keyspace::cache_truncation_record() {
 
 future<> system_keyspace::save_truncation_record(table_id id, db_clock::time_point truncated_at, db::replay_position rp) {
     sstring req = format("INSERT INTO system.{} (table_uuid, shard, position, segment_id, truncated_at) VALUES(?,?,?,?,?)", TRUNCATED);
-    return qctx->qp().execute_internal(req, {id.uuid(), int32_t(rp.shard_id()), int32_t(rp.pos), int64_t(rp.base_id()), truncated_at}, cql3::query_processor::cache_internal::yes).discard_result().then([] {
+    return _qp.execute_internal(req, {id.uuid(), int32_t(rp.shard_id()), int32_t(rp.pos), int64_t(rp.base_id()), truncated_at}, cql3::query_processor::cache_internal::yes).discard_result().then([] {
         return force_blocking_flush(TRUNCATED);
     });
 }
@@ -2392,7 +2384,7 @@ future<> system_keyspace::set_raft_group0_id(utils::UUID uuid) {
 static constexpr auto GROUP0_HISTORY_KEY = "history";
 
 future<utils::UUID> system_keyspace::get_last_group0_state_id() {
-    auto rs = co_await qctx->execute_cql(
+    auto rs = co_await execute_cql(
         format(
             "SELECT state_id FROM system.{} WHERE key = '{}' LIMIT 1",
             GROUP0_HISTORY, GROUP0_HISTORY_KEY));
@@ -2404,7 +2396,7 @@ future<utils::UUID> system_keyspace::get_last_group0_state_id() {
 }
 
 future<bool> system_keyspace::group0_history_contains(utils::UUID state_id) {
-    auto rs = co_await qctx->execute_cql(
+    auto rs = co_await execute_cql(
         format(
             "SELECT state_id FROM system.{} WHERE key = '{}' AND state_id = ?",
             GROUP0_HISTORY, GROUP0_HISTORY_KEY),
@@ -2493,7 +2485,7 @@ static std::set<sstring> decode_features(const set_type_impl::native_type& featu
 }
 
 future<service::topology> system_keyspace::load_topology_state() {
-    auto rs = co_await qctx->execute_cql(
+    auto rs = co_await execute_cql(
         format("SELECT * FROM system.{} WHERE key = '{}'", TOPOLOGY, TOPOLOGY));
     assert(rs);
 
@@ -2653,7 +2645,7 @@ future<service::topology> system_keyspace::load_topology_state() {
 
             // Sanity check for CDC generation data consistency.
             {
-                auto gen_rows = co_await qctx->execute_cql(
+                auto gen_rows = co_await execute_cql(
                     format("SELECT count(range_end) as cnt, num_ranges FROM system.{} WHERE id = ?",
                            CDC_GENERATIONS_V3),
                     gen_uuid);

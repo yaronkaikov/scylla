@@ -109,6 +109,14 @@ void migration_manager::init_messaging_service()
         _feature_listeners.push_back(_feat.cdc.when_enabled(update_schema));
         _feature_listeners.push_back(_feat.per_table_partitioners.when_enabled(update_schema));
         _feature_listeners.push_back(_feat.computed_columns.when_enabled(update_schema));
+
+        if (!_feat.table_digest_insensitive_to_expiry) {
+            _feature_listeners.push_back(_feat.table_digest_insensitive_to_expiry.when_enabled([this] {
+                (void) with_gate(_background_tasks, [this] {
+                    return reload_schema();
+                });
+            }));
+        }
         _feature_listeners.push_back(_feat.in_memory_tables.when_enabled(update_schema));
     }
 
@@ -378,6 +386,12 @@ future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr 
                     std::runtime_error(fmt::format("Error while applying schema mutations: {}", e))));
     }
     return db::schema_tables::merge_schema(_sys_ks, proxy.container(), _feat, std::move(mutations));
+}
+
+future<> migration_manager::reload_schema() {
+    mlogger.info("Reloading schema");
+    std::vector<mutation> mutations;
+    return db::schema_tables::merge_schema(_sys_ks, _storage_proxy.container(), _feat, std::move(mutations), true);
 }
 
 future<> migration_manager::merge_schema_from(netw::messaging_service::msg_addr src, const std::vector<frozen_mutation>& mutations)

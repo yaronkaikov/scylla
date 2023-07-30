@@ -102,8 +102,10 @@ namespace {
     });
 }
 
-schema_ctxt::schema_ctxt(const db::config& cfg, std::shared_ptr<data_dictionary::user_types_storage> uts, replica::database* db)
+schema_ctxt::schema_ctxt(const db::config& cfg, std::shared_ptr<data_dictionary::user_types_storage> uts,
+                         const gms::feature_service& features, replica::database* db)
     : _db(db)
+    , _features(features)
     , _extensions(cfg.extensions())
     , _murmur3_partitioner_ignore_msb_bits(cfg.murmur3_partitioner_ignore_msb_bits())
     , _schema_registry_grace_period(cfg.schema_registry_grace_period())
@@ -111,7 +113,7 @@ schema_ctxt::schema_ctxt(const db::config& cfg, std::shared_ptr<data_dictionary:
 {}
 
 schema_ctxt::schema_ctxt(replica::database& db)
-    : schema_ctxt(db.get_config(), db.as_user_types_storage(), &db)
+    : schema_ctxt(db.get_config(), db.as_user_types_storage(), db.features(), &db)
 {}
 
 schema_ctxt::schema_ctxt(distributed<replica::database>& db)
@@ -148,10 +150,12 @@ struct qualified_name {
 static future<schema_mutations> read_table_mutations(distributed<service::storage_proxy>& proxy, const qualified_name& table, schema_ptr s);
 
 static future<> merge_tables_and_views(distributed<service::storage_proxy>& proxy,
+    sharded<db::system_keyspace>& sys_ks,
     std::map<table_id, schema_mutations>&& tables_before,
     std::map<table_id, schema_mutations>&& tables_after,
     std::map<table_id, schema_mutations>&& views_before,
-    std::map<table_id, schema_mutations>&& views_after);
+    std::map<table_id, schema_mutations>&& views_after,
+    bool reload);
 
 struct [[nodiscard]] user_types_to_drop final {
     seastar::noncopyable_function<future<> ()> drop;
@@ -164,7 +168,7 @@ static future<user_types_to_drop> merge_types(distributed<service::storage_proxy
 static future<> merge_functions(distributed<service::storage_proxy>& proxy, schema_result before, schema_result after);
 static future<> merge_aggregates(distributed<service::storage_proxy>& proxy, schema_result before, schema_result after, schema_result scylla_before, schema_result scylla_after);
 
-static future<> do_merge_schema(distributed<service::storage_proxy>&, std::vector<mutation>, bool do_flush);
+static future<> do_merge_schema(distributed<service::storage_proxy>&, sharded<db::system_keyspace>& sys_ks, std::vector<mutation>, bool do_flush, bool reload);
 
 using computed_columns_map = std::unordered_map<bytes, column_computation_ptr>;
 static computed_columns_map get_computed_columns(const schema_mutations& sm);
@@ -216,10 +220,10 @@ future<> save_system_schema(cql3::query_processor& qp, const sstring & ksname) {
     auto ksm = ks.metadata();
 
     // delete old, possibly obsolete entries in schema tables
-    co_await coroutine::parallel_for_each(all_table_names(schema_features::full()), [ksm] (sstring cf) -> future<> {
+    co_await coroutine::parallel_for_each(all_table_names(schema_features::full()), [&qp, ksm] (sstring cf) -> future<> {
         auto deletion_timestamp = system_keyspace::schema_creation_timestamp() - 1;
-        co_await qctx->execute_cql(format("DELETE FROM {}.{} USING TIMESTAMP {} WHERE keyspace_name = ?", NAME, cf,
-            deletion_timestamp), ksm->name()).discard_result();
+        co_await qp.execute_internal(format("DELETE FROM {}.{} USING TIMESTAMP {} WHERE keyspace_name = ?", NAME, cf,
+            deletion_timestamp), { ksm->name() }, cql3::query_processor::cache_internal::yes).discard_result();
     });
     {
         auto mvec  = make_create_keyspace_mutations(qp.db().features().cluster_schema_features(), ksm, system_keyspace::schema_creation_timestamp(), true);
@@ -992,7 +996,7 @@ future<> update_schema_version_and_announce(sharded<db::system_keyspace>& sys_ks
  * @throws ConfigurationException If one of metadata attributes has invalid value
  * @throws IOException If data was corrupted during transportation or failed to apply fs operations
  */
-future<> merge_schema(sharded<db::system_keyspace>& sys_ks, distributed<service::storage_proxy>& proxy, gms::feature_service& feat, std::vector<mutation> mutations)
+future<> merge_schema(sharded<db::system_keyspace>& sys_ks, distributed<service::storage_proxy>& proxy, gms::feature_service& feat, std::vector<mutation> mutations, bool reload)
 {
     if (this_shard_id() != 0) {
         // mutations must be applied on the owning shard (0).
@@ -1003,7 +1007,7 @@ future<> merge_schema(sharded<db::system_keyspace>& sys_ks, distributed<service:
     }
     co_await with_merge_lock([&] () mutable -> future<> {
         bool flush_schema = proxy.local().get_db().local().get_config().flush_schema_tables_after_modification();
-        co_await do_merge_schema(proxy, std::move(mutations), flush_schema);
+        co_await do_merge_schema(proxy, sys_ks, std::move(mutations), flush_schema, reload);
         co_await update_schema_version_and_announce(sys_ks, proxy, feat.cluster_schema_features());
     });
 }
@@ -1090,6 +1094,9 @@ read_tables_for_keyspaces(distributed<service::storage_proxy>& proxy, const std:
 {
     std::map<table_id, schema_mutations> result;
     for (auto&& [keyspace_name, sel] : tables_per_keyspace) {
+        if (!sel.tables.contains(kind)) {
+            continue;
+        }
         for (auto&& table_name : sel.tables.find(kind)->second) {
             auto qn = qualified_name(keyspace_name, table_name);
             auto muts = co_await read_table_mutations(proxy, qn, get_table_holder(kind));
@@ -1242,7 +1249,7 @@ table_selector get_affected_tables(const sstring& keyspace_name, const mutation&
     return result;
 }
 
-static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std::vector<mutation> mutations, bool do_flush)
+static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, sharded<db::system_keyspace>& sys_ks, std::vector<mutation> mutations, bool do_flush, bool reload)
 {
     slogger.trace("do_merge_schema: {}", mutations);
     schema_ptr s = keyspaces();
@@ -1267,6 +1274,15 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
         // We must force recalculation of schema version after the merge, since the resulting
         // schema may be a mix of the old and new schemas.
         delete_schema_version(mutation);
+    }
+
+    if (reload) {
+        for (auto&& ks : proxy.local().get_db().local().get_non_system_keyspaces()) {
+            keyspaces.emplace(ks);
+            table_selector sel;
+            sel.all_in_keyspace = true;
+            affected_tables[ks] = sel;
+        }
     }
 
     // Resolve sel.all_in_keyspace == true to the actual list of tables and views.
@@ -1323,9 +1339,9 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, std:
 
     std::set<sstring> keyspaces_to_drop = co_await merge_keyspaces(proxy, std::move(old_keyspaces), std::move(new_keyspaces));
     auto types_to_drop = co_await merge_types(proxy, std::move(old_types), std::move(new_types));
-    co_await merge_tables_and_views(proxy,
+    co_await merge_tables_and_views(proxy, sys_ks,
         std::move(old_column_families), std::move(new_column_families),
-        std::move(old_views), std::move(new_views));
+        std::move(old_views), std::move(new_views), reload);
     co_await merge_functions(proxy, std::move(old_functions), std::move(new_functions));
     co_await merge_aggregates(proxy, std::move(old_aggregates), std::move(new_aggregates), std::move(old_scylla_aggregates), std::move(new_scylla_aggregates));
     co_await types_to_drop.drop();
@@ -1429,6 +1445,7 @@ enum class schema_diff_side {
 static schema_diff diff_table_or_view(distributed<service::storage_proxy>& proxy,
     std::map<table_id, schema_mutations>&& before,
     std::map<table_id, schema_mutations>&& after,
+    bool reload,
     noncopyable_function<schema_ptr (schema_mutations sm, schema_diff_side)> create_schema)
 {
     schema_diff d;
@@ -1449,6 +1466,13 @@ static schema_diff diff_table_or_view(distributed<service::storage_proxy>& proxy
         slogger.info("Altering {}.{} id={} version={}", s->ks_name(), s->cf_name(), s->id(), s->version());
         d.altered.emplace_back(schema_diff::altered_schema{s_before, s});
     }
+    if (reload) {
+        for (auto&& key: diff.entries_in_common) {
+            auto s = create_schema(std::move(after.at(key)), schema_diff_side::right);
+            slogger.info("Reloading {}.{} id={} version={}", s->ks_name(), s->cf_name(), s->id(), s->version());
+            d.altered.emplace_back(schema_diff::altered_schema {s, s});
+        }
+    }
     return d;
 }
 
@@ -1458,15 +1482,17 @@ static schema_diff diff_table_or_view(distributed<service::storage_proxy>& proxy
 // upon an alter table or alter type statement), then they are published together
 // as well, without any deferring in-between.
 static future<> merge_tables_and_views(distributed<service::storage_proxy>& proxy,
+    sharded<db::system_keyspace>& sys_ks,
     std::map<table_id, schema_mutations>&& tables_before,
     std::map<table_id, schema_mutations>&& tables_after,
     std::map<table_id, schema_mutations>&& views_before,
-    std::map<table_id, schema_mutations>&& views_after)
+    std::map<table_id, schema_mutations>&& views_after,
+    bool reload)
 {
-    auto tables_diff = diff_table_or_view(proxy, std::move(tables_before), std::move(tables_after), [&] (schema_mutations sm, schema_diff_side) {
+    auto tables_diff = diff_table_or_view(proxy, std::move(tables_before), std::move(tables_after), reload, [&] (schema_mutations sm, schema_diff_side) {
         return create_table_from_mutations(proxy, std::move(sm));
     });
-    auto views_diff = diff_table_or_view(proxy, std::move(views_before), std::move(views_after), [&] (schema_mutations sm, schema_diff_side side) {
+    auto views_diff = diff_table_or_view(proxy, std::move(views_before), std::move(views_after), reload, [&] (schema_mutations sm, schema_diff_side side) {
         // The view schema mutation should be created with reference to the base table schema because we definitely know it by now.
         // If we don't do it we are leaving a window where write commands to this schema are illegal.
         // There are 3 possibilities:
@@ -1511,13 +1537,13 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
     // to a mv not finding its schema when snapshoting since the main table
     // was already dropped (see https://github.com/scylladb/scylla/issues/5614)
     auto& db = proxy.local().get_db();
-    co_await max_concurrent_for_each(views_diff.dropped, max_concurrent, [&db] (schema_diff::dropped_schema& dt) {
+    co_await max_concurrent_for_each(views_diff.dropped, max_concurrent, [&db, &sys_ks] (schema_diff::dropped_schema& dt) {
         auto& s = *dt.schema.get();
-        return replica::database::drop_table_on_all_shards(db, s.ks_name(), s.cf_name());
+        return replica::database::drop_table_on_all_shards(db, sys_ks, s.ks_name(), s.cf_name());
     });
-    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [&db] (schema_diff::dropped_schema& dt) -> future<> {
+    co_await max_concurrent_for_each(tables_diff.dropped, max_concurrent, [&db, &sys_ks] (schema_diff::dropped_schema& dt) -> future<> {
         auto& s = *dt.schema.get();
-        return replica::database::drop_table_on_all_shards(db, s.ks_name(), s.cf_name());
+        return replica::database::drop_table_on_all_shards(db, sys_ks, s.ks_name(), s.cf_name());
     });
 
     co_await db.invoke_on_all([&] (replica::database& db) -> future<> {
@@ -3142,7 +3168,7 @@ schema_ptr create_table_from_mutations(const schema_ctxt& ctxt, schema_mutations
     if (version) {
         builder.with_version(*version);
     } else {
-        builder.with_version(sm.digest());
+        builder.with_version(sm.digest(ctxt.features().cluster_schema_features()));
     }
 
     if (auto partitioner = sm.partitioner()) {
@@ -3362,7 +3388,7 @@ view_ptr create_view_from_mutations(const schema_ctxt& ctxt, schema_mutations sm
     if (version) {
         builder.with_version(*version);
     } else {
-        builder.with_version(sm.digest());
+        builder.with_version(sm.digest(ctxt.features().cluster_schema_features()));
     }
 
     auto base_id = table_id(row.get_nonnull<utils::UUID>("base_table_id"));

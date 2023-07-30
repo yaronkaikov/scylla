@@ -565,6 +565,10 @@ For more information about individual tools, run: scylla {tool_name} --help
 To start the scylla server proper, simply invoke as: scylla server (or just scylla).
 )";
     app_cfg.default_task_quota = 500us;
+#ifdef DEBUG
+    // Increase the task quota to improve work:poll ratio in slow debug mode.
+    app_cfg.default_task_quota = 5ms;
+#endif
     app_cfg.auto_handle_sigint_sigterm = false;
     app_cfg.max_networking_aio_io_control_blocks = 50000;
     // We need to have the entire app config to run the app, but we need to
@@ -1118,6 +1122,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             mscfg.ssl_port = cfg->ssl_storage_port();
             mscfg.listen_on_broadcast_address = cfg->listen_on_broadcast_address();
             mscfg.rpc_memory_limit = std::max<size_t>(0.08 * memory::stats().total_memory(), mscfg.rpc_memory_limit);
+            if (snitch.local()->prefer_local()) {
+                mscfg.preferred_ips = sys_ks.local().get_preferred_ips().get0();
+            }
 
             const auto& seo = cfg->server_encryption_options();
             auto encrypt = utils::get_or_default(seo, "internode_encryption", "none");
@@ -1258,6 +1265,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             distributed<service::tablet_allocator> tablet_allocator;
             if (cfg->check_experimental(db::experimental_features_t::feature::TABLETS)) {
+                if (!cfg->check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES)) {
+                    startlog.error("Bad configuration: The consistent-topology-changes feature has to be enabled if tablets feature is enabled");
+                    throw bad_configuration_error();
+                }
                 tablet_allocator.start(std::ref(mm_notifier), std::ref(db)).get();
             }
             auto stop_tablet_allocator = defer_verbose_shutdown("tablet allocator", [&tablet_allocator] {
@@ -1344,7 +1355,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             group0_client.init().get();
 
             // schema migration, if needed, is also done on shard 0
-            db::legacy_schema_migrator::migrate(proxy, db, qp.local()).get();
+            db::legacy_schema_migrator::migrate(proxy, db, sys_ks, qp.local()).get();
 
             // making compaction manager api available, after system keyspace has already been established.
             api::set_server_compaction_manager(ctx).get();
@@ -1354,7 +1365,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // 1. messaging is on the way with its preferred ip cache
             // 2. cql_test_env() doesn't do it
             // 3. need to check if it depends on any of the above steps
-            sys_ks.local().setup(snitch, messaging).get();
+            sys_ks.local().setup(messaging).get();
 
             supervisor::notify("starting schema commit log");
 

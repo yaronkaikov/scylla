@@ -376,6 +376,9 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _version(empty_version)
     , _compaction_manager(cm)
     , _enable_incremental_backups(cfg.incremental_backups())
+    , _querier_cache([this] (const reader_concurrency_semaphore& s) {
+        return this->is_user_semaphore(s);
+    })
     , _large_data_handler(std::make_unique<db::cql_table_large_data_handler>(feat,
               _cfg.compaction_large_partition_warning_threshold_mb,
               _cfg.compaction_large_row_warning_threshold_mb,
@@ -601,7 +604,10 @@ database::setup_metrics() {
                        sm::description("Counts querier cache lookups that failed to find a cached querier")),
 
         sm::make_counter("querier_cache_drops", _querier_cache.get_stats().drops,
-                       sm::description("Counts querier cache lookups that found a cached querier but had to drop it due to position mismatch")),
+                       sm::description("Counts querier cache lookups that found a cached querier but had to drop it")),
+            
+        sm::make_counter("querier_cache_scheduling_group_mismatches", _querier_cache.get_stats().scheduling_group_mismatches,
+                       sm::description("Counts querier cache lookups that found a cached querier but had to drop it due to scheduling group mismatch")),
 
         sm::make_counter("querier_cache_time_based_evictions", _querier_cache.get_stats().time_based_evictions,
                        sm::description("Counts querier cache entries that timed out and were evicted.")),
@@ -983,8 +989,7 @@ void database::maybe_init_schema_commitlog() {
     c.fname_prefix = db::schema_tables::COMMITLOG_FILENAME_PREFIX;
     c.metrics_category_name = "schema-commitlog";
     c.commitlog_total_space_in_mb = 10 << 20;
-    c.commitlog_segment_size_in_mb = _cfg.commitlog_segment_size_in_mb();
-    c.commitlog_sync_period_in_ms = _cfg.commitlog_sync_period_in_ms();
+    c.commitlog_segment_size_in_mb = _cfg.schema_commitlog_segment_size_in_mb();
     c.mode = db::commitlog::sync_mode::BATCH;
     c.extensions = &_cfg.extensions();
     c.use_o_dsync = _cfg.commitlog_use_o_dsync();
@@ -1156,7 +1161,8 @@ future<global_table_ptr> get_table_on_all_shards(sharded<database>& sharded_db, 
     co_return table_shards;
 }
 
-future<> database::drop_table_on_all_shards(sharded<database>& sharded_db, sstring ks_name, sstring cf_name, bool with_snapshot) {
+future<> database::drop_table_on_all_shards(sharded<database>& sharded_db, sharded<db::system_keyspace>& sys_ks,
+        sstring ks_name, sstring cf_name, bool with_snapshot) {
     auto auto_snapshot = sharded_db.local().get_config().auto_snapshot();
     dblog.info("Dropping {}.{} {}snapshot", ks_name, cf_name, with_snapshot && auto_snapshot ? "with auto-" : "without ");
 
@@ -1173,7 +1179,7 @@ future<> database::drop_table_on_all_shards(sharded<database>& sharded_db, sstri
     // to ensure all sstables are truncated,
     // but be careful to stays within the client's datetime limits.
     constexpr db_clock::time_point truncated_at(std::chrono::seconds(253402214400));
-    auto f = co_await coroutine::as_future(truncate_table_on_all_shards(sharded_db, table_shards, truncated_at, with_snapshot, std::move(snapshot_name_opt)));
+    auto f = co_await coroutine::as_future(truncate_table_on_all_shards(sharded_db, sys_ks, table_shards, truncated_at, with_snapshot, std::move(snapshot_name_opt)));
     co_await smp::invoke_on_all([&] {
         return table_shards->stop();
     });
@@ -1332,8 +1338,10 @@ keyspace::create_replication_strategy(const locator::shared_token_metadata& stm,
             abstract_replication_strategy::create_replication_strategy(
                 _metadata->strategy_name(), options);
     rslogger.debug("replication strategy for keyspace {} is {}, opts={}", _metadata->name(), _metadata->strategy_name(), options);
-    auto erm = co_await _erm_factory.create_effective_replication_map(_replication_strategy, stm.get());
-    update_effective_replication_map(std::move(erm));
+    if (!_replication_strategy->is_per_table()) {
+        auto erm = co_await _erm_factory.create_effective_replication_map(_replication_strategy, stm.get());
+        update_effective_replication_map(std::move(erm));
+    }
 }
 
 void
@@ -1397,6 +1405,7 @@ keyspace::make_column_family_config(const schema& s, const database& db) const {
     cfg.view_update_concurrency_semaphore_limit = _config.view_update_concurrency_semaphore_limit;
     cfg.data_listeners = &db.data_listeners();
     cfg.x_log2_compaction_groups = db_config.x_log2_compaction_groups();
+    cfg.enable_compacting_data_for_streaming_and_repair = db_config.enable_compacting_data_for_streaming_and_repair();
 
     return cfg;
 }
@@ -1579,9 +1588,14 @@ class streaming_reader_lifecycle_policy
     };
     distributed<replica::database>& _db;
     table_id _table_id;
+    gc_clock::time_point _compaction_time;
     std::vector<reader_context> _contexts;
 public:
-    streaming_reader_lifecycle_policy(distributed<replica::database>& db, table_id table_id) : _db(db), _table_id(table_id), _contexts(smp::count) {
+    streaming_reader_lifecycle_policy(distributed<replica::database>& db, table_id table_id, gc_clock::time_point compaction_time)
+        : _db(db)
+        , _table_id(table_id)
+        , _compaction_time(compaction_time)
+        , _contexts(smp::count) {
     }
     virtual flat_mutation_reader_v2 create_reader(
         schema_ptr schema,
@@ -1597,7 +1611,7 @@ public:
         _contexts[shard].read_operation = make_foreign(std::make_unique<utils::phased_barrier::operation>(cf.read_in_progress()));
         _contexts[shard].semaphore = &cf.streaming_read_concurrency_semaphore();
 
-        return cf.make_streaming_reader(std::move(schema), std::move(permit), *_contexts[shard].range, slice, fwd_mr);
+        return cf.make_streaming_reader(std::move(schema), std::move(permit), *_contexts[shard].range, slice, fwd_mr, _compaction_time);
     }
     virtual const dht::partition_range* get_read_range() const override {
         const auto shard = this_shard_id();
@@ -1706,7 +1720,7 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
     std::exception_ptr ex;
 
     if (cmd.query_uuid && !cmd.is_first_page) {
-        querier_opt = _querier_cache.lookup_data_querier(cmd.query_uuid, *s, ranges.front(), cmd.slice, trace_state, timeout);
+        querier_opt = _querier_cache.lookup_data_querier(cmd.query_uuid, *s, ranges.front(), cmd.slice, semaphore, trace_state, timeout);
     }
 
     auto read_func = [&, this] (reader_permit permit) {
@@ -1773,7 +1787,7 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
     std::exception_ptr ex;
 
     if (cmd.query_uuid && !cmd.is_first_page) {
-        querier_opt = _querier_cache.lookup_mutation_querier(cmd.query_uuid, *s, range, cmd.slice, trace_state, timeout);
+        querier_opt = _querier_cache.lookup_mutation_querier(cmd.query_uuid, *s, range, cmd.slice, semaphore, trace_state, timeout);
     }
 
     auto read_func = [&] (reader_permit permit) {
@@ -1848,6 +1862,12 @@ future<reader_permit> database::obtain_reader_permit(table& tbl, const char* con
 
 future<reader_permit> database::obtain_reader_permit(schema_ptr schema, const char* const op_name, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_ptr) {
     return obtain_reader_permit(find_column_family(std::move(schema)), op_name, timeout, std::move(trace_ptr));
+}
+
+bool database::is_user_semaphore(const reader_concurrency_semaphore& semaphore) const {
+    return &semaphore != &_streaming_concurrency_sem
+        && &semaphore != &_compaction_concurrency_sem
+        && &semaphore != &_system_read_concurrency_sem;
 }
 
 std::ostream& operator<<(std::ostream& out, const column_family& cf) {
@@ -2563,10 +2583,11 @@ future<> database::snapshot_keyspace_on_all_shards(sharded<database>& sharded_db
     });
 }
 
-future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, sstring ks_name, sstring cf_name, std::optional<db_clock::time_point> truncated_at_opt, bool with_snapshot, std::optional<sstring> snapshot_name_opt) {
+future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, sharded<db::system_keyspace>& sys_ks,
+        sstring ks_name, sstring cf_name, std::optional<db_clock::time_point> truncated_at_opt, bool with_snapshot, std::optional<sstring> snapshot_name_opt) {
     auto uuid = sharded_db.local().find_uuid(ks_name, cf_name);
     auto table_shards = co_await get_table_on_all_shards(sharded_db, uuid);
-    co_return co_await truncate_table_on_all_shards(sharded_db, table_shards, truncated_at_opt, with_snapshot, std::move(snapshot_name_opt));
+    co_return co_await truncate_table_on_all_shards(sharded_db, sys_ks, table_shards, truncated_at_opt, with_snapshot, std::move(snapshot_name_opt));
 }
 
 struct database::table_truncate_state {
@@ -2577,7 +2598,8 @@ struct database::table_truncate_state {
     bool did_flush;
 };
 
-future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, const global_table_ptr& table_shards, std::optional<db_clock::time_point> truncated_at_opt, bool with_snapshot, std::optional<sstring> snapshot_name_opt) {
+future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, sharded<db::system_keyspace>& sys_ks,
+        const global_table_ptr& table_shards, std::optional<db_clock::time_point> truncated_at_opt, bool with_snapshot, std::optional<sstring> snapshot_name_opt) {
     auto& cf = *table_shards;
     auto s = cf.schema();
 
@@ -2665,11 +2687,11 @@ future<> database::truncate_table_on_all_shards(sharded<database>& sharded_db, c
         auto& cf = *table_shards;
         auto& st = *table_states[shard];
 
-        return db.truncate(cf, st, truncated_at);
+        return db.truncate(sys_ks.local(), cf, st, truncated_at);
     });
 }
 
-future<> database::truncate(column_family& cf, const table_truncate_state& st, db_clock::time_point truncated_at) {
+future<> database::truncate(db::system_keyspace& sys_ks, column_family& cf, const table_truncate_state& st, db_clock::time_point truncated_at) {
     dblog.trace("Truncating {}.{} on shard", cf.schema()->ks_name(), cf.schema()->cf_name());
 
     const auto uuid = cf.schema()->id();
@@ -2692,16 +2714,16 @@ future<> database::truncate(column_family& cf, const table_truncate_state& st, d
     if (rp == db::replay_position()) {
         rp = st.low_mark;
     }
-    co_await coroutine::parallel_for_each(cf.views(), [this, truncated_at] (view_ptr v) -> future<> {
+    co_await coroutine::parallel_for_each(cf.views(), [this, &sys_ks, truncated_at] (view_ptr v) -> future<> {
         auto& vcf = find_column_family(v);
             db::replay_position rp = co_await vcf.discard_sstables(truncated_at);
-            co_await db::system_keyspace::save_truncation_record(vcf, truncated_at, rp);
+            co_await sys_ks.save_truncation_record(vcf, truncated_at, rp);
     });
     // save_truncation_record() may actually fail after we cached the truncation time
     // but this is not be worse that if failing without caching: at least the correct time
     // will be available until next reboot and a client will have to retry truncation anyway.
     cf.cache_truncation_record(truncated_at);
-    co_await db::system_keyspace::save_truncation_record(cf, truncated_at, rp);
+    co_await sys_ks.save_truncation_record(cf, truncated_at, rp);
 
     auto& gc_state = get_compaction_manager().get_tombstone_gc_state();
     gc_state.drop_repair_history_map_for_table(uuid);
@@ -2984,11 +3006,12 @@ void database::unplug_view_update_generator() noexcept {
 
 flat_mutation_reader_v2 make_multishard_streaming_reader(distributed<replica::database>& db,
         schema_ptr schema, reader_permit permit,
-        std::function<std::optional<dht::partition_range>()> range_generator) {
+        std::function<std::optional<dht::partition_range>()> range_generator,
+        gc_clock::time_point compaction_time) {
 
     auto& table = db.local().find_column_family(schema);
     auto erm = table.get_effective_replication_map();
-    auto ms = mutation_source([&db, erm] (schema_ptr s,
+    auto ms = mutation_source([&db, erm, compaction_time] (schema_ptr s,
             reader_permit permit,
             const dht::partition_range& pr,
             const query::partition_slice& ps,
@@ -2996,7 +3019,7 @@ flat_mutation_reader_v2 make_multishard_streaming_reader(distributed<replica::da
             streamed_mutation::forwarding,
             mutation_reader::forwarding fwd_mr) {
         auto table_id = s->id();
-        return make_multishard_combining_reader_v2(make_shared<replica::streaming_reader_lifecycle_policy>(db, table_id),
+        return make_multishard_combining_reader_v2(seastar::make_shared<replica::streaming_reader_lifecycle_policy>(db, table_id, compaction_time),
                 std::move(s), erm, std::move(permit), pr, ps, std::move(trace_state), fwd_mr);
     });
     auto&& full_slice = schema->full_slice();
@@ -3005,13 +3028,13 @@ flat_mutation_reader_v2 make_multishard_streaming_reader(distributed<replica::da
 }
 
 flat_mutation_reader_v2 make_multishard_streaming_reader(distributed<replica::database>& db,
-        schema_ptr schema, reader_permit permit, const dht::partition_range& range)
+        schema_ptr schema, reader_permit permit, const dht::partition_range& range, gc_clock::time_point compaction_time)
 {
     const auto table_id = schema->id();
     const auto& full_slice = schema->full_slice();
     auto erm = db.local().find_column_family(schema).get_effective_replication_map();
     return make_multishard_combining_reader_v2(
-        make_shared<replica::streaming_reader_lifecycle_policy>(db, table_id),
+        seastar::make_shared<replica::streaming_reader_lifecycle_policy>(db, table_id, compaction_time),
         std::move(schema),
         std::move(erm),
         std::move(permit),

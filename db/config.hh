@@ -199,6 +199,7 @@ public:
     named_value<uint32_t> failure_detector_timeout_in_ms;
     named_value<sstring> commitlog_sync;
     named_value<uint32_t> commitlog_segment_size_in_mb;
+    named_value<uint32_t> schema_commitlog_segment_size_in_mb;
     named_value<uint32_t> commitlog_sync_period_in_ms;
     named_value<uint32_t> commitlog_sync_batch_window_in_ms;
     named_value<int64_t> commitlog_total_space_in_mb;
@@ -328,6 +329,7 @@ public:
     named_value<bool> override_decommission;
     named_value<bool> enable_repair_based_node_ops;
     named_value<sstring> allowed_repair_based_node_ops;
+    named_value<bool> enable_compacting_data_for_streaming_and_repair;
     named_value<uint32_t> ring_delay_ms;
     named_value<uint32_t> shadow_round_ms;
     named_value<uint32_t> fd_max_interval_ms;
@@ -357,6 +359,7 @@ public:
     named_value<bool> enable_sstables_md_format;
     named_value<sstring> sstable_format;
     named_value<bool> uuid_sstable_identifiers_enabled;
+    named_value<bool> table_digest_insensitive_to_expiry;
     named_value<bool> enable_dangerous_direct_import_of_cassandra_counters;
     named_value<bool> enable_shard_aware_drivers;
     named_value<bool> enable_ipv6_dns_lookup;

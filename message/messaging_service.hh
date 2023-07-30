@@ -186,7 +186,8 @@ enum class messaging_verb : int32_t {
     DIRECT_FD_PING = 63,
     RAFT_TOPOLOGY_CMD = 64,
     RAFT_PULL_TOPOLOGY_SNAPSHOT = 65,
-    LAST = 66,
+    TABLET_STREAM_DATA = 66,
+    LAST = 67,
 };
 
 } // namespace netw
@@ -275,6 +276,7 @@ public:
         tcp_nodelay_what tcp_nodelay = tcp_nodelay_what::all;
         bool listen_on_broadcast_address = false;
         size_t rpc_memory_limit = 1'000'000;
+        std::unordered_map<gms::inet_address, gms::inet_address> preferred_ips;
     };
 
     struct scheduling_config {
@@ -331,6 +333,7 @@ private:
     future<> stop_tls_server();
     future<> stop_nontls_server();
     future<> stop_client();
+    void init_local_preferred_ip_cache(const std::unordered_map<gms::inet_address, gms::inet_address>& ips_cache);
 public:
     using clock_type = lowres_clock;
 
@@ -347,7 +350,6 @@ public:
     static rpc::no_wait_type no_wait();
     bool is_shutting_down() { return _shutting_down; }
     gms::inet_address get_preferred_ip(gms::inet_address ep);
-    void init_local_preferred_ip_cache(const std::unordered_map<gms::inet_address, gms::inet_address>& ips_cache);
     void cache_preferred_ip(gms::inet_address ep, gms::inet_address ip);
     gms::inet_address get_public_endpoint_for(const gms::inet_address&) const;
 
@@ -424,9 +426,9 @@ public:
     future<> send_repair_put_row_diff(msg_addr id, uint32_t repair_meta_id, repair_rows_on_wire row_diff);
 
     // Wrapper for REPAIR_ROW_LEVEL_START
-    void register_repair_row_level_start(std::function<future<repair_row_level_start_response> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, rpc::optional<streaming::stream_reason> reason)>&& func);
+    void register_repair_row_level_start(std::function<future<repair_row_level_start_response> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, rpc::optional<streaming::stream_reason> reason, rpc::optional<gc_clock::time_point> compaction_time)>&& func);
     future<> unregister_repair_row_level_start();
-    future<rpc::optional<repair_row_level_start_response>> send_repair_row_level_start(msg_addr id, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, streaming::stream_reason reason);
+    future<rpc::optional<repair_row_level_start_response>> send_repair_row_level_start(msg_addr id, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range, row_level_diff_detect_algorithm algo, uint64_t max_row_buf_size, uint64_t seed, unsigned remote_shard, unsigned remote_shard_count, unsigned remote_ignore_msb, sstring remote_partitioner_name, table_schema_version schema_version, streaming::stream_reason reason, gc_clock::time_point compaction_time);
 
     // Wrapper for REPAIR_ROW_LEVEL_STOP
     void register_repair_row_level_stop(std::function<future<> (const rpc::client_info& cinfo, uint32_t repair_meta_id, sstring keyspace_name, sstring cf_name, dht::token_range range)>&& func);
