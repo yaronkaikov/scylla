@@ -711,9 +711,10 @@ batchStatement returns [std::unique_ptr<cql3::statements::raw::batch_statement> 
     ;
 
 batchStatementObjective returns [::lw_shared_ptr<std::unique_ptr<cql3::statements::raw::modification_statement>> statement]
-    : i=insertStatement  { $statement = std::move(i); }
-    | u=updateStatement  { $statement = std::move(u); }
-    | d=deleteStatement  { $statement = std::move(d); }
+    @init { using original_ret_type = std::unique_ptr<cql3::statements::raw::modification_statement>; }
+    : i=insertStatement  { $statement = make_lw_shared<original_ret_type>(std::move(i)); }
+    | u=updateStatement  { $statement = make_lw_shared<original_ret_type>(std::move(u)); }
+    | d=deleteStatement  { $statement = make_lw_shared<original_ret_type>(std::move(d)); }
     ;
 
 dropAggregateStatement returns [std::unique_ptr<cql3::statements::drop_aggregate_statement> expr]
