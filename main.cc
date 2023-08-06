@@ -1315,17 +1315,20 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             bm.start(std::ref(qp), std::ref(sys_ks), bm_cfg).get();
 
-            db::sstables_format_selector sst_format_selector(gossiper.local(), feature_service, db);
+            db::sstables_format_selector sst_format_selector(gossiper.local(), feature_service, db, sys_ks.local());
 
             sst_format_selector.start().get();
             auto stop_format_selector = defer_verbose_shutdown("sstables format selector", [&sst_format_selector] {
                 sst_format_selector.stop().get();
             });
 
+            const bool raft_topology_change_enabled = group0_service.is_raft_enabled()
+                    && cfg->check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES);
+
             // Re-enable previously enabled features on node startup.
             // This should be done before commitlog starts replaying
             // since some features affect storage.
-            feature_service.local().enable_features_on_startup(sys_ks.local()).get();
+            feature_service.local().enable_features_on_startup(sys_ks.local(), raft_topology_change_enabled).get();
 
             db.local().maybe_init_schema_commitlog();
 
@@ -1373,8 +1376,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // Needs to happen before replaying the schema commitlog, which interprets
             // replay position in the truncation record.
             // Needs to happen before system_keyspace::setup(), which reads truncation records.
-            for (auto&& e : db.local().get_column_families()) {
-                auto table_ptr = e.second;
+            db.local().get_tables_metadata().for_each_table([] (table_id, lw_shared_ptr<replica::table> table_ptr) {
                 if (table_ptr->schema()->ks_name() == db::schema_tables::NAME) {
                     if (table_ptr->get_truncation_record() != db_clock::time_point::min()) {
                         // replay_position stored in the truncation record may belong to
@@ -1387,7 +1389,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                                                         table_ptr->schema()->ks_name(), table_ptr->schema()->cf_name()));
                     }
                 }
-            }
+            });
 
             auto sch_cl = db.local().schema_commitlog();
             if (sch_cl != nullptr) {
@@ -1432,10 +1434,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }
 
             db.invoke_on_all([] (replica::database& db) {
-                for (auto& x : db.get_column_families()) {
-                    replica::table& t = *(x.second);
+                db.get_tables_metadata().for_each_table([] (table_id, lw_shared_ptr<replica::table> table) {
+                    replica::table& t = *table;
                     t.enable_auto_compaction();
-                }
+                });
             }).get();
 
             // If the same sstable is shared by several shards, it cannot be
@@ -1450,10 +1452,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // streaming
 
             db.invoke_on_all([] (replica::database& db) {
-                for (auto& x : db.get_column_families()) {
-                    replica::column_family& cf = *(x.second);
+                db.get_tables_metadata().for_each_table([] (table_id, lw_shared_ptr<replica::table> table) {
+                    replica::column_family& cf = *table;
                     cf.trigger_compaction();
-                }
+                });
             }).get();
             api::set_server_gossip(ctx, gossiper).get();
             api::set_server_snitch(ctx, snitch).get();
@@ -1626,7 +1628,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             load_address_map(sys_ks.local(), raft_address_map.local()).get();
 
             // Set up group0 service earlier since it is needed by group0 setup just below
-            ss.local().set_group0(group0_service);
+            ss.local().set_group0(group0_service, raft_topology_change_enabled);
 
             // Setup group0 early in case the node is bootstrapped already and the group exists.
             // Need to do it before allowing incomming messaging service connections since

@@ -90,7 +90,7 @@ public:
     future<std::tuple<key_ptr, opt_bytes>> key(const key_info&, opt_bytes = {}) override;
     future<> validate() const override;
     future<> maybe_initialize_tables();
-    static future<> do_initialize_tables(const ::replica::database& db, service::migration_manager&);
+    static future<> do_initialize_tables(::replica::database& db, service::migration_manager&);
 
     bool should_delay_read(const opt_bytes& id) const override {
         if (!id || _initialized) {
@@ -361,7 +361,7 @@ future<> replicated_key_provider::maybe_initialize_tables() {
     }
 }
 
-future<> replicated_key_provider::do_initialize_tables(const ::replica::database& db, service::migration_manager& mm) {
+future<> replicated_key_provider::do_initialize_tables(::replica::database& db, service::migration_manager& mm) {
     if (db.has_schema(KSNAME, TABLENAME)) {
         co_return;
     }
@@ -376,14 +376,14 @@ future<> replicated_key_provider::do_initialize_tables(const ::replica::database
                     "org.apache.cassandra.locator.EverywhereStrategy",
                     {},
                     true);
-            co_await mm.announce(mm.prepare_new_keyspace_announcement(ksm, ts), std::move(group0_guard));
+            co_await mm.announce(service::prepare_new_keyspace_announcement(db, ksm, ts), std::move(group0_guard));
         } catch (exceptions::already_exists_exception&) {
         }
     }
     auto group0_guard = co_await mm.start_group0_operation();
     auto ts = group0_guard.write_timestamp();
     try {
-        co_await mm.announce(co_await mm.prepare_new_column_family_announcement(encrypted_keys_table(), ts), std::move(group0_guard));
+        co_await mm.announce(co_await service::prepare_new_column_family_announcement(mm.get_storage_proxy(), encrypted_keys_table(), ts), std::move(group0_guard));
     } catch (exceptions::already_exists_exception&) {
     }
     auto& ks = db.find_keyspace(KSNAME);
@@ -432,7 +432,7 @@ void replicated_key_provider_factory::init(db::extensions& exts) {
     exts.add_extension_internal_keyspace(KSNAME);
 }
 
-future<> replicated_key_provider_factory::on_started(const ::replica::database& db, service::migration_manager& mm) {
+future<> replicated_key_provider_factory::on_started(::replica::database& db, service::migration_manager& mm) {
     return replicated_key_provider::do_initialize_tables(db, mm);
 }
 

@@ -382,6 +382,7 @@ public:
         seastar::scheduling_group statement_scheduling_group;
         seastar::scheduling_group streaming_scheduling_group;
         bool enable_metrics_reporting = false;
+        bool enable_node_aggregated_table_metrics = true;
         db::timeout_semaphore* view_update_concurrency_semaphore;
         size_t view_update_concurrency_semaphore_limit;
         db::data_listeners* data_listeners = nullptr;
@@ -866,7 +867,7 @@ public:
     // Start a compaction of all sstables in a process known as major compaction
     // Active memtable is flushed first to guarantee that data like tombstone,
     // sitting in the memtable, will be compacted with shadowed data.
-    future<> compact_all_sstables(tasks::task_info info = {});
+    future<> compact_all_sstables(std::optional<tasks::task_info> info = std::nullopt);
 
     future<bool> snapshot_exists(sstring name);
 
@@ -938,8 +939,8 @@ public:
     // Performs offstrategy compaction, if needed, returning
     // a future<bool> that is resolved when offstrategy_compaction completes.
     // The future value is true iff offstrategy compaction was required.
-    future<bool> perform_offstrategy_compaction();
-    future<> perform_cleanup_compaction(owned_ranges_ptr sorted_owned_ranges);
+    future<bool> perform_offstrategy_compaction(std::optional<tasks::task_info> info = std::nullopt);
+    future<> perform_cleanup_compaction(owned_ranges_ptr sorted_owned_ranges, std::optional<tasks::task_info> info = std::nullopt);
     unsigned estimate_pending_compactions() const;
 
     void set_compaction_strategy(sstables::compaction_strategy_type strategy);
@@ -1312,6 +1313,34 @@ public:
         }
     };
 
+    using ks_cf_t = std::pair<sstring, sstring>;
+    using ks_cf_to_uuid_t =
+        flat_hash_map<ks_cf_t, table_id, utils::tuple_hash, string_pair_eq>;
+    class tables_metadata {
+        rwlock _cf_lock;
+        std::unordered_map<table_id, lw_shared_ptr<column_family>> _column_families;
+        ks_cf_to_uuid_t _ks_cf_to_uuid;
+    public:
+        size_t size() const noexcept;
+
+        future<> add_table(schema_ptr schema);
+        future<> remove_table(schema_ptr schema) noexcept;
+        table& get_table(table_id id) const;
+        table_id get_table_id(const std::pair<std::string_view, std::string_view>& kscf) const;
+        lw_shared_ptr<table> get_table_if_exists(table_id id) const;
+        table_id get_table_id_if_exists(const std::pair<std::string_view, std::string_view>& kscf) const;
+        bool contains(table_id id) const;
+        bool contains(std::pair<std::string_view, std::string_view> kscf) const;
+        void for_each_table(std::function<void(table_id, lw_shared_ptr<table>)> f) const;
+        void for_each_table_id(std::function<void(const ks_cf_t&, table_id)> f) const;
+        future<> for_each_table_gently(std::function<future<>(table_id, lw_shared_ptr<table>)> f);
+        future<> parallel_for_each_table(std::function<future<>(table_id, lw_shared_ptr<table>)> f);
+        const std::unordered_map<table_id, lw_shared_ptr<table>> get_column_families_copy() const;
+
+        const auto filter(std::function<bool(std::pair<table_id, lw_shared_ptr<table>>)> f) const {
+            return _column_families | boost::adaptors::filtered(std::move(f));
+        }
+    };
 private:
     replica::cf_stats _cf_stats;
     static constexpr size_t max_count_concurrent_reads{100};
@@ -1378,10 +1407,7 @@ private:
             db::per_partition_rate_limit::info> _apply_stage;
 
     flat_hash_map<sstring, keyspace> _keyspaces;
-    std::unordered_map<table_id, lw_shared_ptr<column_family>> _column_families;
-    using ks_cf_to_uuid_t =
-        flat_hash_map<std::pair<sstring, sstring>, table_id, utils::tuple_hash, string_pair_eq>;
-    ks_cf_to_uuid_t _ks_cf_to_uuid;
+    tables_metadata _tables_metadata;
     std::unique_ptr<db::commitlog> _commitlog;
     std::unique_ptr<db::commitlog> _schema_commitlog;
     utils::updateable_value_source<table_schema_version> _version;
@@ -1467,7 +1493,7 @@ private:
     Future update_write_metrics(Future&& f);
     void update_write_metrics_for_timed_out_write();
     future<> create_keyspace(const lw_shared_ptr<keyspace_metadata>&, locator::effective_replication_map_factory& erm_factory, bool is_bootstrap, system_keyspace system);
-    void remove(table&) noexcept;
+    future<> remove(table&) noexcept;
     void drop_keyspace(const sstring& name);
     future<> update_keyspace(const keyspace_metadata& tmp_ksm);
     static future<> modify_keyspace_on_all_shards(sharded<database>& sharded_db, std::function<future<>(replica::database&)> func, std::function<future<>(replica::database&)> notifier);
@@ -1554,8 +1580,8 @@ public:
     future<> add_column_family_and_make_directory(schema_ptr schema);
 
     /* throws no_such_column_family if missing */
-    const table_id& find_uuid(std::string_view ks, std::string_view cf) const;
-    const table_id& find_uuid(const schema_ptr&) const;
+    table_id find_uuid(std::string_view ks, std::string_view cf) const;
+    table_id find_uuid(const schema_ptr&) const;
 
     /**
      * Creates a keyspace for a given metadata if it still doesn't exist.
@@ -1664,22 +1690,17 @@ public:
         return _keyspaces;
     }
 
-    const std::unordered_map<table_id, lw_shared_ptr<column_family>>& get_column_families() const {
-        return _column_families;
+    const tables_metadata& get_tables_metadata() const {
+        return _tables_metadata;
     }
 
-    std::unordered_map<table_id, lw_shared_ptr<column_family>>& get_column_families() {
-        return _column_families;
+    tables_metadata& get_tables_metadata() {
+        return _tables_metadata;
     }
 
     std::vector<lw_shared_ptr<column_family>> get_non_system_column_families() const;
 
     std::vector<view_ptr> get_views() const;
-
-    const ks_cf_to_uuid_t&
-    get_column_families_mapping() const {
-        return _ks_cf_to_uuid;
-    }
 
     const db::config& get_config() const {
         return _cfg;
@@ -1721,7 +1742,7 @@ public:
 public:
     bool update_column_family(schema_ptr s);
 private:
-    void add_column_family(keyspace& ks, schema_ptr schema, column_family::config cfg);
+    future<> add_column_family(keyspace& ks, schema_ptr schema, column_family::config cfg);
     future<> detach_column_family(table& cf);
 
     struct table_truncate_state;

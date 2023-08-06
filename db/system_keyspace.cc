@@ -1662,21 +1662,21 @@ template future<> system_keyspace::update_peer_info<utils::UUID>(gms::inet_addre
 template future<> system_keyspace::update_peer_info<net::inet_address>(gms::inet_address ep, sstring column_name, net::inet_address);
 
 template <typename T>
-future<> set_scylla_local_param_as(const sstring& key, const T& value) {
+future<> system_keyspace::set_scylla_local_param_as(const sstring& key, const T& value) {
     sstring req = format("UPDATE system.{} SET value = ? WHERE key = ?", system_keyspace::SCYLLA_LOCAL);
     auto type = data_type_for<T>();
-    co_await qctx->execute_cql(req, type->to_string_impl(data_value(value)), key).discard_result();
+    co_await execute_cql(req, type->to_string_impl(data_value(value)), key).discard_result();
     // Flush the table so that the value is available on boot before commitlog replay.
     // database::maybe_init_schema_commitlog() depends on it.
-    co_await smp::invoke_on_all([] () -> future<> {
-        co_await qctx->qp().db().real_database().flush(db::system_keyspace::NAME, system_keyspace::SCYLLA_LOCAL);
+    co_await container().invoke_on_all([] (auto& sys_ks) -> future<> {
+        co_await sys_ks._db.flush(db::system_keyspace::NAME, system_keyspace::SCYLLA_LOCAL);
     });
 }
 
 template <typename T>
-future<std::optional<T>> get_scylla_local_param_as(const sstring& key) {
+future<std::optional<T>> system_keyspace::get_scylla_local_param_as(const sstring& key) {
     sstring req = format("SELECT value FROM system.{} WHERE key = ?", system_keyspace::SCYLLA_LOCAL);
-    return qctx->execute_cql(req, key).then([] (::shared_ptr<cql3::untyped_result_set> res)
+    return execute_cql(req, key).then([] (::shared_ptr<cql3::untyped_result_set> res)
             -> future<std::optional<T>> {
         if (res->empty() || !res->one().has("value")) {
             return make_ready_future<std::optional<T>>(std::optional<T>());
@@ -2531,11 +2531,6 @@ future<service::topology> system_keyspace::load_topology_state() {
             rebuild_option = row.get_as<sstring>("rebuild_option");
         }
 
-        std::set<sstring> supported_features;
-        if (row.has("supported_features")) {
-            supported_features = decode_features(deserialize_set_column(*topology(), row, "supported_features"));
-        }
-
         if (row.has("topology_request")) {
             auto req = service::topology_request_from_string(row.get_as<sstring>("topology_request"));
             ret.requests.emplace(host_id, req);
@@ -2602,7 +2597,7 @@ future<service::topology> system_keyspace::load_topology_state() {
         if (map) {
             map->emplace(host_id, service::replica_state{
                 nstate, std::move(datacenter), std::move(rack), std::move(release_version),
-                ring_slice, shard_count, ignore_msb, std::move(supported_features)});
+                ring_slice, shard_count, ignore_msb});
         }
     }
 
@@ -2675,13 +2670,42 @@ future<service::topology> system_keyspace::load_topology_state() {
                     some_row.get_as<sstring>("global_topology_request"));
             ret.global_request.emplace(req);
         }
+    }
 
-        if (some_row.has("enabled_features")) {
-            ret.enabled_features = decode_features(deserialize_set_column(*topology(), some_row, "enabled_features"));
+    ret.features = decode_topology_features_state(std::move(rs));
+
+    co_return ret;
+}
+
+future<service::topology_features> system_keyspace::load_topology_features_state() {
+    auto rs = co_await execute_cql(
+        format("SELECT host_id, node_state, supported_features, enabled_features FROM system.{} WHERE key = '{}'", TOPOLOGY, TOPOLOGY));
+    assert(rs);
+
+    co_return decode_topology_features_state(std::move(rs));
+}
+
+service::topology_features system_keyspace::decode_topology_features_state(::shared_ptr<cql3::untyped_result_set> rs) {
+    service::topology_features ret;
+
+    if (rs->empty()) {
+        return ret;
+    }
+
+    for (auto& row : *rs) {
+        raft::server_id host_id{row.get_as<utils::UUID>("host_id")};
+        service::node_state nstate = service::node_state_from_string(row.get_as<sstring>("node_state"));
+        if (row.has("supported_features") && nstate == service::node_state::normal) {
+            ret.normal_supported_features.emplace(host_id, decode_features(deserialize_set_column(*topology(), row, "supported_features")));
         }
     }
 
-    co_return ret;
+    auto& some_row = *rs->begin();
+    if (some_row.has("enabled_features")) {
+        ret.enabled_features = decode_features(deserialize_set_column(*topology(), some_row, "enabled_features"));
+    }
+
+    return ret;
 }
 
 future<int64_t> system_keyspace::get_topology_fence_version() {

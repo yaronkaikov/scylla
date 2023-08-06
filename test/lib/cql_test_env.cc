@@ -311,7 +311,7 @@ public:
         auto s = builder.build(schema_builder::compact_storage::no);
         auto group0_guard = co_await _mm.local().start_group0_operation();
         auto ts = group0_guard.write_timestamp();
-        co_return co_await _mm.local().announce(co_await _mm.local().prepare_new_column_family_announcement(s, ts), std::move(group0_guard));
+        co_return co_await _mm.local().announce(co_await service::prepare_new_column_family_announcement(_proxy.local(), s, ts), std::move(group0_guard));
     }
 
     virtual future<> require_keyspace_exists(const sstring& ks_name) override {
@@ -863,10 +863,10 @@ public:
             replica::distributed_loader::init_non_system_keyspaces(db, proxy, sys_ks).get();
 
             db.invoke_on_all([] (replica::database& db) {
-                for (auto& x : db.get_column_families()) {
-                    replica::table& t = *(x.second);
+                db.get_tables_metadata().for_each_table([] (table_id, lw_shared_ptr<replica::table> table) {
+                    replica::table& t = *table;
                     t.enable_auto_compaction();
-                }
+                });
             }).get();
 
             if (raft_gr.local().is_enabled()) {
@@ -942,7 +942,10 @@ public:
                 group0_service.abort().get();
             });
 
-            ss.local().set_group0(group0_service);
+            const bool raft_topology_change_enabled = group0_service.is_raft_enabled()
+                    && cfg->check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES);
+
+            ss.local().set_group0(group0_service, raft_topology_change_enabled);
 
             try {
                 ss.local().join_cluster(cdc_generation_service.local(), sys_dist_ks, proxy, qp.local()).get();

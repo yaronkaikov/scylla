@@ -320,7 +320,7 @@ void set_repair(http_context& ctx, routes& r, sharded<repair_service>& repair) {
     ss::repair_async.set(r, [&ctx, &repair](std::unique_ptr<http::request> req) {
         static std::vector<sstring> options = {"primaryRange", "parallelism", "incremental",
                 "jobThreads", "ranges", "columnFamilies", "dataCenters", "hosts", "ignore_nodes", "trace",
-                "startToken", "endToken" };
+                "startToken", "endToken", "ranges_parallelism"};
         std::unordered_map<sstring, sstring> options_map;
         for (auto o : options) {
             auto s = req->get_query_param(o);
@@ -980,10 +980,9 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
                 ks.set_incremental_backups(value);
             }
 
-            for (auto& pair: db.get_column_families()) {
-                auto cf_ptr = pair.second;
-                cf_ptr->set_incremental_backups(value);
-            }
+            db.get_tables_metadata().for_each_table([&] (table_id, lw_shared_ptr<replica::table> table) {
+                table->set_incremental_backups(value);
+            });
         }).then([] {
             return make_ready_future<json::json_return_type>(json_void());
         });
@@ -1258,7 +1257,7 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
 
                 auto& ext = db.get_config().extensions();
 
-                for (auto& t : db.get_column_families() | boost::adaptors::map_values) {
+                db.get_tables_metadata().for_each_table([&] (table_id, lw_shared_ptr<replica::table> t) {
                     auto& schema = t->schema();
                     if ((ks.empty() || ks == schema->ks_name()) && (cf.empty() || cf == schema->cf_name())) {
                         // at most Nsstables long
@@ -1339,7 +1338,7 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
                         }
                         res.emplace_back(std::move(tst));
                     }
-                }
+                });
                 std::sort(res.begin(), res.end(), [](const ss::table_sstables& t1, const ss::table_sstables& t2) {
                     return t1.keyspace() < t2.keyspace() || (t1.keyspace() == t2.keyspace() && t1.table() < t2.table());
                 });

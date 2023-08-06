@@ -89,8 +89,18 @@ io_error_handler error_handler_gen_for_upload_dir(disk_error_signal_type& dummy)
 
 future<>
 distributed_loader::process_sstable_dir(sharded<sstables::sstable_directory>& dir, sstables::sstable_directory::process_flags flags) {
-    co_await dir.invoke_on(0, [] (const sstables::sstable_directory& d) {
-        return utils::directories::verify_owner_and_mode(d.sstable_dir());
+    // verify owner and mode on the sstables directory
+    // and all its subdirectories, except for "snapshots"
+    // as there could be a race with scylla-manager that might
+    // delete snapshots concurrently
+    co_await dir.invoke_on(0, [] (const sstables::sstable_directory& d) -> future<> {
+        fs::path sstable_dir = d.sstable_dir();
+        co_await utils::directories::verify_owner_and_mode(sstable_dir, utils::directories::recursive::no);
+        co_await lister::scan_dir(sstable_dir, lister::dir_entry_types::of<directory_entry_type::directory>(), [] (fs::path dir, directory_entry de) -> future<> {
+            if (de.name != sstables::snapshots_dir) {
+                co_await utils::directories::verify_owner_and_mode(dir / de.name, utils::directories::recursive::yes);
+            }
+        });
     });
 
     if (flags.garbage_collect) {
@@ -476,11 +486,11 @@ future<> distributed_loader::populate_keyspace(distributed<replica::database>& d
 
     dblog.info("Populating Keyspace {}", ks_name);
     auto& ks = i->second;
-    auto& column_families = db.local().get_column_families();
+    auto& tables_metadata = db.local().get_tables_metadata();
 
     co_await coroutine::parallel_for_each(ks.metadata()->cf_meta_data() | boost::adaptors::map_values, [&] (schema_ptr s) -> future<> {
         auto uuid = s->id();
-        lw_shared_ptr<replica::column_family> cf = column_families[uuid];
+        lw_shared_ptr<replica::column_family> cf = tables_metadata.get_table(uuid).shared_from_this();
 
         // System tables (from system and system_schema keyspaces) are loaded in two phases.
         // The populate_keyspace function can be called in the second phase for tables that

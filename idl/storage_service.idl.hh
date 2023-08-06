@@ -27,6 +27,7 @@ struct fencing_token {
 struct raft_topology_cmd {
     enum class command: uint8_t {
         barrier,
+        barrier_after_feature_update,
         barrier_and_drain,
         stream_ranges,
         fence
@@ -50,6 +51,6 @@ struct raft_topology_snapshot {
 struct raft_topology_pull_params {};
 
 verb raft_topology_cmd (raft::term_t term, uint64_t cmd_index, service::raft_topology_cmd) -> service::raft_topology_cmd_result;
-verb raft_pull_topology_snapshot (service::raft_topology_pull_params) -> service::raft_topology_snapshot;
+verb [[cancellable]] raft_pull_topology_snapshot (service::raft_topology_pull_params) -> service::raft_topology_snapshot;
 verb [[cancellable]] tablet_stream_data (locator::global_tablet_id);
 }

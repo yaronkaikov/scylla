@@ -36,6 +36,40 @@ bool topology::contains(raft::server_id id) {
            left_nodes.contains(id);
 }
 
+std::set<sstring> topology_features::calculate_not_yet_enabled_features() const {
+    std::set<sstring> to_enable;
+    bool first = true;
+
+    for (const auto& [id, supported_features] : normal_supported_features) {
+        if (!first && to_enable.empty()) {
+            break;
+        }
+
+        if (first) {
+            // This is the first node that we process.
+            // Calculate the set of features that this node understands
+            // but are not enabled yet.
+            std::ranges::set_difference(supported_features, enabled_features, std::inserter(to_enable, to_enable.begin()));
+            first = false;
+        } else {
+            // Erase the elements that this node doesn't support
+            std::erase_if(to_enable, [&supported_features = supported_features] (const sstring& f) {
+                return !supported_features.contains(f);
+            });
+        }
+    }
+
+    return to_enable;
+}
+
+size_t topology::size() const {
+    return normal_nodes.size() + transition_nodes.size() + new_nodes.size();
+}
+
+bool topology::is_empty() const {
+    return size() == 0;
+}
+
 std::ostream& operator<<(std::ostream& os, const fencing_token& fencing_token) {
     return os << "{" << fencing_token.topology_version << "}";
 }
@@ -45,12 +79,7 @@ static std::unordered_map<topology::transition_state, sstring> transition_state_
     {topology::transition_state::publish_cdc_generation, "publish cdc generation"},
     {topology::transition_state::write_both_read_old, "write both read old"},
     {topology::transition_state::write_both_read_new, "write both read new"},
-    {topology::transition_state::tablet_allow_write_both_read_old, "tablet allow write both read old"},
-    {topology::transition_state::tablet_write_both_read_old, "tablet write both read old"},
-    {topology::transition_state::tablet_write_both_read_new, "tablet write both read new"},
-    {topology::transition_state::tablet_streaming, "tablet streaming"},
-    {topology::transition_state::tablet_use_new, "tablet use new"},
-    {topology::transition_state::tablet_cleanup, "tablet cleanup"},
+    {topology::transition_state::tablet_migration, "tablet migration"},
 };
 
 std::ostream& operator<<(std::ostream& os, topology::transition_state s) {
@@ -147,6 +176,9 @@ std::ostream& operator<<(std::ostream& os, const raft_topology_cmd::command& cmd
     switch (cmd) {
         case raft_topology_cmd::command::barrier:
             os << "barrier";
+            break;
+        case raft_topology_cmd::command::barrier_after_feature_update:
+            os << "barrier_after_feature_update";
             break;
         case raft_topology_cmd::command::barrier_and_drain:
             os << "barrier_and_drain";

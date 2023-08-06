@@ -2962,7 +2962,8 @@ public:
     }
     virtual future<> on_join(
             gms::inet_address endpoint,
-            gms::endpoint_state ep_state) override {
+            gms::endpoint_state ep_state,
+            gms::permit_id) override {
         return make_ready_future();
     }
     virtual future<> before_change(
@@ -2975,26 +2976,31 @@ public:
     virtual future<> on_change(
             gms::inet_address endpoint,
             gms::application_state state,
-            const gms::versioned_value& value) override {
+            const gms::versioned_value& value,
+            gms::permit_id) override {
         return make_ready_future();
     }
     virtual future<> on_alive(
             gms::inet_address endpoint,
-            gms::endpoint_state state) override {
+            gms::endpoint_state state,
+            gms::permit_id) override {
         return make_ready_future();
     }
     virtual future<> on_dead(
             gms::inet_address endpoint,
-            gms::endpoint_state state) override {
+            gms::endpoint_state state,
+            gms::permit_id) override {
         return remove_row_level_repair(endpoint);
     }
     virtual future<> on_remove(
-            gms::inet_address endpoint) override {
+            gms::inet_address endpoint,
+            gms::permit_id) override {
         return remove_row_level_repair(endpoint);
     }
     virtual future<> on_restart(
             gms::inet_address endpoint,
-            gms::endpoint_state ep_state) override {
+            gms::endpoint_state ep_state,
+            gms::permit_id) override {
         return remove_row_level_repair(endpoint);
     }
 };
@@ -3084,13 +3090,10 @@ future<> repair_service::cleanup_history(tasks::task_id repair_id) {
 }
 
 future<> repair_service::load_history() {
-    auto tables = get_db().local().get_column_families();
-    for (const auto& x : tables) {
-        auto& table_uuid = x.first;
-        auto& table = x.second;
+    co_await get_db().local().get_tables_metadata().for_each_table_gently(coroutine::lambda([&] (table_id table_uuid, lw_shared_ptr<replica::table> table) -> future<> {
         auto shard = unsigned(table_uuid.uuid().get_most_significant_bits()) % smp::count;
         if (shard != this_shard_id()) {
-            continue;
+            co_return;
         }
         rlogger.info("Loading repair history for keyspace={}, table={}, table_uuid={}",
                 table->schema()->ks_name(), table->schema()->cf_name(), table_uuid);
@@ -3111,8 +3114,7 @@ future<> repair_service::load_history() {
                         entry.ks, entry.cf, range, repair_time);
             }
         });
-    }
-    co_return;
+    }));
 }
 
 repair_meta_ptr repair_service::get_repair_meta(gms::inet_address from, uint32_t repair_meta_id) {

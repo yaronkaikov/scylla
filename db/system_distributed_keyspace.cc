@@ -261,8 +261,8 @@ static future<> add_new_columns_if_missing(replica::database& db, ::service::mig
             schema_ptr table = b.build();
             try {
                 auto ts = group0_guard.write_timestamp();
-                co_return co_await mm.announce(co_await mm.prepare_column_family_update_announcement(table, false, std::vector<view_ptr>(), ts),
-                        std::move(group0_guard), "Add new columns to system_distributed.service_levels");
+                co_return co_await mm.announce(co_await service::prepare_column_family_update_announcement(mm.get_storage_proxy(), table, false,
+                        std::vector<view_ptr>(), ts), std::move(group0_guard), "Add new columns to system_distributed.service_levels");
             } catch (...) {}
         }
     } catch (...) {
@@ -290,7 +290,7 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
                     "org.apache.cassandra.locator.SimpleStrategy",
                     {{"replication_factor", "3"}},
                     true /* durable_writes */);
-            co_await _mm.announce(_mm.prepare_new_keyspace_announcement(ksm, ts), std::move(group0_guard),
+            co_await _mm.announce(service::prepare_new_keyspace_announcement(_sp.local_db(), ksm, ts), std::move(group0_guard),
                     "Create system_distributed keyspace");
         } catch (exceptions::already_exists_exception&) {}
     } else {
@@ -307,7 +307,7 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
                     "org.apache.cassandra.locator.EverywhereStrategy",
                     {},
                     true /* durable_writes */);
-            co_await _mm.announce(_mm.prepare_new_keyspace_announcement(ksm, ts), std::move(group0_guard),
+            co_await _mm.announce(service::prepare_new_keyspace_announcement(_sp.local_db(), ksm, ts), std::move(group0_guard),
                     "Create system_distributed_everywhere keyspace");
         } catch (exceptions::already_exists_exception&) {}
     } else {
@@ -325,7 +325,7 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
         auto m = co_await map_reduce(ensured_tables(),
         /* Mapper */ [this, ts] (auto&& table) -> future<std::vector<mutation>> {
             try {
-                co_return co_await _mm.prepare_new_column_family_announcement(std::move(table), ts);
+                co_return co_await service::prepare_new_column_family_announcement(_sp, std::move(table), ts);
             } catch (exceptions::already_exists_exception&) {
                 co_return std::vector<mutation>();
             }

@@ -263,6 +263,26 @@ bool should_propose_first_generation(const gms::inet_address& me, const gms::gos
     });
 }
 
+bool is_cdc_generation_optimal(const cdc::topology_description& gen, const locator::token_metadata& tm) {
+    if (tm.sorted_tokens().size() != gen.entries().size()) {
+        // We probably have garbage streams from old generations
+        cdc_log.info("Generation size does not match the token ring");
+        return false;
+    } else {
+        std::unordered_set<dht::token> gen_ends;
+        for (const auto& entry : gen.entries()) {
+            gen_ends.insert(entry.token_range_end);
+        }
+        for (const auto& metadata_token : tm.sorted_tokens()) {
+            if (!gen_ends.contains(metadata_token)) {
+                cdc_log.warn("CDC generation missing token {}", metadata_token);
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
 future<utils::chunked_vector<mutation>> get_cdc_generation_mutations(
         schema_ptr s,
         utils::UUID id,
@@ -641,21 +661,21 @@ future<> generation_service::maybe_rewrite_streams_descriptions() {
 
     // For each CDC log table get the TTL setting (from CDC options) and the table's creation time
     std::vector<time_and_ttl> times_and_ttls;
-    for (auto& [_, cf] : _db.get_column_families()) {
-        auto& s = *cf->schema();
+    _db.get_tables_metadata().for_each_table([&] (table_id, lw_shared_ptr<replica::table> t) {
+        auto& s = *t->schema();
         auto base = cdc::get_base_table(_db, s.ks_name(), s.cf_name());
         if (!base) {
             // Not a CDC log table.
-            continue;
+            return;
         }
         auto& cdc_opts = base->cdc_options();
         if (!cdc_opts.enabled()) {
             // This table is named like a CDC log table but it's not one.
-            continue;
+            return;
         }
 
         times_and_ttls.push_back(time_and_ttl{as_timepoint(s.id().uuid()), cdc_opts.ttl()});
-    }
+    });
 
     if (times_and_ttls.empty()) {
         // There's no point in rewriting old generations' streams (they don't contain any data).
@@ -774,7 +794,7 @@ future<> generation_service::after_join(std::optional<cdc::generation_id>&& star
     _cdc_streams_rewrite_complete = maybe_rewrite_streams_descriptions();
 }
 
-future<> generation_service::on_join(gms::inet_address ep, gms::endpoint_state ep_state) {
+future<> generation_service::on_join(gms::inet_address ep, gms::endpoint_state ep_state, gms::permit_id pid) {
     assert_shard_zero(__PRETTY_FUNCTION__);
 
     auto val = ep_state.get_application_state_ptr(gms::application_state::CDC_GENERATION_ID);
@@ -782,10 +802,10 @@ future<> generation_service::on_join(gms::inet_address ep, gms::endpoint_state e
         return make_ready_future();
     }
 
-    return on_change(ep, gms::application_state::CDC_GENERATION_ID, *val);
+    return on_change(ep, gms::application_state::CDC_GENERATION_ID, *val, pid);
 }
 
-future<> generation_service::on_change(gms::inet_address ep, gms::application_state app_state, const gms::versioned_value& v) {
+future<> generation_service::on_change(gms::inet_address ep, gms::application_state app_state, const gms::versioned_value& v, gms::permit_id) {
     assert_shard_zero(__PRETTY_FUNCTION__);
 
     if (app_state != gms::application_state::CDC_GENERATION_ID) {
@@ -875,24 +895,9 @@ future<> generation_service::check_and_repair_cdc_streams() {
                 " even though some node gossiped about it.",
                 latest, db_clock::now());
             should_regenerate = true;
-        } else {
-            if (tmptr->sorted_tokens().size() != gen->entries().size()) {
-                // We probably have garbage streams from old generations
-                cdc_log.info("Generation size does not match the token ring, regenerating");
-                should_regenerate = true;
-            } else {
-                std::unordered_set<dht::token> gen_ends;
-                for (const auto& entry : gen->entries()) {
-                    gen_ends.insert(entry.token_range_end);
-                }
-                for (const auto& metadata_token : tmptr->sorted_tokens()) {
-                    if (!gen_ends.contains(metadata_token)) {
-                        cdc_log.warn("CDC generation {} missing token {}. Regenerating.", latest, metadata_token);
-                        should_regenerate = true;
-                        break;
-                    }
-                }
-            }
+        } else if (!is_cdc_generation_optimal(*gen, *tmptr)) {
+            should_regenerate = true;
+            cdc_log.info("CDC generation {} needs repair, regenerating", latest);
         }
     }
 

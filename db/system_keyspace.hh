@@ -35,6 +35,7 @@ namespace service {
 class storage_service;
 class raft_group_registry;
 struct topology;
+struct topology_features;
 
 namespace paxos {
     class paxos_state;
@@ -77,6 +78,13 @@ bool is_system_keyspace(std::string_view ks_name);
 namespace db {
 
 sstring system_keyspace_name();
+
+class system_keyspace;
+namespace schema_tables {
+future<column_mapping> get_column_mapping(db::system_keyspace& sys_ks, ::table_id table_id, table_schema_version version);
+future<bool> column_mapping_exists(db::system_keyspace& sys_ks, table_id table_id, table_schema_version version);
+future<> drop_column_mapping(db::system_keyspace& sys_ks, table_id table_id, table_schema_version version);
+}
 
 class config;
 struct local_cache;
@@ -265,9 +273,16 @@ public:
 
     future<> remove_endpoint(gms::inet_address ep);
 
-    static future<> set_scylla_local_param(const sstring& key, const sstring& value);
-    static future<std::optional<sstring>> get_scylla_local_param(const sstring& key);
+    future<> set_scylla_local_param(const sstring& key, const sstring& value);
+    future<std::optional<sstring>> get_scylla_local_param(const sstring& key);
 
+private:
+    template <typename T>
+    future<> set_scylla_local_param_as(const sstring& key, const T& value);
+    template <typename T>
+    future<std::optional<T>> get_scylla_local_param_as(const sstring& key);
+
+public:
     static std::vector<schema_ptr> all_tables(const db::config& cfg);
     future<> make(
             locator::effective_replication_map_factory&,
@@ -461,6 +476,7 @@ public:
     future<bool> group0_history_contains(utils::UUID state_id);
 
     future<service::topology> load_topology_state();
+    future<service::topology_features> load_topology_features_state();
     future<int64_t> get_topology_fence_version();
     future<> update_topology_fence_version(int64_t value);
 
@@ -495,6 +511,11 @@ public:
     future<bool> get_must_synchronize_topology();
     future<> set_must_synchronize_topology(bool);
 
+private:
+    static service::topology_features decode_topology_features_state(::shared_ptr<cql3::untyped_result_set> rs);
+
+public:
+
     system_keyspace(cql3::query_processor& qp, replica::database& db, const locator::snitch_ptr&) noexcept;
     ~system_keyspace();
     future<> shutdown();
@@ -509,6 +530,10 @@ public:
     future<::shared_ptr<cql3::untyped_result_set>> execute_cql(sstring req, Args&&... args) {
         return execute_cql(req, { data_value(std::forward<Args>(args))... });
     }
+
+    friend future<column_mapping> db::schema_tables::get_column_mapping(db::system_keyspace& sys_ks, ::table_id table_id, table_schema_version version);
+    friend future<bool> db::schema_tables::column_mapping_exists(db::system_keyspace& sys_ks, table_id table_id, table_schema_version version);
+    friend future<> db::schema_tables::drop_column_mapping(db::system_keyspace& sys_ks, table_id table_id, table_schema_version version);
 }; // class system_keyspace
 
 } // namespace db

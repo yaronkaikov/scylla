@@ -879,7 +879,7 @@ public:
         });
     }
 
-    future<std::string> execute_schema_command(std::function<future<std::vector<mutation>>(service::migration_manager&, data_dictionary::database, api::timestamp_type)> ddl) {
+    future<std::string> execute_schema_command(std::function<future<std::vector<mutation>>(data_dictionary::database, api::timestamp_type)> ddl) {
         return _query_processor.invoke_on(0, [ddl = std::move(ddl)] (cql3::query_processor& qp) mutable {
             return qp.execute_thrift_schema_command(std::move(ddl));
         });
@@ -893,7 +893,7 @@ public:
 
             co_await t._query_state.get_client_state().has_keyspace_access(cf_def.keyspace, auth::permission::CREATE);
 
-            co_return co_await t.execute_schema_command([&cf_def] (service::migration_manager& mm, data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
+            co_return co_await t.execute_schema_command([&p = t._proxy.local(), &cf_def] (data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
                 if (!db.has_keyspace(cf_def.keyspace)) {
                     throw NotFoundException();
                 }
@@ -902,7 +902,7 @@ public:
                 }
 
                 auto s = schema_from_thrift(cf_def, cf_def.keyspace);
-                co_return co_await mm.prepare_new_column_family_announcement(std::move(s), ts);
+                co_return co_await service::prepare_new_column_family_announcement(p, std::move(s), ts);
             });
         });
     }
@@ -914,7 +914,7 @@ public:
             co_await t._query_state.get_client_state().has_column_family_access(t.current_keyspace(), column_family, auth::permission::DROP);
 
             co_return co_await t.execute_schema_command(
-                       [&column_family, &current_keyspace = t.current_keyspace()] (service::migration_manager& mm, data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
+                       [&p = t._proxy.local(), &column_family, &current_keyspace = t.current_keyspace()] (data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
                 auto cf = db.find_table(current_keyspace, column_family);
                 if (cf.schema()->is_view()) {
                     throw make_exception<InvalidRequestException>("Cannot drop Materialized Views from Thrift");
@@ -923,7 +923,7 @@ public:
                     throw make_exception<InvalidRequestException>("Cannot drop table with Materialized Views {}", column_family);
                 }
 
-                co_return co_await mm.prepare_column_family_drop_announcement(current_keyspace, column_family, ts);
+                co_return co_await service::prepare_column_family_drop_announcement(p, current_keyspace, column_family, ts);
             });
         });
     }
@@ -936,8 +936,8 @@ public:
 
             co_await t._query_state.get_client_state().has_all_keyspaces_access(auth::permission::CREATE);
 
-            co_return co_await t.execute_schema_command([&ks_def] (service::migration_manager& mm, data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
-                co_return mm.prepare_new_keyspace_announcement(keyspace_from_thrift(ks_def), ts);
+            co_return co_await t.execute_schema_command([&ks_def] (data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
+                co_return service::prepare_new_keyspace_announcement(db.real_database(), keyspace_from_thrift(ks_def), ts);
             });
         });
     }
@@ -950,13 +950,13 @@ public:
 
             co_await t._query_state.get_client_state().has_keyspace_access(keyspace, auth::permission::DROP);
 
-            co_return co_await t.execute_schema_command([&keyspace] (service::migration_manager& mm, data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
+            co_return co_await t.execute_schema_command([&keyspace] (data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
                 thrift_validation::validate_keyspace_not_system(keyspace);
                 if (!db.has_keyspace(keyspace)) {
                     throw NotFoundException();
                 }
 
-                co_return co_await mm.prepare_keyspace_drop_announcement(keyspace, ts);
+                co_return co_await service::prepare_keyspace_drop_announcement(db.real_database(), keyspace, ts);
             });
         });
     }
@@ -970,7 +970,7 @@ public:
 
             co_await t._query_state.get_client_state().has_keyspace_access(ks_def.name, auth::permission::ALTER);
 
-            co_return co_await t.execute_schema_command([&ks_def] (service::migration_manager& mm, data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
+            co_return co_await t.execute_schema_command([&ks_def] (data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
                 if (!db.has_keyspace(ks_def.name)) {
                     throw NotFoundException();
                 }
@@ -979,7 +979,7 @@ public:
                 }
 
                 auto ksm = keyspace_from_thrift(ks_def);
-                co_return mm.prepare_keyspace_update_announcement(std::move(ksm), ts);
+                co_return service::prepare_keyspace_update_announcement(db.real_database(), std::move(ksm), ts);
             });
         });
     }
@@ -992,7 +992,7 @@ public:
 
             co_await t._query_state.get_client_state().has_schema_access(cf_def.keyspace, cf_def.name, auth::permission::ALTER);
 
-            co_return co_await t.execute_schema_command([&cf_def] (service::migration_manager& mm, data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
+            co_return co_await t.execute_schema_command([&p = t._proxy.local(), &cf_def] (data_dictionary::database db, api::timestamp_type ts) -> future<std::vector<mutation>> {
                 auto cf = db.find_table(cf_def.keyspace, cf_def.name);
                 auto schema = cf.schema();
 
@@ -1014,7 +1014,7 @@ public:
                 if (schema->thrift().is_dynamic() != s->thrift().is_dynamic()) {
                     fail(unimplemented::cause::MIXED_CF);
                 }
-                co_return co_await mm.prepare_column_family_update_announcement(std::move(s), true, std::vector<view_ptr>(), ts);
+                co_return co_await service::prepare_column_family_update_announcement(p, std::move(s), true, std::vector<view_ptr>(), ts);
             });
         });
     }

@@ -982,7 +982,7 @@ table::stop() {
     }));
     _cache.refresh_snapshot();
 }
-
+static seastar::metrics::label_instance node_table_metrics("__per_table", "node");
 void table::set_metrics() {
     auto cf = column_family_label(_schema->cf_name());
     auto ks = keyspace_label(_schema->ks_name());
@@ -1041,6 +1041,20 @@ void table::set_metrics() {
                     ms::make_histogram("cas_propose_latency", ms::description("CAS accept round latency histogram"), [this] {return to_metrics_histogram(_stats.cas_accept.histogram());})(cf)(ks).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
                     ms::make_histogram("cas_commit_latency", ms::description("CAS learn round latency histogram"), [this] {return to_metrics_histogram(_stats.cas_learn.histogram());})(cf)(ks).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
                     ms::make_gauge("cache_hit_rate", ms::description("Cache hit rate"), [this] {return float(_global_cache_hit_rate);})(cf)(ks)
+            });
+        }
+    } else {
+        if (_config.enable_node_aggregated_table_metrics && !is_internal_keyspace(_schema->ks_name())) {
+            _metrics.add_group("column_family", {
+                ms::make_counter("memtable_switch", ms::description("Number of times flush has resulted in the memtable being switched out"), _stats.memtable_switch_count)(cf)(ks)(node_table_metrics).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
+                ms::make_counter("memtable_partition_writes", [this] () { return _stats.memtable_partition_insertions + _stats.memtable_partition_hits; }, ms::description("Number of write operations performed on partitions in memtables"))(cf)(ks)(node_table_metrics).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
+                ms::make_counter("memtable_partition_hits", _stats.memtable_partition_hits, ms::description("Number of times a write operation was issued on an existing partition in memtables"))(cf)(ks)(node_table_metrics).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
+                ms::make_counter("memtable_row_writes", _stats.memtable_app_stats.row_writes, ms::description("Number of row writes performed in memtables"))(cf)(ks)(node_table_metrics).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
+                ms::make_counter("memtable_row_hits", _stats.memtable_app_stats.row_hits, ms::description("Number of rows overwritten by write operations in memtables"))(cf)(ks)(node_table_metrics).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
+                ms::make_gauge("total_disk_space", ms::description("Total disk space used"), _stats.total_disk_space_used)(cf)(ks)(node_table_metrics).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
+                ms::make_gauge("live_sstable", ms::description("Live sstable count"), _stats.live_sstable_count)(cf)(ks)(node_table_metrics).aggregate({seastar::metrics::shard_label}),
+                ms::make_counter("read_latency_count", ms::description("Number of reads"), [this] {return _stats.reads.histogram().count();})(cf)(ks)(node_table_metrics).aggregate({seastar::metrics::shard_label}).set_skip_when_empty(),
+                ms::make_counter("write_latency_count", ms::description("Number of writes"), [this] {return _stats.writes.histogram().count();})(cf)(ks)(node_table_metrics).aggregate({seastar::metrics::shard_label}).set_skip_when_empty()
             });
         }
     }
@@ -1250,7 +1264,7 @@ compaction_group::update_main_sstable_list_on_compaction_completion(sstables::co
 }
 
 future<>
-table::compact_all_sstables(tasks::task_info info) {
+table::compact_all_sstables(std::optional<tasks::task_info> info) {
     co_await flush();
     co_await parallel_foreach_compaction_group([this, info] (compaction_group& cg) {
         return _compaction_manager.perform_major_compaction(cg.as_table_state(), info);
@@ -1286,7 +1300,7 @@ void table::trigger_offstrategy_compaction() {
     // Run in background.
     // This is safe since the the compaction task is tracked
     // by the compaction_manager until stop()
-    (void)perform_offstrategy_compaction().then_wrapped([this] (future<bool> f) {
+    (void)perform_offstrategy_compaction(tasks::task_info{}).then_wrapped([this] (future<bool> f) {
         if (f.failed()) {
             auto ex = f.get_exception();
             tlogger.warn("Offstrategy compaction of {}.{} failed: {}, ignoring", schema()->ks_name(), schema()->cf_name(), ex);
@@ -1294,23 +1308,23 @@ void table::trigger_offstrategy_compaction() {
     });
 }
 
-future<bool> table::perform_offstrategy_compaction() {
+future<bool> table::perform_offstrategy_compaction(std::optional<tasks::task_info> info) {
     // If the user calls trigger_offstrategy_compaction() to trigger
     // off-strategy explicitly, cancel the timeout based automatic trigger.
     _off_strategy_trigger.cancel();
     bool performed = false;
-    co_await parallel_foreach_compaction_group([this, &performed] (compaction_group& cg) -> future<> {
-        performed |= co_await _compaction_manager.perform_offstrategy(cg.as_table_state());
+    co_await parallel_foreach_compaction_group([this, &performed, info] (compaction_group& cg) -> future<> {
+        performed |= co_await _compaction_manager.perform_offstrategy(cg.as_table_state(), info);
     });
     co_return performed;
 }
 
-future<> table::perform_cleanup_compaction(compaction::owned_ranges_ptr sorted_owned_ranges) {
+future<> table::perform_cleanup_compaction(compaction::owned_ranges_ptr sorted_owned_ranges, std::optional<tasks::task_info> info) {
     co_await flush();
 
     if (_compaction_groups.size() == 1) {
         auto& cg = *_compaction_groups[0];
-        co_return co_await get_compaction_manager().perform_cleanup(std::move(sorted_owned_ranges), cg.as_table_state());
+        co_return co_await get_compaction_manager().perform_cleanup(std::move(sorted_owned_ranges), cg.as_table_state(), info);
     }
 
     // candidate ranges for the next compaction_group
@@ -1345,7 +1359,7 @@ future<> table::perform_cleanup_compaction(compaction::owned_ranges_ptr sorted_o
     }
     co_await parallel_foreach_compaction_group([&] (compaction_group& cg) {
         auto&& cg_ranges = std::move(cg_ranges_map.at(cg.token_range()));
-        return get_compaction_manager().perform_cleanup(std::move(cg_ranges), cg.as_table_state());
+        return get_compaction_manager().perform_cleanup(std::move(cg_ranges), cg.as_table_state(), info);
     });
 }
 

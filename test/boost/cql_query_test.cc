@@ -4047,7 +4047,7 @@ SEASTAR_TEST_CASE(test_view_with_two_regular_base_columns_in_key) {
         auto& mm = e.migration_manager().local();
         auto group0_guard = mm.start_group0_operation().get();
         auto ts = group0_guard.write_timestamp();
-        mm.announce(mm.prepare_new_view_announcement(view_ptr(view_schema), ts).get(), std::move(group0_guard)).get();
+        mm.announce(service::prepare_new_view_announcement(mm.get_storage_proxy(), view_ptr(view_schema), ts).get(), std::move(group0_guard)).get();
 
         // Verify that deleting and restoring columns behaves as expected - i.e. the row is deleted and regenerated
         cquery_nofail(e, "INSERT INTO t (p, c, v1, v2) VALUES (1, 2, 3, 4)");
@@ -4336,8 +4336,7 @@ SEASTAR_TEST_CASE(test_describe_view_schema) {
               "    AND read_repair_chance = 0\n"
               "    AND speculative_retry = '99.0PERCENTILE'\n"
               "    AND paxos_grace_seconds = 43200\n"
-              "    AND tombstone_gc = {'mode':'timeout','propagation_delay_in_seconds':'3600'}\n"
-              "    AND synchronous_updates = false;\n"},
+              "    AND tombstone_gc = {'mode':'timeout','propagation_delay_in_seconds':'3600'};\n"},
           {"cf_index_index", "CREATE INDEX cf_index ON \"KS\".\"cF\"(col2);"},
           {"cf_index1_index", "CREATE INDEX cf_index1 ON \"KS\".\"cF\"(pk);"},
           {"cf_index2_index", "CREATE INDEX cf_index2 ON \"KS\".\"cF\"(pk1);"},

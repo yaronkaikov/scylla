@@ -343,7 +343,7 @@ public:
     future<> join_cluster(cdc::generation_service& cdc_gen_service,
             sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy, cql3::query_processor& qp);
 
-    void set_group0(service::raft_group0&);
+    void set_group0(service::raft_group0&, bool raft_topology_change_enabled);
 
     future<> drain_on_shutdown();
 
@@ -417,7 +417,7 @@ public:
             locator::vnode_effective_replication_map_ptr erm,
             const dht::token_range_vector& ranges) const;
 public:
-    virtual future<> on_join(gms::inet_address endpoint, gms::endpoint_state ep_state) override;
+    virtual future<> on_join(gms::inet_address endpoint, gms::endpoint_state ep_state, gms::permit_id) override;
     virtual future<> before_change(gms::inet_address endpoint, gms::endpoint_state current_state, gms::application_state new_state_key, const gms::versioned_value& new_value) override;
     /*
      * Handle the reception of a new particular ApplicationState for a particular endpoint. Note that the value of the
@@ -451,11 +451,11 @@ public:
      * Note: Any time a node state changes from STATUS_NORMAL, it will not be visible to new nodes. So it follows that
      * you should never bootstrap a new node during a removenode, decommission or move.
      */
-    virtual future<> on_change(inet_address endpoint, application_state state, const versioned_value& value) override;
-    virtual future<> on_alive(gms::inet_address endpoint, gms::endpoint_state state) override;
-    virtual future<> on_dead(gms::inet_address endpoint, gms::endpoint_state state) override;
-    virtual future<> on_remove(gms::inet_address endpoint) override;
-    virtual future<> on_restart(gms::inet_address endpoint, gms::endpoint_state state) override;
+    virtual future<> on_change(inet_address endpoint, application_state state, const versioned_value& value, gms::permit_id) override;
+    virtual future<> on_alive(gms::inet_address endpoint, gms::endpoint_state state, gms::permit_id) override;
+    virtual future<> on_dead(gms::inet_address endpoint, gms::endpoint_state state, gms::permit_id) override;
+    virtual future<> on_remove(gms::inet_address endpoint, gms::permit_id) override;
+    virtual future<> on_restart(gms::inet_address endpoint, gms::endpoint_state state, gms::permit_id) override;
 
 public:
     // For migration_listener
@@ -499,7 +499,7 @@ private:
      *
      * @param endpoint bootstrapping node
      */
-    future<> handle_state_bootstrap(inet_address endpoint);
+    future<> handle_state_bootstrap(inet_address endpoint, gms::permit_id);
 
     /**
      * Handle node move to normal state. That is, node is entering token ring and participating
@@ -507,14 +507,14 @@ private:
      *
      * @param endpoint node
      */
-    future<> handle_state_normal(inet_address endpoint);
+    future<> handle_state_normal(inet_address endpoint, gms::permit_id);
 
     /**
      * Handle node preparing to leave the ring
      *
      * @param endpoint node
      */
-    future<> handle_state_leaving(inet_address endpoint);
+    future<> handle_state_leaving(inet_address endpoint, gms::permit_id);
 
     /**
      * Handle node leaving the ring. This will happen when a node is decommissioned
@@ -522,7 +522,7 @@ private:
      * @param endpoint If reason for leaving is decommission, endpoint is the leaving node.
      * @param pieces STATE_LEFT,token
      */
-    future<> handle_state_left(inet_address endpoint, std::vector<sstring> pieces);
+    future<> handle_state_left(inet_address endpoint, std::vector<sstring> pieces, gms::permit_id);
 
     /**
      * Handle node moving inside the ring.
@@ -530,7 +530,7 @@ private:
      * @param endpoint moving endpoint address
      * @param pieces STATE_MOVING, token
      */
-    void handle_state_moving(inet_address endpoint, std::vector<sstring> pieces);
+    void handle_state_moving(inet_address endpoint, std::vector<sstring> pieces, gms::permit_id);
 
     /**
      * Handle notification that a node being actively removed from the ring via 'removenode'
@@ -538,17 +538,17 @@ private:
      * @param endpoint node
      * @param pieces is REMOVED_TOKEN (node is gone)
      */
-    future<> handle_state_removed(inet_address endpoint, std::vector<sstring> pieces);
+    future<> handle_state_removed(inet_address endpoint, std::vector<sstring> pieces, gms::permit_id);
 
     future<>
-    handle_state_replacing_update_pending_ranges(mutable_token_metadata_ptr tmptr, inet_address replacing_node);
+    handle_state_replacing_update_pending_ranges(mutable_token_metadata_ptr tmptr, inet_address replacing_node, gms::permit_id);
 
 private:
-    future<> excise(std::unordered_set<token> tokens, inet_address endpoint);
-    future<> excise(std::unordered_set<token> tokens, inet_address endpoint, long expire_time);
+    future<> excise(std::unordered_set<token> tokens, inet_address endpoint, gms::permit_id);
+    future<> excise(std::unordered_set<token> tokens, inet_address endpoint, long expire_time, gms::permit_id);
 
     /** unlike excise we just need this endpoint gone without going through any notifications **/
-    future<> remove_endpoint(inet_address endpoint);
+    future<> remove_endpoint(inet_address endpoint, gms::permit_id pid);
 
     void add_expire_time_if_found(inet_address endpoint, int64_t expire_time);
 
@@ -792,6 +792,10 @@ private:
     future<> raft_rebuild(sstring source_dc);
     future<> raft_check_and_repair_cdc_streams();
     future<> update_topology_with_local_metadata(raft::server&);
+    future<> do_update_topology_with_local_metadata(raft::server&);
+
+    // Set to true after successful `update_topology_with_local_metadata` call
+    bool _topology_updated_with_local_metadata = false;
 
     // This is called on all nodes for each new command received through raft
     // raft_group0_client::_read_apply_mutex must be held
