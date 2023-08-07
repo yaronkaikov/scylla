@@ -194,13 +194,13 @@ private:
     template<typename Func>
     future<kmip_cmd> do_cmd(kmip_cmd, Func &&);
     template<typename Func>
-    future<int> do_cmd(KMIP_CMD*, con_ptr, Func&);
+    future<int> do_cmd(KMIP_CMD*, con_ptr, Func&, bool retain_connection_after_command = false);
 
     future<con_ptr> get_connection(KMIP_CMD*);
     future<con_ptr> get_connection(const sstring&);
     future<> clear_connections(const sstring& host);
 
-    void release(KMIP_CMD*, con_ptr);
+    void release(KMIP_CMD*, con_ptr, bool retain_connection = false);
 
     size_t max_pooled_connections_per_host() const {
         return _options.max_pooled_connections_per_host.value_or(def_max_pooled_connections_per_host);
@@ -477,23 +477,34 @@ public:
     kmip_data_list& operator=(kmip_data_list&&) = default;
 };
 
-void kmip_host::impl::release(KMIP_CMD* cmd, con_ptr cp) {
+/**
+ * Clears and releases a connection cp. Release connection after.
+ * If retain_connection is true, the connection is only cleared of command data and 
+ * can be reused by caller, otherwise it is either added to the connection pool
+ * or dropped.
+*/
+void kmip_host::impl::release(KMIP_CMD* cmd, con_ptr cp, bool retain_connection) {
     auto i = _host_connections.find(cp->host());
     userdata u;
     u.host = i->first.c_str();
     if (cmd) {
         KMIP_CMD_set_userdata(cmd, u.ptr);
     }
-    if (is_current_host(i->first) && max_pooled_connections_per_host() > i->second.size()) {
+    if (!retain_connection && is_current_host(i->first) && max_pooled_connections_per_host() > i->second.size()) {
         i->second.emplace_back(std::move(cp));
     }
 }
 
+/**
+ * Run a function on a KMIP command using connection cp. Release connection after.
+ * If retain_connection_after_command is true, the connection is only cleared of command data and 
+ * can be reused by caller.
+*/
 template<typename Func>
-future<int> kmip_host::impl::do_cmd(KMIP_CMD* cmd, con_ptr cp, Func& f) {
+future<int> kmip_host::impl::do_cmd(KMIP_CMD* cmd, con_ptr cp, Func& f, bool retain_connection_after_command) {
     cp->attach(cmd);
 
-    return repeat_until_value([this, cmd, &f, cp] {
+    return repeat_until_value([this, cmd, &f, cp, retain_connection_after_command] {
         int res = f(cmd);
         switch (res) {
         case KMIP_ERROR_RETRY:
@@ -511,7 +522,7 @@ future<int> kmip_host::impl::do_cmd(KMIP_CMD* cmd, con_ptr cp, Func& f) {
                 });
             });
         case 0:
-            release(cmd, cp);
+            release(cmd, cp, retain_connection_after_command);
             return make_ready_future<opt_int>(res);
         default:
             // error. connection is dicarded. close it.
@@ -617,11 +628,11 @@ future<kmip_host::impl::con_ptr> kmip_host::impl::get_connection(const sstring& 
             return KMIP_CMD_query(cmd, const_cast<int *>(query_options.data()), unsigned(query_options.size()));
         };
         // when/if this succeeds, it will push the connection onto the available stack
-        auto f = do_cmd(cmd, cp, connection_query);
-        return f.then([this, host, cmd = std::move(cmd)](int res) {
+        auto f = do_cmd(cmd, cp, connection_query, true /* keep cp */);
+        return f.then([this, host, cmd = std::move(cmd), cp](int res) {
             kmip_chk(res, cmd);
             kmip_log.trace("{}: connected {}", *this, host);
-            return get_connection(host);
+            return cp;
         });
     });
 }
