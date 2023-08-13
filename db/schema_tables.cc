@@ -15,7 +15,6 @@
 #include "partition_slice_builder.hh"
 #include "dht/i_partitioner.hh"
 #include "system_keyspace.hh"
-#include "query_context.hh"
 #include "query-result-set.hh"
 #include "query-result-writer.hh"
 #include "schema/schema_builder.hh"
@@ -28,6 +27,7 @@
 #include "mutation_query.hh"
 #include "system_keyspace.hh"
 #include "system_distributed_keyspace.hh"
+#include "cql3/query_processor.hh"
 #include "cql3/cql3_type.hh"
 #include "cql3/functions/functions.hh"
 #include "cql3/functions/user_function.hh"
@@ -66,7 +66,6 @@
 #include "index/target_parser.hh"
 #include "lang/lua.hh"
 
-#include "db/query_context.hh"
 #include "idl/mutation.dist.hh"
 #include "idl/mutation.dist.impl.hh"
 #include "db/system_keyspace.hh"
@@ -155,7 +154,8 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
     std::map<table_id, schema_mutations>&& tables_after,
     std::map<table_id, schema_mutations>&& views_before,
     std::map<table_id, schema_mutations>&& views_after,
-    bool reload);
+    bool reload,
+    bool has_tablet_mutations);
 
 struct [[nodiscard]] user_types_to_drop final {
     seastar::noncopyable_function<future<> ()> drop;
@@ -1330,18 +1330,11 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, shar
     auto new_aggregates = co_await read_schema_for_keyspaces(proxy, AGGREGATES, keyspaces);
     auto new_scylla_aggregates = co_await read_schema_for_keyspaces(proxy, SCYLLA_AGGREGATES, keyspaces);
 
-    if (has_tablet_mutations) {
-        slogger.info("Tablet metadata changed");
-        co_await proxy.local().get_db().invoke_on_all([&] (replica::database& db) -> future<> {
-            co_await db.get_notifier().update_tablet_metadata();
-        });
-    }
-
     std::set<sstring> keyspaces_to_drop = co_await merge_keyspaces(proxy, std::move(old_keyspaces), std::move(new_keyspaces));
     auto types_to_drop = co_await merge_types(proxy, std::move(old_types), std::move(new_types));
     co_await merge_tables_and_views(proxy, sys_ks,
         std::move(old_column_families), std::move(new_column_families),
-        std::move(old_views), std::move(new_views), reload);
+        std::move(old_views), std::move(new_views), reload, has_tablet_mutations);
     co_await merge_functions(proxy, std::move(old_functions), std::move(new_functions));
     co_await merge_aggregates(proxy, std::move(old_aggregates), std::move(new_aggregates), std::move(old_scylla_aggregates), std::move(new_scylla_aggregates));
     co_await types_to_drop.drop();
@@ -1487,7 +1480,8 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
     std::map<table_id, schema_mutations>&& tables_after,
     std::map<table_id, schema_mutations>&& views_before,
     std::map<table_id, schema_mutations>&& views_after,
-    bool reload)
+    bool reload,
+    bool has_tablet_mutations)
 {
     auto tables_diff = diff_table_or_view(proxy, std::move(tables_before), std::move(tables_after), reload, [&] (schema_mutations sm, schema_diff_side) {
         return create_table_from_mutations(proxy, std::move(sm));
@@ -1545,6 +1539,16 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
         auto& s = *dt.schema.get();
         return replica::database::drop_table_on_all_shards(db, sys_ks, s.ks_name(), s.cf_name());
     });
+
+    if (has_tablet_mutations) {
+        slogger.info("Tablet metadata changed");
+        // We must do it after tables are dropped so that table snapshot doesn't experience missing tablet map,
+        // and so that compaction groups are not destroyed altogether.
+        // We must also do it before tables are created so that new tables see the tablet map.
+        co_await db.invoke_on_all([&] (replica::database& db) -> future<> {
+            co_await db.get_notifier().update_tablet_metadata();
+        });
+    }
 
     co_await db.invoke_on_all([&] (replica::database& db) -> future<> {
         // In order to avoid possible races we first create the tables and only then the views.
@@ -1935,8 +1939,8 @@ static seastar::future<shared_ptr<cql3::functions::user_function>> create_func(r
                 std::move(body), language, std::move(return_type),
                 row.get_nonnull<bool>("called_on_null_input"), std::move(ctx));
     } else if (language == "wasm") {
-        wasm::context ctx{qctx->qp().wasm_engine(), name.name, qctx->qp().wasm_instance_cache(), db.get_config().wasm_udf_yield_fuel(), db.get_config().wasm_udf_total_fuel()};
-        co_await wasm::precompile(qctx->qp().alien_runner(), ctx, arg_names, body);
+        wasm::context ctx(db.wasm(), name.name, db.get_config().wasm_udf_yield_fuel(), db.get_config().wasm_udf_total_fuel());
+        co_await db.wasm().precompile(ctx, arg_names, body);
         co_return ::make_shared<cql3::functions::user_function>(std::move(name), std::move(arg_types), std::move(arg_names),
                 std::move(body), language, std::move(return_type),
                 row.get_nonnull<bool>("called_on_null_input"), std::move(ctx));
@@ -2004,7 +2008,7 @@ static void drop_cached_func(replica::database& db, const query::result_set_row&
         cql3::functions::function_name name{
             row.get_nonnull<sstring>("keyspace_name"), row.get_nonnull<sstring>("function_name")};
         auto arg_types = read_arg_types(db, row, name.keyspace);
-        qctx->qp().wasm_instance_cache().remove(name, arg_types);
+        db.wasm().remove(name, arg_types);
     }
 }
 

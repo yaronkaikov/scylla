@@ -1002,10 +1002,20 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             //This starts the update loop - but no real update happens until the data accessor is not initialized.
             sl_controller.local().update_from_distributed_data(std::chrono::seconds(10));
 
+            std::optional<wasm::startup_context> wasm_ctx;
+            if (cfg->enable_user_defined_functions() && cfg->check_experimental(db::experimental_features_t::feature::UDF)) {
+                wasm_ctx.emplace(*cfg, dbcfg);
+            }
+
+            static sharded<wasm::manager> wasm;
+            wasm.start(std::ref(wasm_ctx)).get();
+            // don't stop for real until query_processor stops
+            auto stop_wasm = defer_verbose_shutdown("wasm", [] { wasm.invoke_on_all(&wasm::manager::stop).get(); });
+
             supervisor::notify("starting database");
             debug::the_database = &db;
             db.start(std::ref(*cfg), dbcfg, std::ref(mm_notifier), std::ref(feature_service), std::ref(token_metadata),
-                    std::ref(cm), std::ref(sstm), std::ref(sst_dir_semaphore), utils::cross_shard_barrier()).get();
+                    std::ref(cm), std::ref(sstm), std::ref(wasm), std::ref(sst_dir_semaphore), utils::cross_shard_barrier()).get();
             auto stop_database_and_sstables = defer_verbose_shutdown("database", [&db] {
                 // #293 - do not stop anything - not even db (for real)
                 //return db.stop();
@@ -1070,12 +1080,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                                                      std::chrono::duration_cast<std::chrono::milliseconds>(cql3::prepared_statements_cache::entry_expiry));
             auth_prep_cache_config.refresh = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
 
-            std::optional<wasm::startup_context> wasm_ctx;
-            if (cfg->enable_user_defined_functions() && cfg->check_experimental(db::experimental_features_t::feature::UDF)) {
-                wasm_ctx.emplace(*cfg, dbcfg);
-            }
-
-            qp.start(std::ref(proxy), std::move(local_data_dict), std::ref(mm_notifier), qp_mcfg, std::ref(cql_config), std::move(auth_prep_cache_config), std::move(wasm_ctx)).get();
+            qp.start(std::ref(proxy), std::move(local_data_dict), std::ref(mm_notifier), qp_mcfg, std::ref(cql_config), std::move(auth_prep_cache_config), std::ref(wasm)).get();
 
             supervisor::notify("starting lifecycle notifier");
             lifecycle_notifier.start().get();
@@ -1256,13 +1261,25 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     stop_signal.as_local_abort_source(), raft_gr.local(), messaging,
                     gossiper.local(), feature_service.local(), sys_ks.local(), group0_client};
 
+            distributed<service::tablet_allocator> tablet_allocator;
+            if (cfg->check_experimental(db::experimental_features_t::feature::TABLETS) &&
+                !cfg->check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES)) {
+                    startlog.error("Bad configuration: The consistent-topology-changes feature has to be enabled if tablets feature is enabled");
+                    throw bad_configuration_error();
+            }
+            tablet_allocator.start(std::ref(mm_notifier), std::ref(db)).get();
+            auto stop_tablet_allocator = defer_verbose_shutdown("tablet allocator", [&tablet_allocator] {
+                tablet_allocator.stop().get();
+            });
+
             supervisor::notify("initializing storage service");
             debug::the_storage_service = &ss;
             ss.start(std::ref(stop_signal.as_sharded_abort_source()),
                 std::ref(db), std::ref(gossiper), std::ref(sys_ks),
                 std::ref(feature_service), std::ref(mm), std::ref(token_metadata), std::ref(erm_factory),
                 std::ref(messaging), std::ref(repair),
-                std::ref(stream_manager), std::ref(lifecycle_notifier), std::ref(bm), std::ref(snitch), std::ref(sl_controller)).get();
+                std::ref(stream_manager), std::ref(lifecycle_notifier), std::ref(bm), std::ref(snitch),
+                std::ref(tablet_allocator), std::ref(sl_controller)).get();
 
             auto stop_storage_service = defer_verbose_shutdown("storage_service", [&] {
                 ss.stop().get();
@@ -1274,18 +1291,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             forward_service.start(std::ref(messaging), std::ref(proxy), std::ref(db), std::ref(token_metadata)).get();
             auto stop_forward_service_handlers = defer_verbose_shutdown("forward service", [&forward_service] {
                 forward_service.stop().get();
-            });
-
-            distributed<service::tablet_allocator> tablet_allocator;
-            if (cfg->check_experimental(db::experimental_features_t::feature::TABLETS)) {
-                if (!cfg->check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES)) {
-                    startlog.error("Bad configuration: The consistent-topology-changes feature has to be enabled if tablets feature is enabled");
-                    throw bad_configuration_error();
-                }
-                tablet_allocator.start(std::ref(mm_notifier), std::ref(db)).get();
-            }
-            auto stop_tablet_allocator = defer_verbose_shutdown("tablet allocator", [&tablet_allocator] {
-                tablet_allocator.stop().get();
             });
 
             supervisor::notify("starting migration manager");

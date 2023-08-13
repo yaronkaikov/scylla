@@ -40,6 +40,7 @@
 #include "repair/id.hh"
 #include "raft/server.hh"
 #include "service/topology_state_machine.hh"
+#include "service/tablet_allocator.hh"
 
 class node_ops_cmd_request;
 class node_ops_cmd_response;
@@ -169,6 +170,7 @@ public:
         endpoint_lifecycle_notifier& elc_notif,
         sharded<db::batchlog_manager>& bm,
         sharded<locator::snitch_ptr>& snitch,
+        sharded<service::tablet_allocator>& tablet_allocator,
         sharded<qos::service_level_controller>&);
 
     // Needed by distributed<>
@@ -493,6 +495,7 @@ private:
     future<> replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept;
     sharded<db::system_keyspace>& _sys_ks;
     locator::snitch_signal_slot_t _snitch_reconfigure;
+    sharded<service::tablet_allocator>& _tablet_allocator;
 private:
     /**
      * Handle node bootstrap

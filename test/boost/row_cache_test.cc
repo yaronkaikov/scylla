@@ -4169,7 +4169,8 @@ SEASTAR_TEST_CASE(row_cache_is_populated_using_compacting_sstable_reader) {
             .build();
         mm.announce(
             service::prepare_new_column_family_announcement(mm.get_storage_proxy(), s, api::new_timestamp()).get(),
-            mm.start_group0_operation().get()
+            mm.start_group0_operation().get(),
+            ""
         ).get();
 
         replica::table& t = db.find_column_family(ks_name, table_name);
@@ -4396,7 +4397,7 @@ SEASTAR_TEST_CASE(test_populating_cache_with_expired_and_nonexpired_tombstones) 
         env.execute_cql(format(
             "CREATE TABLE {}.{} (pk int, ck int, PRIMARY KEY(pk, ck));", ks_name, table_name)).get();
 
-        env.require_table_exists(ks_name, table_name).get();
+        BOOST_REQUIRE(env.local_db().has_schema(ks_name, table_name));
 
         replica::table& t = env.local_db().find_column_family(ks_name, table_name);
         schema_ptr s = t.schema();

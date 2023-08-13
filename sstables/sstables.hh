@@ -390,7 +390,9 @@ public:
 
     // Delete the sstable by unlinking all sstable files
     // Ignores all errors.
-    future<> unlink() noexcept;
+    // Caller may pass sync_dir::no for batching multiple deletes in the same directory,
+    // and make sure the directory is sync'ed on or after the last call.
+    future<> unlink(storage::sync_dir sync = storage::sync_dir::yes) noexcept;
 
     db::large_data_handler& get_large_data_handler() {
         return _large_data_handler;
@@ -410,6 +412,10 @@ public:
 
     utils::observer<sstable&> add_on_closed_handler(std::function<void (sstable&)> on_closed_handler) noexcept {
         return _on_closed.observe(on_closed_handler);
+    }
+
+    utils::observer<sstable&> add_on_delete_handler(std::function<void (sstable&)> on_delete_handler) noexcept {
+        return _on_delete.observe(on_delete_handler);
     }
 
     template<typename Func, typename... Args>
@@ -503,6 +509,7 @@ private:
     std::optional<dht::decorated_key> _last;
     run_id _run_identifier;
     utils::observable<sstable&> _on_closed;
+    utils::observable<sstable&> _on_delete;
 
     lw_shared_ptr<file_input_stream_history> _single_partition_history = make_lw_shared<file_input_stream_history>();
     lw_shared_ptr<file_input_stream_history> _partition_range_history = make_lw_shared<file_input_stream_history>();
@@ -965,6 +972,8 @@ public:
 future<> remove_table_directory_if_has_no_snapshots(fs::path table_dir);
 
 // similar to sstable::unlink, but works on a TOC file name
-future<> remove_by_toc_name(sstring sstable_toc_name);
+// Caller may pass sync_dir::no for batching multiple deletes in the same directory,
+// and make sure the directory is sync'ed on or after the last call.
+future<> remove_by_toc_name(sstring sstable_toc_name, storage::sync_dir sync = storage::sync_dir::yes);
 
 } // namespace sstables

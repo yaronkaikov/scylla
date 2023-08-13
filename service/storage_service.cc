@@ -116,6 +116,7 @@ storage_service::storage_service(abort_source& abort_source,
     endpoint_lifecycle_notifier& elc_notif,
     sharded<db::batchlog_manager>& bm,
     sharded<locator::snitch_ptr>& snitch,
+    sharded<service::tablet_allocator>& tablet_allocator,
     sharded<qos::service_level_controller>& sl_controller)
         : _abort_source(abort_source)
         , _feature_service(feature_service)
@@ -138,6 +139,7 @@ storage_service::storage_service(abort_source& abort_source,
                 return ss.snitch_reconfigured();
             });
         })
+        , _tablet_allocator(tablet_allocator)
 {
     register_metrics();
 
@@ -803,6 +805,8 @@ class topology_coordinator {
 
     raft_topology_cmd_handler_type _raft_topology_cmd_handler;
 
+    tablet_allocator& _tablet_allocator;
+
     std::chrono::milliseconds _ring_delay;
 
     using drop_guard_and_retake = bool_class<class retake_guard_tag>;
@@ -1042,6 +1046,20 @@ class topology_coordinator {
         slogger.info("raft topology: removing node {} from group 0 configuration...", id);
         co_await _group0.remove_from_raft_config(id);
         slogger.info("raft topology: node {} removed from group 0 configuration", id);
+    }
+
+    future<> step_down_as_nonvoter() {
+        // Become a nonvoter which triggers a leader stepdown.
+        co_await _group0.become_nonvoter();
+        if (_raft.is_leader()) {
+            co_await _raft.wait_for_state_change(&_as);
+        }
+
+        // throw term_changed_error so we leave the coordinator loop instead of trying another
+        // read_barrier which may fail with an (harmless, but unnecessary and annoying) error
+        // telling us we're not in the configuration anymore (we'll get removed by the new
+        // coordinator)
+        throw term_changed_error{};
     }
 
     struct bootstrapping_info {
@@ -1415,7 +1433,7 @@ class topology_coordinator {
         auto [preempt, new_guard] = should_preempt_balancing(std::move(guard));
         guard = std::move(new_guard);
         if (!preempt) {
-            auto plan = co_await balance_tablets(get_token_metadata_ptr());
+            auto plan = co_await _tablet_allocator.balance_tablets(get_token_metadata_ptr());
             co_await generate_migration_updates(updates, guard, plan);
         }
 
@@ -1608,6 +1626,42 @@ class topology_coordinator {
                     node = std::move(f).get();
                 }
 
+                if (_group0.is_member(node.id, true)) {
+                    // If we remove a node, we make it a non-voter early to improve availability in some situations.
+                    // There is no downside to it because the removed node is already considered dead by us.
+                    //
+                    // FIXME: removenode may be aborted and the already dead node can be resurrected. We should consider
+                    // restoring its voter state on the recovery path.
+                    if (node.rs->state == node_state::removing) {
+                        co_await _group0.make_nonvoter(node.id);
+                    }
+
+                    // If we decommission a node when the number of nodes is even, we make it a non-voter early.
+                    // All majorities containing this node will remain majorities when we make this node a non-voter
+                    // and remove it from the set because the required size of a majority decreases.
+                    //
+                    // FIXME: when a node restarts and notices it's a non-voter, it will become a voter again. If the
+                    // node restarts during a decommission, and we want the decommission to continue (e.g. because it's
+                    // at a finishing non-abortable step), we must ensure that the node doesn't become a voter.
+                    if (node.rs->state == node_state::decommissioning
+                            && raft::configuration::voter_count(_group0.group0_server().get_configuration().current) % 2 == 0) {
+                        if (node.id == _raft.id()) {
+                            slogger.info("raft topology: coordinator is decommissioning and becomes a non-voter; "
+                                         "giving up leadership");
+                            co_await step_down_as_nonvoter();
+                        } else {
+                            co_await _group0.make_nonvoter(node.id);
+                        }
+                    }
+                }
+                if (node.rs->state == node_state::replacing) {
+                    // We make a replaced node a non-voter early, just like a removed node.
+                    auto replaced_node_id = parse_replaced_node(node);
+                    if (_group0.is_member(replaced_node_id, true)) {
+                        co_await _group0.make_nonvoter(replaced_node_id);
+                    }
+                }
+
                 raft_topology_cmd cmd{raft_topology_cmd::command::stream_ranges};
                 if (node.rs->state == node_state::removing) {
                     // tell all nodes to stream data of the removed node to new range owners
@@ -1682,6 +1736,9 @@ class topology_coordinator {
                 }
                     break;
                 case node_state::replacing: {
+                    auto replaced_node_id = parse_replaced_node(node);
+                    co_await remove_from_group0(replaced_node_id);
+
                     topology_mutation_builder builder1(node.guard.write_timestamp());
                     // Move new node to 'normal'
                     builder1.del_transition_state()
@@ -1691,7 +1748,7 @@ class topology_coordinator {
 
                     // Move old node to 'left'
                     topology_mutation_builder builder2(node.guard.write_timestamp());
-                    builder2.with_node(parse_replaced_node(node))
+                    builder2.with_node(replaced_node_id)
                             .del("tokens")
                             .set("node_state", node_state::left);
                     co_await update_topology_state(take_guard(std::move(node)), {builder1.build(), builder2.build()},
@@ -1820,17 +1877,7 @@ class topology_coordinator {
                     // Someone else needs to coordinate the rest of the decommission process,
                     // because the decommissioning node is going to shut down in the middle of this state.
                     slogger.info("raft topology: coordinator is decommissioning; giving up leadership");
-                    // Become a nonvoter which triggers a leader stepdown.
-                    co_await _group0.become_nonvoter();
-                    if (_raft.is_leader()) {
-                        co_await _raft.wait_for_state_change(&_as);
-                    }
-
-                    // throw term_changed_error so we leave the coordinator loop instead of trying another
-                    // read_barrier which may fail with an (harmless, but unnecessary and annoying) error
-                    // telling us we're not in the configuration anymore (we'll get removed by the new
-                    // coordinator)
-                    throw term_changed_error{};
+                    co_await step_down_as_nonvoter();
 
                     // Note: if we restart after this point and become a voter
                     // and then a coordinator again, it's fine - we'll just repeat this step.
@@ -1915,11 +1962,13 @@ public:
             db::system_keyspace& sys_ks, replica::database& db, service::raft_group0& group0,
             service::topology_state_machine& topo_sm, abort_source& as, raft::server& raft_server,
             raft_topology_cmd_handler_type raft_topology_cmd_handler,
+            tablet_allocator& tablet_allocator,
             std::chrono::milliseconds ring_delay)
         : _sys_dist_ks(sys_dist_ks), _messaging(messaging), _shared_tm(shared_tm), _sys_ks(sys_ks), _db(db)
         , _group0(group0), _address_map(_group0.address_map()), _topo_sm(topo_sm), _as(as)
         , _raft(raft_server), _term(raft_server.get_current_term())
         , _raft_topology_cmd_handler(std::move(raft_topology_cmd_handler))
+        , _tablet_allocator(tablet_allocator)
         , _ring_delay(ring_delay)
     {}
 
@@ -1930,7 +1979,7 @@ future<bool> topology_coordinator::maybe_start_tablet_migration(group0_guard gua
     slogger.debug("raft topology: Evaluating tablet balance");
 
     auto tm = get_token_metadata_ptr();
-    auto plan = co_await balance_tablets(tm);
+    auto plan = co_await _tablet_allocator.balance_tablets(tm);
     if (plan.empty()) {
         slogger.debug("raft topology: Tablets are balanced");
         co_return false;
@@ -2006,6 +2055,11 @@ future<> storage_service::raft_state_monitor_fiber(raft::server& raft, cdc::gene
                     as->request_abort(); // we are no longer a leader, so abort the coordinator
                     co_await std::exchange(_topology_change_coordinator, make_ready_future<>());
                     as = std::nullopt;
+                    try {
+                        _tablet_allocator.local().on_leadership_lost();
+                    } catch (...) {
+                        slogger.error("tablet_allocator::on_leadership_lost() failed: {}", std::current_exception());
+                    }
                 }
             }
             // We are the leader now but that can change any time!
@@ -2015,7 +2069,9 @@ future<> storage_service::raft_state_monitor_fiber(raft::server& raft, cdc::gene
                 std::make_unique<topology_coordinator>(
                     sys_dist_ks, _messaging.local(), _shared_token_metadata,
                     _sys_ks.local(), _db.local(), *_group0, _topology_state_machine, *as, raft,
-                    std::bind_front(&storage_service::raft_topology_cmd_handler, this), get_ring_delay()),
+                    std::bind_front(&storage_service::raft_topology_cmd_handler, this),
+                    _tablet_allocator.local(),
+                    get_ring_delay()),
                 [] (std::unique_ptr<topology_coordinator>& coordinator) { return coordinator->run(); });
         }
     } catch (...) {

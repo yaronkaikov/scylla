@@ -159,7 +159,8 @@ private:
     per_table_history_maps _repair_history_maps;
     tombstone_gc_state _tombstone_gc_state;
 private:
-    future<compaction_stats_opt> perform_task(shared_ptr<compaction::compaction_task_executor>);
+    // Requires task->_compaction_state.gate to be held and task to be registered in _tasks.
+    future<compaction_stats_opt> perform_task(shared_ptr<compaction::compaction_task_executor> task);
 
     // parent_info set to std::nullopt means that task manager should not register this task executor.
     // To create a task manager task with no parent, parent_info argument should contain empty task_info.
@@ -316,6 +317,8 @@ private:
 
     // Add sst to or remove it from the respective compaction_state.sstables_requiring_cleanup set.
     bool update_sstable_cleanup_state(table_state& t, const sstables::shared_sstable& sst, const dht::token_range_vector& sorted_owned_ranges);
+
+    future<> on_compaction_completion(table_state& t, sstables::compaction_completion_desc desc, sstables::offstrategy offstrategy);
 public:
     // Submit a table to be upgraded and wait for its termination.
     future<> perform_sstable_upgrade(owned_ranges_ptr sorted_owned_ranges, compaction::table_state& t, bool exclude_current_version, std::optional<tasks::task_info> info = std::nullopt);
@@ -422,6 +425,7 @@ public:
 
     // checks if the sstable is in the respective compaction_state.sstables_requiring_cleanup set.
     bool requires_cleanup(table_state& t, const sstables::shared_sstable& sst) const;
+    const std::unordered_set<sstables::shared_sstable>& sstables_requiring_cleanup(table_state& t) const;
 
     friend class compacting_sstable_registration;
     friend class compaction_weight_registration;
@@ -448,7 +452,8 @@ public:
                     // counted in compaction_manager::stats::pending_tasks
         active,     // task initiated active compaction, may alternate with pending
                     // counted in compaction_manager::stats::active_tasks
-        done,       // task completed successfully (may transition only to state::none)
+        done,       // task completed successfully (may transition only to state::none, or
+                    // state::pending for regular compaction)
                     // counted in compaction_manager::stats::completed_tasks
         postponed,  // task was postponed (may transition only to state::none)
                     // represented by the postponed_compactions metric
@@ -563,6 +568,13 @@ public:
 
     sstables::compaction_stopped_exception make_compaction_stopped_exception() const;
 
+    template<typename TaskExecutor, typename... Args>
+    requires std::is_base_of_v<compaction_task_executor, TaskExecutor> &&
+            std::is_base_of_v<compaction_task_impl, TaskExecutor> &&
+    requires (compaction_manager& cm, Args&&... args) {
+        {TaskExecutor(cm, std::forward<Args>(args)...)} -> std::same_as<TaskExecutor>;
+    }
+    friend future<compaction_manager::compaction_stats_opt> compaction_manager::perform_compaction(std::optional<tasks::task_info> parent_info, Args&&... args);
     friend future<compaction_manager::compaction_stats_opt> compaction_manager::perform_task(shared_ptr<compaction_task_executor> task);
     friend fmt::formatter<compaction_task_executor>;
 };

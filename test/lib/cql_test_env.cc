@@ -44,7 +44,6 @@
 #include "db/batchlog_manager.hh"
 #include "schema/schema_builder.hh"
 #include "test/lib/tmpdir.hh"
-#include "db/query_context.hh"
 #include "test/lib/test_services.hh"
 #include "test/lib/log.hh"
 #include "unit_test_service_levels_accessor.hh"
@@ -148,6 +147,7 @@ private:
     service::raft_group0_client& _group0_client;
     sharded<service::raft_group_registry>& _group0_registry;
     sharded<db::system_keyspace>& _sys_ks;
+    sharded<service::tablet_allocator>& _tablet_allocator;
 
 private:
     struct core_local_state {
@@ -204,7 +204,8 @@ public:
             sharded<gms::gossiper>& gossiper,
             service::raft_group0_client& client,
             sharded<service::raft_group_registry>& group0_registry,
-            sharded<db::system_keyspace>& sys_ks)
+            sharded<db::system_keyspace>& sys_ks,
+            sharded<service::tablet_allocator>& tablet_allocator)
             : _db(db)
             , _feature_service(feature_service)
             , _sstm(sstm)
@@ -221,6 +222,7 @@ public:
             , _group0_client(client)
             , _group0_registry(group0_registry)
             , _sys_ks(sys_ks)
+            , _tablet_allocator(tablet_allocator)
     {
         adjust_rlimit();
     }
@@ -311,32 +313,7 @@ public:
         auto s = builder.build(schema_builder::compact_storage::no);
         auto group0_guard = co_await _mm.local().start_group0_operation();
         auto ts = group0_guard.write_timestamp();
-        co_return co_await _mm.local().announce(co_await service::prepare_new_column_family_announcement(_proxy.local(), s, ts), std::move(group0_guard));
-    }
-
-    virtual future<> require_keyspace_exists(const sstring& ks_name) override {
-        auto& db = _db.local();
-        assert(db.has_keyspace(ks_name));
-        return make_ready_future<>();
-    }
-
-    virtual future<> require_table_exists(const sstring& ks_name, const sstring& table_name) override {
-        auto& db = _db.local();
-        assert(db.has_schema(ks_name, table_name));
-        return make_ready_future<>();
-    }
-
-    virtual future<> require_table_exists(std::string_view qualified_name) override {
-        auto dot_pos = qualified_name.find_first_of('.');
-        assert(dot_pos != std::string_view::npos && dot_pos != 0 && dot_pos != qualified_name.size() - 1);
-        assert(_db.local().has_schema(qualified_name.substr(0, dot_pos), qualified_name.substr(dot_pos + 1)));
-        return make_ready_future<>();
-    }
-
-    virtual future<> require_table_does_not_exist(const sstring& ks_name, const sstring& table_name) override {
-        auto& db = _db.local();
-        assert(!db.has_schema(ks_name, table_name));
-        return make_ready_future<>();
+        co_return co_await _mm.local().announce(co_await service::prepare_new_column_family_announcement(_proxy.local(), s, ts), std::move(group0_guard), "");
     }
 
     virtual future<> require_column_has_value(const sstring& table_name,
@@ -444,6 +421,10 @@ public:
 
     virtual sharded<db::system_keyspace>& get_system_keyspace() override {
         return _sys_ks;
+    }
+
+    virtual sharded<service::tablet_allocator>& get_tablet_allocator() override {
+        return _tablet_allocator;
     }
 
     virtual sharded<service::storage_proxy>& get_storage_proxy() override {
@@ -658,7 +639,17 @@ public:
             auto stop_sl_controller = defer([&sl_controller] { sl_controller.stop().get(); });
             sl_controller.invoke_on_all(&qos::service_level_controller::start).get();
 
-            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata), std::ref(cm), std::ref(sstm), std::ref(sst_dir_semaphore), utils::cross_shard_barrier()).get();
+            std::optional<wasm::startup_context> wasm_ctx;
+            if (cfg->enable_user_defined_functions() && cfg->check_experimental(db::experimental_features_t::feature::UDF)) {
+                wasm_ctx.emplace(*cfg, dbcfg);
+            }
+
+            sharded<wasm::manager> wasm;
+            wasm.start(std::ref(wasm_ctx)).get();
+            auto stop_wasm = defer([&wasm] { wasm.stop().get(); });
+
+
+            db.start(std::ref(*cfg), dbcfg, std::ref(mm_notif), std::ref(feature_service), std::ref(token_metadata), std::ref(cm), std::ref(sstm), std::ref(wasm), std::ref(sst_dir_semaphore), utils::cross_shard_barrier()).get();
             auto stop_db = defer([&db] {
                 db.stop().get();
             });
@@ -697,12 +688,7 @@ public:
                                                      std::chrono::duration_cast<std::chrono::milliseconds>(cql3::prepared_statements_cache::entry_expiry));
             auth_prep_cache_config.refresh = std::chrono::milliseconds(cfg->permissions_update_interval_in_ms());
 
-            std::optional<wasm::startup_context> wasm_ctx;
-            if (cfg->enable_user_defined_functions() && cfg->check_experimental(db::experimental_features_t::feature::UDF)) {
-                wasm_ctx.emplace(*cfg, dbcfg);
-            }
-
-            qp.start(std::ref(proxy), std::move(local_data_dict), std::ref(mm_notif), qp_mcfg, std::ref(cql_config), auth_prep_cache_config, wasm_ctx).get();
+            qp.start(std::ref(proxy), std::move(local_data_dict), std::ref(mm_notif), qp_mcfg, std::ref(cql_config), auth_prep_cache_config, std::ref(wasm)).get();
             auto stop_qp = defer([&qp] { qp.stop().get(); });
 
             sharded<service::endpoint_lifecycle_notifier> elc_notif;
@@ -850,6 +836,7 @@ public:
                 std::ref(elc_notif),
                 std::ref(bm),
                 std::ref(snitch),
+                std::ref(the_tablet_allocator),
                 std::ref(sl_controller)).get();
             auto stop_storage_service = defer([&ss] { ss.stop().get(); });
 
@@ -877,7 +864,6 @@ public:
 
             group0_client.init().get();
             auto stop_system_keyspace = defer([&sys_ks] {
-                db::qctx = {};
                 sys_ks.invoke_on_all(&db::system_keyspace::shutdown).get();
             });
 
@@ -1006,7 +992,7 @@ public:
 
             notify_set.notify_all(configurable::system_state::started).get();
 
-            single_node_cql_env env(db, feature_service, sstm, proxy, qp, auth_service, view_builder, view_update_generator, mm_notif, mm, std::ref(sl_controller), bm, gossiper, group0_client, raft_gr, sys_ks);
+            single_node_cql_env env(db, feature_service, sstm, proxy, qp, auth_service, view_builder, view_update_generator, mm_notif, mm, std::ref(sl_controller), bm, gossiper, group0_client, raft_gr, sys_ks, the_tablet_allocator);
             env.start().get();
             auto stop_env = defer([&env] { env.stop().get(); });
 

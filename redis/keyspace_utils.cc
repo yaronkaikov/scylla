@@ -16,7 +16,6 @@
 #include <seastar/core/future.hh>
 #include <memory>
 #include "log.hh"
-#include "db/query_context.hh"
 #include "auth/service.hh"
 #include "service/migration_manager.hh"
 #include "service/storage_proxy.hh"
@@ -203,7 +202,7 @@ future<> create_keyspace_if_not_exists_impl(seastar::sharded<service::storage_pr
         }
 
         if (!ks_mutations.empty()) {
-            co_await mml.announce(std::move(ks_mutations), std::move(group0_guard));
+            co_await mml.announce(std::move(ks_mutations), std::move(group0_guard), "keyspace-utils: create keyspaces for redis");
         }
     }
 
@@ -228,7 +227,7 @@ future<> create_keyspace_if_not_exists_impl(seastar::sharded<service::storage_pr
 
     // create default databases for redis.
     if (!table_mutations.empty()) {
-        co_await mml.announce(std::move(table_mutations), std::move(group0_guard));
+        co_await mml.announce(std::move(table_mutations), std::move(group0_guard), "keyspace-utils: create default databases for redis");
     }
 }
 

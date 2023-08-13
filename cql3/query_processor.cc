@@ -59,7 +59,7 @@ static service::query_state query_state_for_internal_call() {
     return {service::client_state::for_internal_calls(), empty_service_permit()};
 }
 
-query_processor::query_processor(service::storage_proxy& proxy, data_dictionary::database db, service::migration_notifier& mn, query_processor::memory_config mcfg, cql_config& cql_cfg, utils::loading_cache_config auth_prep_cache_cfg, std::optional<wasm::startup_context> wasm_ctx)
+query_processor::query_processor(service::storage_proxy& proxy, data_dictionary::database db, service::migration_notifier& mn, query_processor::memory_config mcfg, cql_config& cql_cfg, utils::loading_cache_config auth_prep_cache_cfg, wasm::manager& wasm)
         : _migration_subscriber{std::make_unique<migration_subscriber>(this)}
         , _proxy(proxy)
         , _db(db)
@@ -72,9 +72,7 @@ query_processor::query_processor(service::storage_proxy& proxy, data_dictionary:
         , _authorized_prepared_cache_config_action([this] { update_authorized_prepared_cache_config(); return make_ready_future<>(); })
         , _authorized_prepared_cache_update_interval_in_ms_observer(_db.get_config().permissions_update_interval_in_ms.observe(_auth_prepared_cache_cfg_cb))
         , _authorized_prepared_cache_validity_in_ms_observer(_db.get_config().permissions_validity_in_ms.observe(_auth_prepared_cache_cfg_cb))
-        , _wasm_engine(wasm_ctx ? std::move(wasm_ctx->engine) : nullptr)
-        , _wasm_instance_cache(wasm_ctx ? std::make_optional<wasm::instance_cache>(wasm_ctx->cache_size, wasm_ctx->instance_size, wasm_ctx->timer_period) : std::nullopt)
-        , _alien_runner(wasm_ctx ? std::move(wasm_ctx->alien_runner) : nullptr)
+        , _wasm(wasm)
         {
     namespace sm = seastar::metrics;
     namespace stm = statements;
@@ -484,8 +482,6 @@ future<> query_processor::stop_remote() {
 future<> query_processor::stop() {
     return _mnotifier.unregister_listener(_migration_subscriber.get()).then([this] {
         return _authorized_prepared_cache.stop().finally([this] { return _prepared_cache.stop(); });
-    }).then([this] {
-        return _wasm_instance_cache ? _wasm_instance_cache->stop() : make_ready_future<>();
     });
 }
 
@@ -968,9 +964,8 @@ query_processor::execute_schema_statement(const statements::schema_altering_stat
 
 future<std::string>
 query_processor::execute_thrift_schema_command(
-        std::function<future<std::vector<mutation>>(
-            data_dictionary::database, api::timestamp_type)
-        > prepare_schema_mutations) {
+        std::function<future<std::vector<mutation>>(data_dictionary::database, api::timestamp_type)> prepare_schema_mutations,
+        std::string_view description) {
     assert(this_shard_id() == 0);
 
     auto [remote_, holder] = remote();
@@ -978,7 +973,7 @@ query_processor::execute_thrift_schema_command(
     auto group0_guard = co_await mm.start_group0_operation();
     auto ts = group0_guard.write_timestamp();
 
-    co_await mm.announce(co_await prepare_schema_mutations(db(), ts), std::move(group0_guard));
+    co_await mm.announce(co_await prepare_schema_mutations(db(), ts), std::move(group0_guard), description);
 
     co_return std::string(db().get_version().to_sstring());
 }

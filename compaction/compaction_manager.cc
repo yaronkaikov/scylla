@@ -315,12 +315,6 @@ compaction_task_executor::compaction_task_executor(compaction_manager& mgr, tabl
 {}
 
 future<compaction_manager::compaction_stats_opt> compaction_manager::perform_task(shared_ptr<compaction_task_executor> task) {
-    gate::holder gate_holder = task->_compaction_state.gate.hold();
-    _tasks.push_back(task);
-    auto unregister_task = defer([this, task] {
-        _tasks.remove(task);
-        task->switch_state(compaction_task_executor::state::none);
-    });
     cmlog.debug("{}: started", *task);
 
     try {
@@ -345,6 +339,20 @@ future<compaction_manager::compaction_stats_opt> compaction_manager::perform_tas
     }
 
     co_return std::nullopt;
+}
+
+future<> compaction_manager::on_compaction_completion(table_state& t, sstables::compaction_completion_desc desc, sstables::offstrategy offstrategy) {
+    auto& cs = get_compaction_state(&t);
+    auto new_sstables = boost::copy_range<std::unordered_set<sstables::shared_sstable>>(desc.new_sstables);
+    for (const auto& sst : desc.old_sstables) {
+        if (!new_sstables.contains(sst)) {
+            cs.sstables_requiring_cleanup.erase(sst);
+        }
+    }
+    if (cs.sstables_requiring_cleanup.empty()) {
+        cs.owned_ranges_ptr = nullptr;
+    }
+    return t.on_compaction_completion(std::move(desc), offstrategy);
 }
 
 future<sstables::compaction_result> compaction_task_executor::compact_sstables_and_update_history(sstables::compaction_descriptor descriptor, sstables::compaction_data& cdata, on_replacement& on_replace, compaction_manager::can_purge_tombstones can_purge) {
@@ -388,7 +396,7 @@ future<sstables::compaction_result> compaction_task_executor::compact_sstables(s
         // - are not being compacted.
         on_replace.on_addition(desc.new_sstables);
         auto old_sstables = desc.old_sstables;
-        t.on_compaction_completion(std::move(desc), sstables::offstrategy::no).get();
+        _cm.on_compaction_completion(t, std::move(desc), sstables::offstrategy::no).get();
         on_replace.on_removal(old_sstables);
     };
 
@@ -530,6 +538,13 @@ requires (compaction_manager& cm, Args&&... args) {
 }
 future<compaction_manager::compaction_stats_opt> compaction_manager::perform_compaction(std::optional<tasks::task_info> parent_info, Args&&... args) {
     auto task_executor = seastar::make_shared<TaskExecutor>(*this, std::forward<Args>(args)...);
+    gate::holder gate_holder = task_executor->_compaction_state.gate.hold();
+    _tasks.push_back(task_executor);
+    auto unregister_task = defer([this, task_executor] {
+        _tasks.remove(task_executor);
+        task_executor->switch_state(compaction_task_executor::state::none);
+    });
+
     if (parent_info) {
         auto task = co_await get_task_manager_module().make_task(task_executor, parent_info.value());
         task->start();
@@ -1330,7 +1345,7 @@ private:
             .old_sstables = std::move(old_sstables),
             .new_sstables = std::move(reshape_candidates)
         };
-        co_await t.on_compaction_completion(std::move(completion_desc), sstables::offstrategy::yes);
+        co_await _cm.on_compaction_completion(t, std::move(completion_desc), sstables::offstrategy::yes);
 
         cleanup_new_unused_sstables_on_failure.cancel();
         if (err) {
@@ -1722,6 +1737,11 @@ bool compaction_manager::erase_sstable_cleanup_state(table_state& t, const sstab
 bool compaction_manager::requires_cleanup(table_state& t, const sstables::shared_sstable& sst) const {
     const auto& cs = get_compaction_state(&t);
     return cs.sstables_requiring_cleanup.contains(sst);
+}
+
+const std::unordered_set<sstables::shared_sstable>& compaction_manager::sstables_requiring_cleanup(table_state& t) const {
+    const auto& cs = get_compaction_state(&t);
+    return cs.sstables_requiring_cleanup;
 }
 
 future<> compaction_manager::perform_cleanup(owned_ranges_ptr sorted_owned_ranges, table_state& t, std::optional<tasks::task_info> info) {

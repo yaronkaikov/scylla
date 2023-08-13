@@ -376,14 +376,15 @@ future<> replicated_key_provider::do_initialize_tables(::replica::database& db, 
                     "org.apache.cassandra.locator.EverywhereStrategy",
                     {},
                     true);
-            co_await mm.announce(service::prepare_new_keyspace_announcement(db, ksm, ts), std::move(group0_guard));
+            co_await mm.announce(service::prepare_new_keyspace_announcement(db, ksm, ts), std::move(group0_guard), fmt::format("encryption at rest: create keyspace {}", KSNAME));
         } catch (exceptions::already_exists_exception&) {
         }
     }
     auto group0_guard = co_await mm.start_group0_operation();
     auto ts = group0_guard.write_timestamp();
     try {
-        co_await mm.announce(co_await service::prepare_new_column_family_announcement(mm.get_storage_proxy(), encrypted_keys_table(), ts), std::move(group0_guard));
+        co_await mm.announce(co_await service::prepare_new_column_family_announcement(mm.get_storage_proxy(), encrypted_keys_table(), ts), std::move(group0_guard),
+                             fmt::format("encryption at rest: create table {}.{}", KSNAME, TABLENAME));
     } catch (exceptions::already_exists_exception&) {
     }
     auto& ks = db.find_keyspace(KSNAME);
