@@ -17,6 +17,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/util/defer.hh>
+#include <seastar/net/dns.hh>
 
 #include <seastar/testing/test_case.hh>
 
@@ -145,7 +146,7 @@ SEASTAR_TEST_CASE(test_replicated_provider_many_tables) {
     co_await do_test_replicated_provider(100, 5);
 }
 
-SEASTAR_TEST_CASE(test_kmip_provider) {
+static future<> kmip_test_helper(const std::function<future<>(std::string_view, const tmpdir&)>& f) {
     // KMIP relies on a reachable server. We have two servers available for QA.
     // Make this test optional, since reachability of KMIP server below is not guaranteed.
     // Run test with ENABLE_KMIP_TEST=1 to actually test anything
@@ -160,20 +161,124 @@ SEASTAR_TEST_CASE(test_kmip_provider) {
 
     // TODO: can we have a better reference to resource dir?
     auto resourcedir = "./test/resource/certs";
-    // QA test server. Same as used in dtests.
-    auto host = "52.21.171.245";
-    auto yaml = fmt::format(R"foo(
-        kmip_hosts:
-            kmip_test:
-                hosts: {0}
-                certificate: {1}/scylla.pem
-                keyfile: {1}/scylla.pem
-                truststore: {1}/cacert.pem
-                priority_string: SECURE128:+RSA:-VERS-TLS1.0:-ECDHE-ECDSA
-                )foo"
-        , host, resourcedir
-    );
-    co_await test_provider("'key_provider': 'KmipKeyProviderFactory', 'kmip_host': 'kmip_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+
+    co_await f(resourcedir, tmp);
+}
+
+SEASTAR_TEST_CASE(test_kmip_provider) {
+    co_await kmip_test_helper([](std::string_view resourcedir, const tmpdir& tmp) -> future<> {
+        // QA test server. Same as used in dtests.
+        auto host = "52.21.171.245";
+        auto yaml = fmt::format(R"foo(
+            kmip_hosts:
+                kmip_test:
+                    hosts: {0}
+                    certificate: {1}/scylla.pem
+                    keyfile: {1}/scylla.pem
+                    truststore: {1}/cacert.pem
+                    priority_string: SECURE128:+RSA:-VERS-TLS1.0:-ECDHE-ECDSA
+                    )foo"
+            , host, resourcedir
+        );
+        co_await test_provider("'key_provider': 'KmipKeyProviderFactory', 'kmip_host': 'kmip_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+    });
+}
+
+
+SEASTAR_TEST_CASE(test_kmip_provider_multiple_hosts) {
+    /**
+     * Tests for #3251. KMIP connector ends up in endless loop if using more than one
+     * fallover host. This is only in initial connection (in real life only in initial connection verification).
+     * 
+     * We don't have access to more than one KMIP server for testing (at a time).
+     * Pretend to have failover by using a local proxy.
+    */
+    co_await kmip_test_helper([](std::string_view resourcedir, const tmpdir& tmp) -> future<> {
+        // QA test server. Same as used in dtests.
+        constexpr auto host = "52.21.171.245";
+
+        // Bind to any local port.
+        auto server_sock = seastar::listen(socket_address(0x7f000001, 0));
+        bool go_on = true;
+
+        // fake more than one host by creating a local proxy.
+        auto f = [](bool& go_on, server_socket& server_sock) -> future<> {
+            std::vector<future<>> work;
+
+            auto addr = co_await seastar::net::dns::resolve_name(host);
+            size_t connections_done = 0;
+
+            while (go_on) {
+                try {
+                    auto client = co_await server_sock.accept();
+
+                    if (++connections_done > 30) {
+                        server_sock.abort_accept();
+                        break;
+                    }
+
+                    constexpr uint16_t port = 5696u;
+                    auto dst = co_await seastar::connect(socket_address(addr, port));
+
+                    auto f = [&]() -> future<> {      
+                        auto& s = client.connection;
+                        auto& ldst = dst;
+
+                        auto do_io = [](connected_socket& src, connected_socket& dst, bool& go_on) -> future<> {
+                            auto sin = src.input();
+                            auto dout = dst.output();
+
+                            while (go_on && !sin.eof()) {
+                                auto buf = co_await sin.read();
+                                co_await dout.write(std::move(buf));
+                                co_await dout.flush();
+                            }
+                            co_await dout.close();
+                        };
+
+                        co_await when_all(do_io(s, ldst, go_on), do_io(ldst, s, go_on));
+                    }();
+
+                    work.emplace_back(std::move(f));
+                } catch (...) {
+                }
+            }
+
+            for (auto&& f : work) {
+                co_await std::move(f);
+            }
+        }(go_on, server_sock);
+
+        auto host2 = boost::lexical_cast<std::string>(server_sock.local_address());
+
+        auto yaml = fmt::format(R"foo(
+            kmip_hosts:
+                kmip_test:
+                    hosts: {0}, {2} 
+                    certificate: {1}/scylla.pem
+                    keyfile: {1}/scylla.pem
+                    truststore: {1}/cacert.pem
+                    priority_string: SECURE128:+RSA:-VERS-TLS1.0:-ECDHE-ECDSA
+                    )foo"
+            , host, resourcedir, host2
+        );
+
+        std::exception_ptr ex;
+
+        try {
+            co_await test_provider("'key_provider': 'KmipKeyProviderFactory', 'kmip_host': 'kmip_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+        } catch (...) {
+            ex = std::current_exception();    
+        }
+
+        go_on = false;
+        server_sock.abort_accept();
+        co_await std::move(f);
+
+        if (ex) {
+            std::rethrow_exception(ex);
+        }
+    });
 }
 
 /*
