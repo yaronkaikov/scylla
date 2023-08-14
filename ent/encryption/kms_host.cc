@@ -247,6 +247,12 @@ public:
     const request_type& request() const {
         return _req;
     }
+    const std::string& host() const {
+        return _host;
+    }
+    uint16_t port() const {
+        return _port;
+    }
 private:
 
     std::string _host;
@@ -480,7 +486,12 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, s
 
         static auto logged_send = [](httpclient& client) -> future<result_type> {
             kms_log.trace("Request: {}", client.request());
-            auto res = co_await client.send();
+            result_type res;
+            try {
+                res = co_await client.send();
+            } catch (std::exception& e) {
+                std::throw_with_nested(kms_error(format("Error sending to host {}:{}", client.host(), client.port()), e.what()));
+            }
             kms_log.trace("Result: status={}, response={}", res.result_int(), res);
             if (res.result() != bhttp::status::ok) {
                 throw kms_error(get_response_error(res), "EC2 metadata query");
