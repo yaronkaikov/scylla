@@ -802,6 +802,11 @@ messaging_service::scheduling_group_for_isolation_cookie(const sstring& isolatio
 
     if (_sl_controller.has_service_level(service_level_name)) {
         return make_ready_future<scheduling_group>(_sl_controller.get_scheduling_group(service_level_name));
+    } else if (service_level_name == "$user") {
+        // OSS uses `statement:$user` to identify its regular user statement tenant.
+        // In a mixed OSS/Enterprise cluster, this will not map to any known service level.
+        // Hardwire it to the default service level to keep things simple.
+        return make_ready_future<scheduling_group>(_sl_controller.get_default_scheduling_group());
     } else {
         mlogger.info("Service level {} is still unknown, will try to create it now and allow the RPC connection.", service_level_name);
         // If the service level don't exist there are two possibilities, it is either created but still not known by this
