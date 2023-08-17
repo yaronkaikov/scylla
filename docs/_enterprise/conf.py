@@ -15,9 +15,9 @@ BASE_URL = 'https://enterprise.docs.scylladb.com'
 TAGS = []
 BRANCHES = ["enterprise", "branch-2022.2", "branch-2023.1"]
 # Set the latest version.
-LATEST_VERSION = "branch-2022.2"
+LATEST_VERSION = "branch-2023.1"
 # Set which versions are not released yet.
-UNSTABLE_VERSIONS = ["enterprise", "branch-2023.1"]
+UNSTABLE_VERSIONS = ["enterprise"]
 # Set which versions are deprecated.
 DEPRECATED_VERSIONS = [""]
 # Set to enterprise or opensource.
