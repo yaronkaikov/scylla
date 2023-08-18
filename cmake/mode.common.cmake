@@ -71,28 +71,59 @@ if(Scylla_BUILD_INSTRUMENTED)
   # options dependent on Scylla_BUILD_INSTRUMENTED
   set(Scylla_PROFDATA_FILE "" CACHE FILEPATH
     "Path to the profiling data file to use when compiling.")
+  set(Scylla_PROFDATA_COMPRESSED_FILE
+    "pgo/profiles/${CMAKE_SYSTEM_PROCESSOR}/profile.profdata.xz" CACHE FILEPATH
+    "Path to the compressed profiling data file to use when compiling")
+  if(Scylla_PROFDATA_FILE AND Scylla_PROFDATA_COMPRESSED_FILE)
+    message(FATAL_ERROR
+      "Both Scylla_PROFDATA_FILE and Scylla_PROFDATA_COMPRESSED_FILE are specified!")
+  endif()
 endif()
+
+function(extract_compressed_file)
+  find_program(XZCAT xzcat
+    REQUIRED)
+
+  cmake_parse_arguments(parsed_args "" "INPUT;OUTPUT" "" ${ARGN})
+  set(input ${parsed_args_INPUT})
+
+  get_filename_component(ext "${input}" LAST_EXT)
+  get_filename_component(stem "${input}" NAME_WLE)
+  set(output "${CMAKE_BINARY_DIR}/${stem}")
+  if(ext STREQUAL ".xz")
+    execute_process(
+      COMMAND ${XZCAT} "${input}"
+      OUTPUT_FILE "${output}"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  else()
+    message(FATAL_ERROR "Unknown compression format: ${ext}")
+  endif()
+  set(${parsed_args_OUTPUT} ${output} PARENT_SCOPE)
+endfunction(extract_compressed_file)
 
 if(Scylla_PROFDATA_FILE)
   if(NOT EXISTS "${Scylla_PROFDATA_FILE}")
     message(FATAL_ERROR
       "Specified Scylla_PROFDATA_FILE (${Scylla_PROFDATA_FILE}) does not exist")
   endif()
-  if(Scylla_BUILD_INSTRUMENTED STREQUAL "IR")
-    # -fprofile-use is not allowed with -fprofile-generate
-    message(WARNING "Only CSIR supports using and generating profdata at the same time")
-    unset(pgo_opts)
-  endif()
   set(profdata_file "${Scylla_PROFDATA_FILE}")
-endif()
-
-if(pgo_opts)
-  string(APPEND CMAKE_CXX_FLAGS "${pgo_opts}")
-  string(APPEND CMAKE_EXE_LINKER_FLAGS "${pgo_opts}")
-  string(APPEND CMAKE_SHARED_LINKER_FLAGS "${pgo_opts}")
+elseif(Scylla_PROFDATA_COMPRESSED_FILE)
+  # read the header to see if the file is fetched by LFS upon checkout
+  file(READ "${Scylla_PROFDATA_COMPRESSED_FILE}" file_header LIMIT 7)
+  if(file_header MATCHES "version")
+    message(FATAL_ERROR "Please install git-lfs for using profdata stored in Git LFS")
+  endif()
+  extract_compressed_file(
+    INPUT "${Scylla_PROFDATA_COMPRESSED_FILE}"
+    OUTPUT "profdata_file")
 endif()
 
 if(profdata_file)
+  if(Scylla_BUILD_INSTRUMENTED STREQUAL "IR")
+    # -fprofile-use is not allowed with -fprofile-generate
+    message(WARNING "Only CSIR supports using and generating profdata at the same time.")
+    unset(pgo_opts)
+  endif()
   # When building with PGO, -Wbackend-plugin generates a warning for every
   # function which changed its control flow graph since the profile was
   # taken.
@@ -100,4 +131,10 @@ if(profdata_file)
   # Let's silence them.
   string(APPEND CMAKE_CXX_FLAGS " -Wno-backend-plugin")
   string(APPEND CMAKE_CXX_FLAGS " -fprofile-use=\"${profdata_file}\"")
+endif()
+
+if(pgo_opts)
+  string(APPEND CMAKE_CXX_FLAGS "${pgo_opts}")
+  string(APPEND CMAKE_EXE_LINKER_FLAGS "${pgo_opts}")
+  string(APPEND CMAKE_SHARED_LINKER_FLAGS "${pgo_opts}")
 endif()
