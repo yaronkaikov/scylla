@@ -11,6 +11,7 @@
 #pragma once
 
 #include "timeout_config.hh"
+#include "service/raft/raft_group0_client.hh"
 #include "audit/audit.hh"
 
 namespace service {
@@ -50,9 +51,12 @@ public:
     // CQL statement text
     seastar::sstring raw_cql_statement;
 
+    // True for statements that needs guard to be taken before the execution
+    bool needs_guard = false;
+
     explicit cql_statement(timeout_config_selector timeout_selector) : _timeout_config_selector(timeout_selector) {}
     cql_statement(cql_statement&& o) = default;
-    cql_statement(const cql_statement& o) : _timeout_config_selector(o._timeout_config_selector), _audit_info(o._audit_info ? std::make_unique<audit::audit_info>(*o._audit_info) : nullptr) { }
+    cql_statement(const cql_statement& o) : _timeout_config_selector(o._timeout_config_selector), _audit_info(o._audit_info ? std::make_unique<audit::audit_info>(*o._audit_info) : nullptr), needs_guard(o.needs_guard) { }
     virtual ~cql_statement()
     { }
 
@@ -85,7 +89,7 @@ public:
      * @param options options for this query (consistency, variables, pageSize, ...)
      */
     virtual seastar::future<seastar::shared_ptr<cql_transport::messages::result_message>>
-        execute(query_processor& qp, service::query_state& state, const query_options& options) const = 0;
+        execute(query_processor& qp, service::query_state& state, const query_options& options, std::optional<service::group0_guard> guard) const = 0;
 
     /**
      * Execute the statement and return the resulting result or null if there is no result.
@@ -97,8 +101,8 @@ public:
      * @param options options for this query (consistency, variables, pageSize, ...)
      */
     virtual seastar::future<seastar::shared_ptr<cql_transport::messages::result_message>>
-            execute_without_checking_exception_message(query_processor& qp, service::query_state& state, const query_options& options) const {
-        return execute(qp, state, options);
+            execute_without_checking_exception_message(query_processor& qp, service::query_state& state, const query_options& options, std::optional<service::group0_guard> guard) const {
+        return execute(qp, state, options, std::move(guard));
     }
 
     virtual bool depends_on(std::string_view ks_name, std::optional<std::string_view> cf_name) const = 0;

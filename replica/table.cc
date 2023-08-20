@@ -278,18 +278,16 @@ table::make_reader_v2(schema_ptr s,
     return rd;
 }
 
-sstables::shared_sstable table::make_streaming_sstable_for_write(std::optional<sstring> subdir) {
-    sstring dir = _config.datadir;
-    if (subdir) {
-        dir += "/" + *subdir;
-    }
-    auto newtab = make_sstable(dir);
-    tlogger.debug("Created sstable for streaming: ks={}, cf={}, dir={}", schema()->ks_name(), schema()->cf_name(), dir);
+sstables::shared_sstable table::make_streaming_sstable_for_write() {
+    auto newtab = make_sstable(sstables::sstable_state::normal);
+    tlogger.debug("Created sstable for streaming: ks={}, cf={}", schema()->ks_name(), schema()->cf_name());
     return newtab;
 }
 
 sstables::shared_sstable table::make_streaming_staging_sstable() {
-    return make_streaming_sstable_for_write(sstables::staging_dir);
+    auto newtab = make_sstable(sstables::sstable_state::staging);
+    tlogger.debug("Created staging sstable for streaming: ks={}, cf={}", schema()->ks_name(), schema()->cf_name());
+    return newtab;
 }
 
 static flat_mutation_reader_v2 maybe_compact_for_streaming(flat_mutation_reader_v2 underlying, const compaction_manager& cm, gc_clock::time_point compaction_time, bool compaction_enabled) {
@@ -436,13 +434,13 @@ static bool belongs_to_other_shard(const std::vector<shard_id>& shards) {
     return shards.size() != size_t(belongs_to_current_shard(shards));
 }
 
-sstables::shared_sstable table::make_sstable(sstring dir) {
+sstables::shared_sstable table::make_sstable(sstables::sstable_state state) {
     auto& sstm = get_sstables_manager();
-    return sstm.make_sstable(_schema, *_storage_opts, dir, calculate_generation_for_new_table(), sstm.get_highest_supported_format(), sstables::sstable::format_types::big);
+    return sstm.make_sstable(_schema, _config.datadir, *_storage_opts, calculate_generation_for_new_table(), state, sstm.get_highest_supported_format(), sstables::sstable::format_types::big);
 }
 
 sstables::shared_sstable table::make_sstable() {
-    return make_sstable(_config.datadir);
+    return make_sstable(sstables::sstable_state::normal);
 }
 
 void table::notify_bootstrap_or_replace_start() {
@@ -483,9 +481,7 @@ compaction_group::do_add_sstable(lw_shared_ptr<sstables::sstable_set> sstables, 
 }
 
 void compaction_group::add_sstable(sstables::shared_sstable sstable) {
-    auto sstable_size = sstable->bytes_on_disk();
     _main_sstables = do_add_sstable(_main_sstables, std::move(sstable), enable_backlog_tracker::yes);
-    _main_set_disk_space_used += sstable_size;
 }
 
 const lw_shared_ptr<sstables::sstable_set>& compaction_group::main_sstables() const noexcept {
@@ -494,13 +490,10 @@ const lw_shared_ptr<sstables::sstable_set>& compaction_group::main_sstables() co
 
 void compaction_group::set_main_sstables(lw_shared_ptr<sstables::sstable_set> new_main_sstables) {
     _main_sstables = std::move(new_main_sstables);
-    _main_set_disk_space_used = calculate_disk_space_used_for(*_main_sstables);
 }
 
 void compaction_group::add_maintenance_sstable(sstables::shared_sstable sst) {
-    auto sstable_size = sst->bytes_on_disk();
     _maintenance_sstables = do_add_sstable(_maintenance_sstables, std::move(sst), enable_backlog_tracker::no);
-    _maintenance_set_disk_space_used += sstable_size;
 }
 
 const lw_shared_ptr<sstables::sstable_set>& compaction_group::maintenance_sstables() const noexcept {
@@ -509,7 +502,6 @@ const lw_shared_ptr<sstables::sstable_set>& compaction_group::maintenance_sstabl
 
 void compaction_group::set_maintenance_sstables(lw_shared_ptr<sstables::sstable_set> new_maintenance_sstables) {
     _maintenance_sstables = std::move(new_maintenance_sstables);
-    _maintenance_set_disk_space_used = calculate_disk_space_used_for(*_maintenance_sstables);
 }
 
 void table::add_sstable(compaction_group& cg, sstables::shared_sstable sstable) {
@@ -1070,7 +1062,7 @@ size_t compaction_group::live_sstable_count() const noexcept {
 }
 
 uint64_t compaction_group::live_disk_space_used() const noexcept {
-    return _main_set_disk_space_used + _maintenance_set_disk_space_used;
+    return _main_sstables->bytes_on_disk() + _maintenance_sstables->bytes_on_disk();
 }
 
 uint64_t compaction_group::total_disk_space_used() const noexcept {
@@ -2593,7 +2585,7 @@ future<> table::move_sstables_from_staging(std::vector<sstables::shared_sstable>
             // completed first.
             // The _sstable_deletion_sem prevents list update on off-strategy completion and move_sstables_from_staging()
             // from stepping on each other's toe.
-            co_await sst->change_state(sstables::normal_dir, &delay_commit);
+            co_await sst->change_state(sstables::sstable_state::normal, &delay_commit);
             auto& cg = compaction_group_for_sstable(sst);
             if (get_compaction_manager().requires_cleanup(cg.as_table_state(), sst)) {
                 compaction_groups_to_notify.insert(&cg);

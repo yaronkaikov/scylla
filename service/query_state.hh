@@ -14,6 +14,7 @@
 //#include "service/qos/service_level_controller.hh"
 #include "tracing/tracing.hh"
 #include "service_permit.hh"
+#include "cql3/cql_statement.hh"
 
 namespace qos {
 class service_level_controller;

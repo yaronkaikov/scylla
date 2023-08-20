@@ -11,27 +11,35 @@ import os
 import argparse
 import asyncio
 from asyncio.subprocess import Process
-from typing import Optional
+from typing import Generator, Optional
 import json
 import logging
 import pathlib
+import random
 import subprocess
 import shutil
 import time
 import tempfile
 import socket
+import yaml
 from io import BufferedWriter
 
 class MinioServer:
+    ENV_CONFFILE = 'S3_CONFFILE_FOR_TEST'
+    ENV_ADDRESS = 'S3_SERVER_ADDRESS_FOR_TEST'
+    ENV_PORT = 'S3_SERVER_PORT_FOR_TEST'
+    ENV_BUCKET = 'S3_PUBLIC_BUCKET_FOR_TEST'
+
     log_file: BufferedWriter
 
     def __init__(self, tempdir_base, address, logger):
         self.srv_exe = shutil.which('minio')
         self.address = address
-        self.port = 9000
+        self.port = None
         tempdir = tempfile.mkdtemp(dir=tempdir_base, prefix="minio-")
         self.tempdir = pathlib.Path(tempdir)
         self.rootdir = self.tempdir / 'minio_root'
+        self.config_file = self.tempdir / 'object-storage.yaml'
         self.mcdir = self.tempdir / 'mc'
         self.logger = logger
         self.cmd: Optional[Process] = None
@@ -40,12 +48,12 @@ class MinioServer:
         self.bucket_name = 'testbucket'
         self.log_filename = (self.tempdir / 'minio').with_suffix(".log")
 
-    def check_server(self):
+    def check_server(self, port):
         s = socket.socket()
         try:
-            s.connect((self.address, self.port))
+            s.connect((self.address, port))
             return True
-        except socket.error as e:
+        except socket.error:
             return False
         finally:
             s.close()
@@ -127,54 +135,69 @@ class MinioServer:
         return {'Statement': statement,
                 'Version': '2012-10-17'}
 
-    async def _is_port_available(self, port: int) -> bool:
-        try:
-            _, writer = await asyncio.open_connection('localhost', port)
-            writer.close()
-            await writer.wait_closed()
-            return False
-        except OSError:
-            # likely connection refused
-            return True
+    def _get_local_ports(self, num_ports: int) -> Generator[int, None, None]:
+        with open('/proc/sys/net/ipv4/ip_local_port_range', encoding='ascii') as port_range:
+            min_port, max_port = map(int, port_range.read().split())
+        for _ in range(num_ports):
+            yield random.randint(min_port, max_port)
 
-    async def _find_available_port(self, min_port: int, max_port: int) -> int:
-        assert min_port < max_port
-        for port in range(min_port, max_port):
-            if await self._is_port_available(port):
-                return port
-        raise RuntimeError(f'failed to find available port in [{min_port}, {max_port})')
+    @staticmethod
+    def create_conf_file(address: str, port: int, path: str):
+        with open(path, 'w', encoding='ascii') as config_file:
+            endpoint = {'name': address,
+                        'port': port}
+            yaml.dump({'endpoints': [endpoint]}, config_file)
+
+    async def _run_server(self, port):
+        self.logger.info(f'Starting minio server at {self.address}:{port}')
+        cmd = await asyncio.create_subprocess_exec(
+            self.srv_exe,
+            *[ 'server', '--address', f'{self.address}:{port}', self.rootdir ],
+            preexec_fn=os.setsid,
+            stderr=self.log_file,
+            stdout=self.log_file,
+        )
+        timeout = time.time() + 30
+        while time.time() < timeout:
+            if cmd.returncode is not None:
+                # the minio server exits before it starts to server. maybe the
+                # port is used by another server?
+                self.logger.info('minio exited with %s', cmd.returncode)
+                raise RuntimeError("Failed to start minio server")
+            if self.check_server(port):
+                self.logger.info('minio is up and running')
+                break
+
+            await asyncio.sleep(0.1)
+
+        return cmd
 
     async def start(self):
         if self.srv_exe is None:
             self.logger.info("Minio not installed, get it from https://dl.minio.io/server/minio/release/linux-amd64/minio and put into PATH")
             return
 
-        self.port = await self._find_available_port(self.port, self.port + 1000)
         self.log_file = self.log_filename.open("wb")
-        os.environ['S3_SERVER_ADDRESS_FOR_TEST'] = f'{self.address}'
-        os.environ['S3_SERVER_PORT_FOR_TEST'] = f'{self.port}'
-        os.environ['S3_PUBLIC_BUCKET_FOR_TEST'] = f'{self.bucket_name}'
-
-        self.logger.info(f'Starting minio server at {self.address}:{self.port}')
         os.mkdir(self.rootdir)
-        self.cmd = await asyncio.create_subprocess_exec(
-            self.srv_exe,
-            *[ 'server', '--address', f'{self.address}:{self.port}', self.rootdir ],
-            preexec_fn=os.setsid,
-            stderr=self.log_file,
-            stdout=self.log_file,
-        )
 
-        timeout = time.time() + 30
-        while time.time() < timeout:
-            if self.cmd.returncode:
-                raise RuntimeError("Failed to start minio server")
-
-            if self.check_server():
-                self.logger.info('minio is up and running')
+        retries = 42  # just retry a fixed number of times
+        for port in self._get_local_ports(retries):
+            try:
+                self.cmd = await self._run_server(port)
+                self.port = port
+            except RuntimeError:
+                pass
+            else:
                 break
+        else:
+            self.logger.info("Failed to start Minio server")
+            return
 
-            await asyncio.sleep(0.1)
+        self.create_conf_file(self.address, self.port, self.config_file)
+        os.environ[self.ENV_CONFFILE] = f'{self.config_file}'
+        os.environ[self.ENV_ADDRESS] = f'{self.address}'
+        os.environ[self.ENV_PORT] = f'{self.port}'
+        os.environ[self.ENV_BUCKET] = f'{self.bucket_name}'
 
         try:
             alias = 'local'
@@ -223,6 +246,7 @@ async def main():
         print(f'export S3_SERVER_ADDRESS_FOR_TEST={server.address}')
         print(f'export S3_SERVER_PORT_FOR_TEST={server.port}')
         print(f'export S3_PUBLIC_BUCKET_FOR_TEST={server.bucket_name}')
+        print(f'Please run scylla with: --object-storage-config-file {server.config_file}')
         try:
             _ = input('server started. press any key to stop: ')
         except KeyboardInterrupt:

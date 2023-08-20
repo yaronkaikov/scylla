@@ -123,7 +123,7 @@ using tri_mode_restriction = enum_option<tri_mode_restriction_t>;
 
 constexpr unsigned default_murmur3_partitioner_ignore_msb_bits = 12;
 
-class config : public utils::config_file {
+class config final : public utils::config_file {
 public:
     config();
     config(std::shared_ptr<db::extensions>);
@@ -445,6 +445,10 @@ public:
     static constexpr size_t wasm_udf_reserved_memory = 50 * 1024 * 1024;
 
     named_value<unsigned> minimum_keyspace_rf;
+    named_value<bool> live_updatable_config_params_changeable_via_cql;
+    bool are_live_updatable_config_params_changeable_via_cql() const override {
+        return live_updatable_config_params_changeable_via_cql();
+    }
 
     // authenticator options
     named_value<std::string> auth_superuser_name;

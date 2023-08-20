@@ -495,7 +495,7 @@ static shared_sstable add_sstable_for_overlapping_test(test_env& env, lw_shared_
 static shared_sstable sstable_for_overlapping_test(test_env& env, const schema_ptr& schema,
         const partition_key& first_key, const partition_key& last_key, uint32_t level = 0) {
     auto sst = env.make_sstable(schema);
-    sstables::test(sst).set_values_for_leveled_strategy(0, level, 0, first_key, last_key);
+    sstables::test(sst).set_values_for_leveled_strategy(1 /* size */, level, 0 /* max_timestamp */, first_key, last_key);
     return sst;
 }
 
@@ -5222,7 +5222,7 @@ SEASTAR_TEST_CASE(test_sstables_excluding_staging_correctness) {
         auto sst_gen = env.make_sst_factory(s);
 
         auto staging_sst = make_sstable_containing(sst_gen, {*sorted_muts.begin()});
-        staging_sst->change_state(sstables::staging_dir).get();
+        staging_sst->change_state(sstables::sstable_state::staging).get();
         BOOST_REQUIRE(staging_sst->requires_view_building());
 
         auto regular_sst = make_sstable_containing(sst_gen, {*sorted_muts.rbegin()});
