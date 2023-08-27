@@ -455,8 +455,6 @@ class PythonTestSuite(TestSuite):
             if type(cmdline_options) == str:
                 cmdline_options = [cmdline_options]
             cmdline_options = merge_cmdline_options(cmdline_options, create_cfg.cmdline_from_test)
-            if options.x_log2_compaction_groups:
-                cmdline_options = merge_cmdline_options(cmdline_options, [ '--x-log2-compaction-groups={}'.format(options.x_log2_compaction_groups) ])
 
             # There are multiple sources of config options, with increasing priority
             # (if two sources provide the same config option, the higher priority one wins):
@@ -1038,7 +1036,8 @@ class PythonTest(Test):
             "--log-level=DEBUG",   # Capture logs
             "-o",
             "junit_family=xunit2",
-            "--junit-xml={}".format(self.xmlout)]
+            "--junit-xml={}".format(self.xmlout),
+            "-rs"]
         if options.markers:
             self.args.append(f"-m={options.markers}")
 
@@ -1113,6 +1112,7 @@ class TopologyTest(PythonTest):
 
         test_path = os.path.join(self.suite.options.tmpdir, self.mode)
         async with get_cluster_manager(self.mode + '/' + self.uname, self.suite.clusters, test_path) as manager:
+            self.args.insert(0, "--mode={}".format(self.mode))
             self.args.insert(0, "--manager-api={}".format(manager.sock_path))
 
             try:

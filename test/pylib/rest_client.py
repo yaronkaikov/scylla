@@ -177,6 +177,13 @@ class ScyllaRESTAPIClient():
                                timeout = timeout)
         logger.debug("decommission_node %s finished", host_ip)
 
+    async def rebuild_node(self, host_ip: str, timeout: float) -> None:
+        """Initiate rebuild of a node with host_ip"""
+        logger.debug("rebuild_node %s", host_ip)
+        await self.client.post("/storage_service/rebuild", host = host_ip,
+                               timeout = timeout)
+        logger.debug("rebuild_node %s finished", host_ip)
+
     async def get_gossip_generation_number(self, node_ip: str, target_ip: str) -> int:
         """Get the current generation number of `target_ip` observed by `node_ip`."""
         data = await self.client.get_json(f"/gossiper/generation_number/{target_ip}",
@@ -224,6 +231,58 @@ class ScyllaRESTAPIClient():
         """Set logger level"""
         assert level in ["debug", "info", "warning", "trace"]
         await self.client.post(f"/system/logger/{logger}?level={level}", host=node_ip)
+
+
+class ScyllaMetrics:
+    def __init__(self, lines: list[str]):
+        self.lines: list[str] = lines
+
+    def lines_by_prefix(self, prefix: str):
+        """Returns all metrics whose name starts with a prefix, e.g.
+           metrics.lines_by_prefix('scylla_hints_manager_')
+        """
+        return [l for l in self.lines if l.startswith(prefix)]
+
+    def get(self, name: str, labels = None, shard: str ='total'):
+        """Get the metric value by name. Allows to specify additional labels filter, e.g.
+           metrics.get('scylla_transport_cql_errors_total', {'type': 'protocol_error'}).
+           If shard is not set, returns the sum of metric values across all shards,
+           otherwise returns the metric value from the specified shard.
+        """
+        result = None
+        for l in self.lines:
+            if not l.startswith(name):
+                continue
+            labels_start = l.find('{')
+            labels_finish = l.find('}')
+            if labels_start == -1 or labels_finish == -1:
+                raise ValueError(f'invalid metric format [{l}]')
+            def match_kv(kv):
+                key, val = kv.split('=')
+                val = val.strip('"')
+                return shard == 'total' or val == shard if key == 'shard' \
+                    else labels is None or labels.get(key, None) == val
+            match = all(match_kv(kv) for kv in l[labels_start + 1:labels_finish].split(','))
+            if match:
+                value = float(l[labels_finish + 2:])
+                if result is None:
+                    result = value
+                else:
+                    result += value
+                if shard != 'total':
+                    break
+        return result
+
+
+class ScyllaMetricsClient:
+    """Async Scylla Metrics API client"""
+
+    def __init__(self, port: int = 9180):
+        self.client = TCPRESTClient(port)
+
+    async def query(self, server_ip: IPAddress) -> ScyllaMetrics:
+        data = await self.client.get_text('/metrics', host=server_ip)
+        return ScyllaMetrics(data.split('\n'))
 
 
 class InjectionHandler():

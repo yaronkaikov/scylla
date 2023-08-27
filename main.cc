@@ -1130,12 +1130,37 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // described here: https://github.com/scylladb/scylla/issues/1014
             supervisor::notify("loading system sstables");
             replica::distributed_loader::init_system_keyspace(sys_ks, erm_factory, db, *cfg, system_table_load_phase::phase1).get();
-            cfg->host_id = sys_ks.local().load_local_host_id().get0();
+
+            auto listen_address = utils::resolve(cfg->listen_address, family).get0();
+
+            auto linfo = sys_ks.local().load_local_info().get0();
+            if (linfo.cluster_name.empty()) {
+                linfo.cluster_name = cfg->cluster_name();
+            } else if (linfo.cluster_name != cfg->cluster_name()) {
+                throw exceptions::configuration_exception("Saved cluster name " + linfo.cluster_name + " != configured name " + cfg->cluster_name());
+            }
+            if (!linfo.host_id) {
+                linfo.host_id = locator::host_id::create_random_id();
+                startlog.info("Setting local host id to {}", linfo.host_id);
+            }
+
+            cfg->host_id = linfo.host_id;
+            linfo.listen_address = listen_address;
+            sys_ks.local().save_local_info(std::move(linfo)).get();
+
+          shared_token_metadata::mutate_on_all_shards(token_metadata, [hostid = cfg->host_id, endpoint = utils::fb_utilities::get_broadcast_address()] (locator::token_metadata& tm) {
+              // Makes local host id available in topology cfg as soon as possible.
+              // Raft topology discard the endpoint-to-id map, so the local id can
+              // still be found in the config.
+              tm.get_topology().set_host_id_cfg(hostid);
+              tm.get_topology().add_or_update_endpoint(endpoint, hostid);
+              return make_ready_future<>();
+          }).get();
 
             netw::messaging_service::config mscfg;
 
             mscfg.id = cfg->host_id;
-            mscfg.ip = utils::resolve(cfg->listen_address, family).get0();
+            mscfg.ip = listen_address;
             mscfg.port = cfg->storage_port();
             mscfg.ssl_port = cfg->ssl_storage_port();
             mscfg.listen_on_broadcast_address = cfg->listen_on_broadcast_address();
@@ -1319,11 +1344,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // #293 - do not stop anything
             // engine().at_exit([&qp] { return qp.stop(); });
             sstables::init_metrics().get();
-
-            shared_token_metadata::mutate_on_all_shards(token_metadata, [hostid = cfg->host_id, endpoint = utils::fb_utilities::get_broadcast_address()] (locator::token_metadata& tm) {
-                tm.get_topology().add_or_update_endpoint(endpoint, hostid);
-                return make_ready_future<>();
-            }).get();
 
             supervisor::notify("initializing batchlog manager");
             db::batchlog_manager_config bm_cfg;

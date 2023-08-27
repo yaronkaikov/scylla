@@ -12,7 +12,7 @@
 from typing import List, Optional, Callable, Any
 from time import time
 import logging
-from test.pylib.rest_client import UnixRESTClient, ScyllaRESTAPIClient
+from test.pylib.rest_client import UnixRESTClient, ScyllaRESTAPIClient, ScyllaMetricsClient
 from test.pylib.util import wait_for
 from test.pylib.internal_types import ServerNum, IPAddress, HostID, ServerInfo
 from test.pylib.scylla_cluster import ReplaceConfig, ScyllaServer
@@ -43,6 +43,7 @@ class ManagerClient():
         # A client for communicating with ScyllaClusterManager (server)
         self.client = UnixRESTClient(sock_path)
         self.api = ScyllaRESTAPIClient()
+        self.metrics = ScyllaMetricsClient()
 
     async def stop(self):
         """Close driver"""
@@ -203,7 +204,7 @@ class ManagerClient():
         return s_info
 
     async def remove_node(self, initiator_id: ServerNum, server_id: ServerNum,
-                          ignore_dead: List[IPAddress] = []) -> None:
+                          ignore_dead: List[IPAddress] | List[HostID] = []) -> None:
         """Invoke remove node Scylla REST API for a specified server"""
         logger.debug("ManagerClient remove node %s on initiator %s", server_id, initiator_id)
         data = {"server_id": server_id, "ignore_dead": ignore_dead}
@@ -215,6 +216,13 @@ class ManagerClient():
         """Tell a node to decommission with Scylla REST API"""
         logger.debug("ManagerClient decommission %s", server_id)
         await self.client.get_text(f"/cluster/decommission-node/{server_id}",
+                                   timeout=ScyllaServer.TOPOLOGY_TIMEOUT)
+        self._driver_update()
+
+    async def rebuild_node(self, server_id: ServerNum) -> None:
+        """Tell a node to rebuild with Scylla REST API"""
+        logger.debug("ManagerClient rebuild %s", server_id)
+        await self.client.get_text(f"/cluster/rebuild-node/{server_id}",
                                    timeout=ScyllaServer.TOPOLOGY_TIMEOUT)
         self._driver_update()
 

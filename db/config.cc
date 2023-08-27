@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <sstream>
 
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/trim_all.hpp>
 #include <boost/any.hpp>
 #include <boost/program_options.hpp>
 #include <yaml-cpp/yaml.h>
@@ -866,7 +868,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , developer_mode(this, "developer_mode", value_status::Used, DEVELOPER_MODE_DEFAULT, "Relax environment checks. Setting to true can reduce performance and reliability significantly.")
     , skip_wait_for_gossip_to_settle(this, "skip_wait_for_gossip_to_settle", value_status::Used, -1, "An integer to configure the wait for gossip to settle. -1: wait normally, 0: do not wait at all, n: wait for at most n polls. Same as -Dcassandra.skip_wait_for_gossip_to_settle in cassandra.")
     , force_gossip_generation(this, "force_gossip_generation", liveness::LiveUpdate, value_status::Used, -1 , "Force gossip to use the generation number provided by user")
-    , experimental(this, "experimental", value_status::Used, false, "[Deprecated] Set to true to unlock all experimental features (except 'consistent-topology-changes' feature, which should be enabled explicitly via 'experimental-features' option). Please use 'experimental-features', instead.")
+    , experimental(this, "experimental", value_status::Unused, false, "[Deprecated] Set to true to unlock all experimental features (except 'consistent-topology-changes' feature, which should be enabled explicitly via 'experimental-features' option). Please use 'experimental-features', instead.")
     , experimental_features(this, "experimental_features", value_status::Used, {}, experimental_features_help_string())
     , lsa_reclamation_step(this, "lsa_reclamation_step", value_status::Used, 1, "Minimum number of segments to reclaim in a single step")
     , prometheus_port(this, "prometheus_port", value_status::Used, 9180, "Prometheus port, set to zero to disable")
@@ -1007,7 +1009,6 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , nodeops_heartbeat_interval_seconds(this, "nodeops_heartbeat_interval_seconds", liveness::LiveUpdate, value_status::Used, 10, "Period of heartbeat ticks in node operations")
     , cache_index_pages(this, "cache_index_pages", liveness::LiveUpdate, value_status::Used, false,
         "Keep SSTable index pages in the global cache after a SSTable read. Expected to improve performance for workloads with big partitions, but may degrade performance for workloads with small partitions.")
-    , x_log2_compaction_groups(this, "x_log2_compaction_groups", value_status::Used, 0, "Controls static number of compaction groups per table per shard. For X groups, set the option to log (base 2) of X. Example: Value of 3 implies 8 groups.")
      , consistent_cluster_management(this, "consistent_cluster_management", value_status::Used, true, "Use RAFT for cluster management and DDL")
     , wasm_cache_memory_fraction(this, "wasm_cache_memory_fraction", value_status::Used, 0.01, "Maximum total size of all WASM instances stored in the cache as fraction of total shard memory")
     , wasm_cache_timeout_in_ms(this, "wasm_cache_timeout_in_ms", value_status::Used, 5000, "Time after which an instance is evicted from the cache")
@@ -1171,18 +1172,12 @@ db::fs::path db::config::get_conf_sub(db::fs::path sub) {
 }
 
 bool db::config::check_experimental(experimental_features_t::feature f) const {
-    if (experimental()
-        && f != experimental_features_t::feature::UNUSED
-        && f != experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES
-        && f != experimental_features_t::feature::BROADCAST_TABLES
-        && f != experimental_features_t::feature::TABLETS) {
-            return true;
-    }
-    const auto& optval = experimental_features();
-    return find(begin(optval), end(optval), enum_option<experimental_features_t>{f}) != end(optval);
+    enum_option<experimental_features_t> to_check{f};
+    return std::ranges::any_of(experimental_features(),
+                               [to_check](auto& enabled) {
+                                   return to_check == enabled;
+                               });
 }
-
-namespace bpo = boost::program_options;
 
 logging::settings db::config::logging_settings(const log_cli::options& opts) const {
     auto value = [&](auto& v, const auto& opt) {
@@ -1197,6 +1192,7 @@ logging::settings db::config::logging_settings(const log_cli::options& opts) con
         .default_level = value(default_log_level, opts.default_log_level),
         .stdout_enabled = value(log_to_stdout, opts.log_to_stdout),
         .syslog_enabled = value(log_to_syslog, opts.log_to_syslog),
+        .with_color = opts.log_with_color.get_value(),
         .stdout_timestamp_style =  opts.logger_stdout_timestamps.get_value(),
         .logger_ostream = opts.logger_ostream_type.get_value(),
     };
@@ -1364,6 +1360,20 @@ future<> update_relabel_config_from_file(const std::string& name) {
         throw std::runtime_error("conflicts found during relabeling");
     }
     co_return;
+}
+
+std::vector<sstring> split_comma_separated_list(sstring comma_separated_list) {
+    std::vector<sstring> strs, trimmed_strs;
+    boost::split(strs, std::move(comma_separated_list), boost::is_any_of(","));
+    for (sstring n : strs) {
+        std::replace(n.begin(), n.end(), '\"', ' ');
+        std::replace(n.begin(), n.end(), '\'', ' ');
+        boost::trim_all(n);
+        if (!n.empty()) {
+            trimmed_strs.push_back(n);
+        }
+    }
+    return trimmed_strs;
 }
 
 }

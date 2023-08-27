@@ -97,8 +97,6 @@ namespace db {
 
 /// Enumeration of all valid values for the `experimental` config entry.
 struct experimental_features_t {
-    // NOTE: CONSISTENT_TOPOLOGY_CHANGES and BROADCAST_TABLES features are not enabled via `experimental` umbrella flag.
-    // These options should be enabled explicitly.
     enum class feature {
         UNUSED,
         UDF,
@@ -427,8 +425,6 @@ public:
 
     named_value<bool> cache_index_pages;
 
-    named_value<unsigned> x_log2_compaction_groups;
-
     named_value<bool> consistent_cluster_management;
 
     named_value<double> wasm_cache_memory_fraction;
@@ -532,4 +528,7 @@ future<gms::inet_address> resolve(const config_file::named_value<sstring>&, gms:
  * Will throw an exception if there is a conflict with the metrics names
  */
 future<> update_relabel_config_from_file(const std::string& name);
+
+std::vector<sstring> split_comma_separated_list(sstring comma_separated_list);
+
 }

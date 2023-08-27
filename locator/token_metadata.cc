@@ -334,7 +334,7 @@ token_metadata::tokens_iterator& token_metadata::tokens_iterator::operator++() {
 }
 
 host_id token_metadata::get_my_id() const {
-    return get_host_id(utils::fb_utilities::get_broadcast_address());
+    return get_topology().get_config().this_host_id;
 }
 
 inline
@@ -561,7 +561,15 @@ std::unordered_map<inet_address, host_id> token_metadata_impl::get_endpoint_to_h
     std::unordered_map<inet_address, host_id> map;
     map.reserve(nodes.size());
     for (const auto& [endpoint, node] : nodes) {
-        map[endpoint] = node->host_id();
+        // Restrict to token-owners
+        if (!(node->is_normal() || node->is_leaving())) {
+            continue;
+        }
+        if (const auto& host_id = node->host_id()) {
+            map[endpoint] = host_id;
+        } else {
+            on_internal_error_noexcept(tlogger, fmt::format("get_endpoint_to_host_id_map_for_reading: endpoint {} has null host_id", endpoint));
+        }
     }
     return map;
 }
@@ -1193,6 +1201,7 @@ void shared_token_metadata::set(mutable_token_metadata_ptr tmptr) noexcept {
 
     _shared = std::move(tmptr);
     _shared->set_version_tracker(_versions_barrier.start());
+    tlogger.debug("new token_metadata is set, version {}", _shared->get_version());
 }
 
 void shared_token_metadata::update_fence_version(token_metadata::version_t version) {
@@ -1215,6 +1224,7 @@ void shared_token_metadata::update_fence_version(token_metadata::version_t versi
                 _fence_version, version));
     }
     _fence_version = version;
+    tlogger.debug("new fence_version is set, version {}", _fence_version);
 }
 
 future<> shared_token_metadata::mutate_token_metadata(seastar::noncopyable_function<future<> (token_metadata&)> func) {

@@ -1424,7 +1424,6 @@ keyspace::make_column_family_config(const schema& s, const database& db) const {
     cfg.view_update_concurrency_semaphore = _config.view_update_concurrency_semaphore;
     cfg.view_update_concurrency_semaphore_limit = _config.view_update_concurrency_semaphore_limit;
     cfg.data_listeners = &db.data_listeners();
-    cfg.x_log2_compaction_groups = db_config.x_log2_compaction_groups();
     cfg.enable_compacting_data_for_streaming_and_repair = db_config.enable_compacting_data_for_streaming_and_repair();
 
     return cfg;
@@ -1499,6 +1498,10 @@ future<> database::create_in_memory_keyspace(const lw_shared_ptr<keyspace_metada
         kscfg.enable_disk_reads = kscfg.enable_disk_writes = kscfg.enable_commitlog = !_cfg.volatile_system_keyspace_for_testing();
         kscfg.enable_cache = _cfg.enable_cache();
         // don't make system keyspace writes wait for user writes (if under pressure)
+        kscfg.dirty_memory_manager = &_system_dirty_memory_manager;
+    }
+    if (extensions().is_extension_internal_keyspace(ksm->name())) {
+        // don't make internal keyspaces write wait for user writes (if under pressure), and also to avoid possible deadlocks.
         kscfg.dirty_memory_manager = &_system_dirty_memory_manager;
     }
     keyspace ks(ksm, std::move(kscfg), erm_factory);

@@ -90,7 +90,6 @@
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
-#include <boost/algorithm/string/trim_all.hpp>
 #include <boost/algorithm/string/join.hpp>
 
 using token = dht::token;
@@ -455,7 +454,7 @@ future<> storage_service::topology_state_load(cdc::generation_service& cdc_gen_s
                 break;
             case node_state::replacing: {
                 assert(_topology_state_machine._topology.req_param.contains(id));
-                auto replaced_id = std::get<raft::server_id>(_topology_state_machine._topology.req_param[id]);
+                auto replaced_id = std::get<replace_param>(_topology_state_machine._topology.req_param[id]).replaced_id;
                 auto existing_ip = am.find(replaced_id);
                 if (!existing_ip) {
                     // FIXME: What if not known?
@@ -570,6 +569,7 @@ public:
     topology_node_mutation_builder& set(const char* cell, topology_request value);
     topology_node_mutation_builder& set(const char* cell, const sstring& value);
     topology_node_mutation_builder& set(const char* cell, const raft::server_id& value);
+    topology_node_mutation_builder& set(const char* cell, const std::unordered_set<raft::server_id>& nodes_ids);
     topology_node_mutation_builder& set(const char* cell, const std::unordered_set<dht::token>& value);
     template<typename S>
     requires std::constructible_from<sstring, S>
@@ -713,6 +713,10 @@ topology_node_mutation_builder& topology_node_mutation_builder::set(
 
 topology_node_mutation_builder& topology_node_mutation_builder::del(const char* cell) {
     return builder_base::del(cell);
+}
+
+topology_node_mutation_builder& topology_node_mutation_builder::set(const char* cell, const std::unordered_set<raft::server_id>& nodes_ids) {
+    return apply_set(cell, collection_apply_mode::overwrite, nodes_ids | boost::adaptors::transformed([] (const auto& node_id) { return node_id.id; }));
 }
 
 topology_node_mutation_builder& topology_node_mutation_builder::set(const char* cell, const std::unordered_set<dht::token>& tokens) {
@@ -956,7 +960,17 @@ class topology_coordinator {
 
     raft::server_id parse_replaced_node(const node_to_work_on& node) {
         if (node.rs->state == node_state::replacing) {
-            return std::get<raft::server_id>(node.req_param.value());
+            return std::get<replace_param>(node.req_param.value()).replaced_id;
+        }
+        return {};
+    }
+
+    std::unordered_set<raft::server_id> parse_ignore_nodes(const node_to_work_on& node) {
+        if (node.rs->state == node_state::removing) {
+            return std::get<removenode_param>(node.req_param.value()).ignored_ids;
+        }
+        if (node.rs->state == node_state::replacing) {
+            return std::get<replace_param>(node.req_param.value()).ignored_ids;
         }
         return {};
     }
@@ -1014,7 +1028,7 @@ class topology_coordinator {
 
     future<group0_guard> exec_global_command(
             group0_guard guard, const raft_topology_cmd& cmd,
-            const utils::small_vector<raft::server_id, 2>& exclude_nodes,
+            const std::unordered_set<raft::server_id>& exclude_nodes,
             drop_guard_and_retake drop_and_retake = drop_guard_and_retake::yes) {
         auto nodes = _topo_sm._topology.normal_nodes | boost::adaptors::filtered(
                 [&exclude_nodes] (const std::pair<const raft::server_id, replica_state>& n) {
@@ -1034,9 +1048,10 @@ class topology_coordinator {
     future<node_to_work_on> exec_global_command(
             node_to_work_on&& node, const raft_topology_cmd& cmd, bool include_local,
             drop_guard_and_retake do_retake = drop_guard_and_retake::yes) {
-        utils::small_vector<raft::server_id, 2> exclude_nodes{parse_replaced_node(node)};
+        std::unordered_set<raft::server_id> exclude_nodes = parse_ignore_nodes(node);
+        exclude_nodes.insert(parse_replaced_node(node));
         if (!include_local) {
-            exclude_nodes.push_back(_raft.id());
+            exclude_nodes.insert(_raft.id());
         }
         auto guard = co_await exec_global_command(std::move(node.guard), cmd, exclude_nodes, do_retake);
         co_return retake_node(std::move(guard), node.id);
@@ -1280,6 +1295,7 @@ class topology_coordinator {
     // Next migration of the same tablet is guaranteed to use a different instance.
     struct tablet_migration_state {
         background_action_holder streaming;
+        std::unordered_map<locator::tablet_transition_stage, background_action_holder> barriers;
     };
 
     std::unordered_map<locator::global_tablet_id, tablet_migration_state> _tablets;
@@ -1363,6 +1379,13 @@ class topology_coordinator {
         bool needs_barrier = false;
         bool has_transitions = false;
 
+        shared_promise barrier;
+        auto fail_barrier = seastar::defer([&] {
+            if (needs_barrier) {
+                barrier.set_exception(seastar::broken_promise());
+            }
+        });
+
         _tablets_ready = false;
         co_await for_each_tablet_transition([&] (const locator::tablet_map& tmap,
                                                  schema_ptr s,
@@ -1382,8 +1405,12 @@ class topology_coordinator {
             };
 
             auto transition_to_with_barrier = [&] (locator::tablet_transition_stage stage) {
-                needs_barrier = true;
-                transition_to(stage);
+                if (advance_in_background(gid, tablet_state.barriers[stage], "barrier", [&] {
+                    needs_barrier = true;
+                    return barrier.get_shared_future();
+                })) {
+                    transition_to(stage);
+                }
             };
 
             switch (trinfo.stage) {
@@ -1424,29 +1451,47 @@ class topology_coordinator {
             }
         });
 
-        if (needs_barrier) {
-            guard = co_await global_tablet_token_metadata_barrier(std::move(guard));
-        }
-
         // In order to keep the cluster saturated, ask the load balancer for more transitions.
         // Unless there is a pending topology change operation.
+        auto ts = guard.write_timestamp();
         auto [preempt, new_guard] = should_preempt_balancing(std::move(guard));
         guard = std::move(new_guard);
+        if (ts != guard.write_timestamp()) {
+            // We rely on the fact that should_preempt_balancing() does not release the guard
+            // so that tablet metadata reading and updates are atomic.
+            on_internal_error(slogger, "should_preempt_balancing() retook the guard");
+        }
         if (!preempt) {
             auto plan = co_await _tablet_allocator.balance_tablets(get_token_metadata_ptr());
             co_await generate_migration_updates(updates, guard, plan);
         }
 
-        // It's ok to execute planned updates after retaking the guard because as long
-        // as topology is in tablet_migration state only this coordinator has a right
-        // to advance the state machine of tablets.
-
-        if (!updates.empty()) {
+        // The updates have to be executed under the same guard which was used to read tablet metadata
+        // to ensure that we don't reinsert tablet rows which were concurrently deleted by schema change
+        // which happens outside the topology coordinator.
+        bool has_updates = !updates.empty();
+        if (has_updates) {
             updates.emplace_back(
                 topology_mutation_builder(guard.write_timestamp())
                     .set_version(_topo_sm._topology.version + 1)
                     .build());
             co_await update_topology_state(std::move(guard), std::move(updates), format("Tablet migration"));
+        }
+
+        if (needs_barrier) {
+            // If has_updates is true then we have dropped the guard and need to re-obtain it.
+            // It's fine to start an independent operation here. The barrier doesn't have to be executed
+            // atomically with the read which set needs_barrier, because it's fine if the global barrier
+            // works with a more recent set of nodes and it's fine if it propagates a more recent topology.
+            if (!guard) {
+                guard = co_await start_operation();
+            }
+            guard = co_await global_tablet_token_metadata_barrier(std::move(guard));
+            barrier.set_value();
+            fail_barrier.cancel();
+        }
+
+        if (has_updates) {
             co_return;
         }
 
@@ -1468,6 +1513,9 @@ class topology_coordinator {
         co_await update_topology_state(std::move(guard), std::move(updates), "Finished tablet migration");
     }
 
+    // This function must not release and reacquire the guard, callers rely
+    // on the fact that the block which calls this is atomic.
+    // FIXME: Don't take the ownership of the guard to make the above guarantee explicit.
     std::pair<bool, group0_guard> should_preempt_balancing(group0_guard guard) {
         auto node_or_guard = get_node_to_work_on_opt(std::move(guard));
         if (auto* node = std::get_if<node_to_work_on>(&node_or_guard)) {
@@ -1712,7 +1760,6 @@ class topology_coordinator {
                 case node_state::bootstrapping: {
                     topology_mutation_builder builder(node.guard.write_timestamp());
                     builder.del_transition_state()
-                           .set_version(_topo_sm._topology.version + 1)
                            .with_node(node.id)
                            .set("node_state", node_state::normal);
                     co_await update_topology_state(take_guard(std::move(node)), {builder.build()},
@@ -1784,7 +1831,7 @@ class topology_coordinator {
                 switch (node.request.value()) {
                     case topology_request::join: {
                         assert(!node.rs->ring);
-                        auto num_tokens = std::get<uint32_t>(node.req_param.value());
+                        auto num_tokens = std::get<join_param>(node.req_param.value()).num_tokens;
                         // A node just joined and does not have tokens assigned yet
                         // Need to assign random tokens to the node
                         auto tmptr = get_token_metadata_ptr();
@@ -1834,7 +1881,7 @@ class topology_coordinator {
                         break;
                     case topology_request::replace: {
                         assert(!node.rs->ring);
-                        auto replaced_id = std::get<raft::server_id>(node.req_param.value());
+                        auto replaced_id = std::get<replace_param>(node.req_param.value()).replaced_id;
                         auto it = _topo_sm._topology.normal_nodes.find(replaced_id);
                         assert(it != _topo_sm._topology.normal_nodes.end());
                         assert(it->second.ring && it->second.state == node_state::normal);
@@ -2085,6 +2132,20 @@ future<> storage_service::raft_state_monitor_fiber(raft::server& raft, cdc::gene
 
 
 future<> storage_service::raft_replace(raft::server& raft_server, raft::server_id replaced_id, gms::inet_address replaced_ip) {
+    auto ignore_nodes_strs = utils::split_comma_separated_list(_db.local().get_config().ignore_dead_nodes_for_replace());
+    std::unordered_set<raft::server_id> ignored_ids;
+    for (const sstring& n : ignore_nodes_strs) {
+        raft::server_id ignored_id;
+        // FIXME: IPs should be supported, but the current implementation of raft_address_map doesn't allow this.
+        // We can also deprecate the use of IPs with consistent topology.
+        try {
+            ignored_id = raft::server_id{utils::UUID(n)};
+        } catch (const std::exception&) {
+            throw std::invalid_argument(::format("invalid host ID of the ignored node {}", n));
+        }
+        ignored_ids.insert(ignored_id);
+    }
+
     // Read barrier to access the latest topology. Quorum of nodes has to be alive.
     co_await raft_server.read_barrier(&_abort_source);
 
@@ -2095,12 +2156,18 @@ future<> storage_service::raft_replace(raft::server& raft_server, raft::server_i
 
     // add myself to topology with request to replace
     while (!_topology_state_machine._topology.contains(raft_server.id())) {
-        slogger.info("raft topology: adding myself to topology for replace: {} replacing {}", raft_server.id(), replaced_id);
+        slogger.info("raft topology: adding myself to topology for replace: {} replacing {}, ignored nodes: {}", raft_server.id(), replaced_id, ignored_ids);
         auto guard = co_await _group0->client().start_operation(&_abort_source);
 
         auto it = _topology_state_machine._topology.normal_nodes.find(replaced_id);
         if (it == _topology_state_machine._topology.normal_nodes.end()) {
             throw std::runtime_error(::format("Cannot replace node {}/{} because it is not in the 'normal' state", replaced_ip, replaced_id));
+        }
+
+        for (const auto& ignored_id : ignored_ids) {
+            if (!_topology_state_machine._topology.find(ignored_id)) {
+                throw std::runtime_error(::format("ignored node {} is not found in the cluster", ignored_id));
+            }
         }
 
         auto& rs = it->second;
@@ -2112,6 +2179,7 @@ future<> storage_service::raft_replace(raft::server& raft_server, raft::server_i
                .set("release_version", version::release())
                .set("topology_request", topology_request::replace)
                .set("replaced_id", replaced_id)
+               .set("ignore_nodes", ignored_ids)
                .set("num_tokens", _db.local().get_config().num_tokens())
                .set("shard_count", smp::count)
                .set("ignore_msb", _db.local().get_config().murmur3_partitioner_ignore_msb_bits())
@@ -2422,6 +2490,12 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
         app_states.emplace(s.first, std::move(s.second));
     }
 
+    auto schema_change_announce = _db.local().observable_schema_version().observe([this] (table_schema_version schema_version) mutable {
+        _migration_manager.local().passive_announce(std::move(schema_version));
+    });
+
+    _listeners.emplace_back(make_lw_shared(std::move(schema_change_announce)));
+
     slogger.info("Starting up server gossip");
 
     auto generation_number = gms::generation_type(co_await _sys_ks.local().increment_and_get_generation());
@@ -2494,10 +2568,6 @@ future<> storage_service::join_token_ring(cdc::generation_service& cdc_gen_servi
         }
     } ();
 
-    auto schema_change_announce = _db.local().observable_schema_version().observe([this] (table_schema_version schema_version) mutable {
-        _migration_manager.local().passive_announce(std::move(schema_version));
-    });
-    _listeners.emplace_back(make_lw_shared(std::move(schema_change_announce)));
     co_await _gossiper.wait_for_gossip_to_settle();
     // TODO: Look at the group 0 upgrade state and use it to decide whether to attach or not
     if (!_raft_topology_change_enabled) {
@@ -2743,18 +2813,12 @@ future<> storage_service::mark_existing_views_as_built(sharded<db::system_distri
 }
 
 std::unordered_set<gms::inet_address> storage_service::parse_node_list(sstring comma_separated_list, const token_metadata& tm) {
-    std::vector<sstring> ignore_nodes_strs;
+    std::vector<sstring> ignore_nodes_strs = utils::split_comma_separated_list(std::move(comma_separated_list));
     std::unordered_set<gms::inet_address> ignore_nodes;
-    boost::split(ignore_nodes_strs, comma_separated_list, boost::is_any_of(","));
-    for (std::string n : ignore_nodes_strs) {
+    for (const sstring& n : ignore_nodes_strs) {
         try {
-            std::replace(n.begin(), n.end(), '\"', ' ');
-            std::replace(n.begin(), n.end(), '\'', ' ');
-            boost::trim_all(n);
-            if (!n.empty()) {
-                auto ep_and_id = tm.parse_host_id_and_endpoint(n);
-                ignore_nodes.insert(ep_and_id.endpoint);
-            }
+            auto ep_and_id = tm.parse_host_id_and_endpoint(n);
+            ignore_nodes.insert(ep_and_id.endpoint);
         } catch (...) {
             throw std::runtime_error(::format("Failed to parse node list: {}: invalid node={}: {}", ignore_nodes_strs, n, std::current_exception()));
         }
@@ -3306,7 +3370,7 @@ future<> storage_service::on_dead(gms::inet_address endpoint, gms::endpoint_stat
 future<> storage_service::on_restart(gms::inet_address endpoint, gms::endpoint_state state, gms::permit_id pid) {
     slogger.debug("endpoint={} on_restart: permit_id={}", endpoint, pid);
     // If we have restarted before the node was even marked down, we need to reset the connection pool
-    if (state.is_alive()) {
+    if (endpoint != get_broadcast_address() && _gossiper.is_alive(endpoint)) {
         return on_dead(endpoint, state, pid);
     }
     return make_ready_future();
@@ -4516,21 +4580,31 @@ void storage_service::run_replace_ops(std::unordered_set<token>& bootstrap_token
     }
 }
 
-future<> storage_service::raft_removenode(locator::host_id host_id) {
+future<> storage_service::raft_removenode(locator::host_id host_id, std::list<locator::host_id_or_endpoint> ignore_nodes_params) {
     auto id = raft::server_id{host_id.uuid()};
+    std::unordered_set<raft::server_id> ignored_ids;
+    for (const auto& hoep : ignore_nodes_params) {
+        // FIXME: IPs should be supported, but the current implementation of raft_address_map doesn't allow this.
+        // We can also deprecate the use of IPs with consistent topology.
+        if (hoep.has_endpoint()) {
+            throw std::invalid_argument("--ignore-dead-nodes does not support IPs, use host IDs instead");
+        }
+        ignored_ids.insert(raft::server_id{hoep.id.uuid()});
+    }
+
     while (true) {
         auto guard = co_await _group0->client().start_operation(&_abort_source);
 
         auto it = _topology_state_machine._topology.find(id);
 
         if (!it) {
-            throw std::runtime_error(::format("raft topology removenode: host id {} is not found in the cluster", host_id));
+            throw std::runtime_error(::format("removenode: host id {} is not found in the cluster", host_id));
         }
 
         auto& rs = it->second; // not usable after yeild
 
         if (rs.state != node_state::normal) {
-            throw std::runtime_error(::format("raft topology removenode: node {} is in '{}' state. Wait for it to be in 'normal' state", id, rs.state));
+            throw std::runtime_error(::format("removenode: node {} is in '{}' state. Wait for it to be in 'normal' state", id, rs.state));
         }
         const auto& am = _group0->address_map();
         auto ip = am.find(id);
@@ -4541,16 +4615,23 @@ future<> storage_service::raft_removenode(locator::host_id host_id) {
 
         if (_gossiper.is_alive(*ip)) {
             const std::string message = ::format(
-                "raft topology removenode: Rejected removenode operation for node {} ip {} "
+                "removenode: Rejected removenode operation for node {} ip {} "
                 "the node being removed is alive, maybe you should use decommission instead?",
                 id, *ip);
-            slogger.warn(std::string_view(message));
+            slogger.warn("raft topology {}", std::string_view(message));
             throw std::runtime_error(message);
         }
 
-        slogger.info("raft topology: request removenode for: {}", id);
+        for (const auto& ignored_id : ignored_ids) {
+            if (!_topology_state_machine._topology.find(ignored_id)) {
+                throw std::runtime_error(::format("ignored node {} is not found in the cluster", ignored_id));
+            }
+        }
+
+        slogger.info("raft topology: request removenode for: {}, ignored nodes: {}", id, ignored_ids);
         topology_mutation_builder builder(guard.write_timestamp());
         builder.with_node(id)
+               .set("ignore_nodes", ignored_ids)
                .set("topology_request", topology_request::remove);
         topology_change change{{builder.build()}};
         group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard, ::format("removenode: request remove for {}", id));
@@ -4581,7 +4662,7 @@ future<> storage_service::removenode(locator::host_id host_id, std::list<locator
     return run_with_api_lock(sstring("removenode"), [host_id, ignore_nodes_params = std::move(ignore_nodes_params)] (storage_service& ss) mutable {
         return seastar::async([&ss, host_id, ignore_nodes_params = std::move(ignore_nodes_params)] () mutable {
             if (ss._raft_topology_change_enabled) {
-                ss.raft_removenode(host_id).get();
+                ss.raft_removenode(host_id, std::move(ignore_nodes_params)).get();
                 return;
             }
             node_ops_ctl ctl(ss, node_ops_cmd::removenode_prepare, host_id, gms::inet_address());
@@ -5731,13 +5812,24 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(shar
                         // Bootstrap did not complete yet, but streaming did
                     } else {
                         co_await retrier(_bootstrap_result, coroutine::lambda([&] () ->future<> {
+                            if (!_topology_state_machine._topology.req_param.contains(raft_server.id())) {
+                                on_internal_error(slogger, ::format("Cannot find request_param for node id {}", raft_server.id()));
+                            }
                             if (is_repair_based_node_ops_enabled(streaming::stream_reason::replace)) {
-                                co_await _repair.local().replace_with_repair(get_token_metadata_ptr(), rs.ring.value().tokens, {});
+                                // FIXME: we should not need to translate ids to IPs here. See #6403.
+                                std::unordered_set<gms::inet_address> ignored_ips;
+                                for (const auto& id : std::get<replace_param>(_topology_state_machine._topology.req_param[raft_server.id()]).ignored_ids) {
+                                    auto ip = _group0->address_map().find(id);
+                                    if (!ip) {
+                                        on_fatal_internal_error(slogger, ::format("Cannot find a mapping from node id {} to its ip", id));
+                                    }
+                                    ignored_ips.insert(*ip);
+                                }
+                                co_await _repair.local().replace_with_repair(get_token_metadata_ptr(), rs.ring.value().tokens, std::move(ignored_ips));
                             } else {
                                 dht::boot_strapper bs(_db, _stream_manager, _abort_source, get_broadcast_address(),
                                                       locator::endpoint_dc_rack{rs.datacenter, rs.rack}, rs.ring.value().tokens, get_token_metadata_ptr());
-                                assert(_topology_state_machine._topology.req_param.contains(raft_server.id()));
-                                auto replaced_id = std::get<raft::server_id>(_topology_state_machine._topology.req_param[raft_server.id()]);
+                                auto replaced_id = std::get<replace_param>(_topology_state_machine._topology.req_param[raft_server.id()]).replaced_id;
                                 auto existing_ip = _group0->address_map().find(replaced_id);
                                 assert(existing_ip);
                                 co_await bs.bootstrap(streaming::stream_reason::replace, _gossiper, *existing_ip);
@@ -5764,11 +5856,12 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(shar
                         slogger.warn("raft topology: got stream_ranges request while my state is normal but cannot find a node that is been removed");
                         break;
                     }
-                    slogger.debug("raft topology: streaming to remove node {}", it->first);
+                    auto id = it->first;
+                    slogger.debug("raft topology: streaming to remove node {}", id);
                     const auto& am = _group0->address_map();
-                    auto ip = am.find(it->first); // map node id to ip
+                    auto ip = am.find(id); // map node id to ip
                     assert (ip); // what to do if address is unknown?
-                    co_await retrier(_remove_result[it->first], coroutine::lambda([&] () {
+                    co_await retrier(_remove_result[id], coroutine::lambda([&] () {
                         auto as = make_shared<abort_source>();
                         auto sub = _abort_source.subscribe([as] () noexcept {
                             if (!as->abort_requested()) {
@@ -5776,8 +5869,19 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(shar
                             }
                         });
                         if (is_repair_based_node_ops_enabled(streaming::stream_reason::removenode)) {
-                            auto ops = seastar::make_shared<node_ops_info>(node_ops_id::create_random_id(), as, std::list<gms::inet_address>());
-                            // FIXME: ignore node list support
+                            if (!_topology_state_machine._topology.req_param.contains(id)) {
+                                on_internal_error(slogger, ::format("Cannot find request_param for node id {}", id));
+                            }
+                            // FIXME: we should not need to translate ids to IPs here. See #6403.
+                            std::list<gms::inet_address> ignored_ips;
+                            for (const auto& ignored_id : std::get<removenode_param>(_topology_state_machine._topology.req_param[id]).ignored_ids) {
+                                auto ip = _group0->address_map().find(ignored_id);
+                                if (!ip) {
+                                    on_fatal_internal_error(slogger, ::format("Cannot find a mapping from node id {} to its ip", ignored_id));
+                                }
+                                ignored_ips.push_back(*ip);
+                            }
+                            auto ops = seastar::make_shared<node_ops_info>(node_ops_id::create_random_id(), as, std::move(ignored_ips));
                             return _repair.local().removenode_with_repair(get_token_metadata_ptr(), *ip, ops);
                         } else {
                             return removenode_with_stream(*ip, as);
@@ -5787,7 +5891,7 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(shar
                 }
                 break;
                 case node_state::rebuilding: {
-                    auto source_dc = std::get<sstring>(_topology_state_machine._topology.req_param[raft_server.id()]);
+                    auto source_dc = std::get<rebuild_param>(_topology_state_machine._topology.req_param[raft_server.id()]).source_dc;
                     slogger.info("raft topology: rebuild from dc: {}", source_dc == "" ? "(any dc)" : source_dc);
                     co_await retrier(_rebuild_result, [&] () -> future<> {
                         auto tmptr = get_token_metadata_ptr();
@@ -5856,7 +5960,6 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(shar
 
 future<> storage_service::update_fence_version(token_metadata::version_t new_version) {
     return container().invoke_on_all([new_version] (storage_service& ss) {
-        slogger.debug("update_fence_version, version {}", new_version);
         ss._shared_token_metadata.update_fence_version(new_version);
     });
 }
@@ -6351,22 +6454,16 @@ bool storage_service::is_repair_based_node_ops_enabled(streaming::stream_reason 
         {"removenode", streaming::stream_reason::removenode},
         {"rebuild", streaming::stream_reason::rebuild},
     };
-    std::vector<sstring> enabled_list;
-    std::unordered_set<streaming::stream_reason> enabled_set;
     auto enabled_list_str = _db.local().get_config().allowed_repair_based_node_ops();
-    boost::trim_all(enabled_list_str);
-    std::replace(enabled_list_str.begin(), enabled_list_str.end(), '\"', ' ');
-    std::replace(enabled_list_str.begin(), enabled_list_str.end(), '\'', ' ');
-    boost::split(enabled_list, enabled_list_str, boost::is_any_of(","));
-    for (sstring op : enabled_list) {
+    std::vector<sstring> enabled_list = utils::split_comma_separated_list(std::move(enabled_list_str));
+    std::unordered_set<streaming::stream_reason> enabled_set;
+    for (const sstring& op : enabled_list) {
         try {
-            if (!op.empty()) {
-                auto it = reason_map.find(op);
-                if (it != reason_map.end()) {
-                    enabled_set.insert(it->second);
-                } else {
-                    throw std::invalid_argument(::format("unsupported operation name: {}", op));
-                }
+            auto it = reason_map.find(op);
+            if (it != reason_map.end()) {
+                enabled_set.insert(it->second);
+            } else {
+                throw std::invalid_argument(::format("unsupported operation name: {}", op));
             }
         } catch (...) {
             throw std::invalid_argument(::format("Failed to parse allowed_repair_based_node_ops parameter [{}]: {}",

@@ -253,7 +253,7 @@ const std::vector<sstables::shared_sstable> load_sstables(schema_ptr schema, sst
             }
         }
 
-        const auto dir_path = std::filesystem::path(sst_path).remove_filename();
+        const auto dir_path = sst_path.parent_path();
         const auto sst_filename = sst_path.filename();
 
         auto ed = sstables::entry_descriptor::make_descriptor(dir_path.c_str(), sst_filename.c_str(), schema->ks_name(), schema->cf_name());
@@ -853,7 +853,7 @@ public:
     virtual bool tombstone_gc_enabled() const noexcept override { return false; }
     virtual const tombstone_gc_state& get_tombstone_gc_state() const noexcept override { return _tombstone_gc_state; }
     virtual compaction_backlog_tracker& get_backlog_tracker() override { return _backlog_tracker; }
-    virtual const std::string& get_group_id() const noexcept override { return _group_id; }
+    virtual const std::string get_group_id() const noexcept override { return _group_id; }
     virtual seastar::condition_variable& get_staging_done_condition() noexcept override { return _staging_done_condition; }
 };
 
@@ -916,7 +916,7 @@ void scrub_operation(schema_ptr schema, reader_permit permit, const std::vector<
     scylla_sstable_table_state table_state(schema, permit, sst_man, output_dir);
 
     auto compaction_descriptor = sstables::compaction_descriptor(std::move(sstables));
-    compaction_descriptor.options = sstables::compaction_type_options::make_scrub(scrub_mode);
+    compaction_descriptor.options = sstables::compaction_type_options::make_scrub(scrub_mode, sstables::compaction_type_options::scrub::quarantine_invalid_sstables::no);
     compaction_descriptor.creator = [&table_state] (shard_id) { return table_state.make_sstable(); };
     compaction_descriptor.replacer = [] (sstables::compaction_completion_desc) { };
 
