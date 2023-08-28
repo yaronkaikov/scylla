@@ -45,6 +45,7 @@ find_package(ICU COMPONENTS uc i18n REQUIRED)
 find_package(absl COMPONENTS hash raw_hash_set REQUIRED)
 find_package(libdeflate REQUIRED)
 find_package(libxcrypt REQUIRED)
+find_package(p11-kit REQUIRED)
 find_package(Snappy REQUIRED)
 find_package(RapidJSON REQUIRED)
 find_package(Thrift REQUIRED)
@@ -189,6 +190,7 @@ target_link_libraries(Boost::regex
     ICU::uc)
 
 target_link_libraries(scylla PRIVATE
+    p11-kit::p11-kit
     seastar
     Boost::program_options)
 
