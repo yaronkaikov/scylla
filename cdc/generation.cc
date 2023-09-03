@@ -13,6 +13,7 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/coroutine.hh>
 
+#include "gms/endpoint_state.hh"
 #include "keys.hh"
 #include "schema/schema_builder.hh"
 #include "replica/database.hh"
@@ -256,11 +257,9 @@ public:
 
 bool should_propose_first_generation(const gms::inet_address& me, const gms::gossiper& g) {
     auto my_host_id = g.get_host_id(me);
-    auto& eps = g.get_endpoint_states();
-    return std::none_of(eps.begin(), eps.end(),
-            [&] (const std::pair<gms::inet_address, gms::endpoint_state>& ep) {
-        return my_host_id < g.get_host_id(ep.first);
-    });
+    return g.for_each_endpoint_state_until([&] (const gms::inet_address& node, const gms::endpoint_state& eps) {
+        return stop_iteration(my_host_id < g.get_host_id(node));
+    }) == stop_iteration::no;
 }
 
 bool is_cdc_generation_optimal(const cdc::topology_description& gen, const locator::token_metadata& tm) {
@@ -456,8 +455,12 @@ future<cdc::generation_id> generation_service::legacy_make_new_generation(const 
  * but if the cluster already supports CDC, then every newly joining node will propose a new CDC generation,
  * which means it will gossip the generation's timestamp.
  */
-static std::optional<cdc::generation_id> get_generation_id_for(const gms::inet_address& endpoint, const gms::gossiper& g) {
-    auto gen_id_string = g.get_application_state_value(endpoint, gms::application_state::CDC_GENERATION_ID);
+static std::optional<cdc::generation_id> get_generation_id_for(const gms::inet_address& endpoint, const gms::endpoint_state& eps) {
+    const auto* gen_id_ptr = eps.get_application_state_ptr(gms::application_state::CDC_GENERATION_ID);
+    if (!gen_id_ptr) {
+        return std::nullopt;
+    }
+    auto gen_id_string = gen_id_ptr->value();
     cdc_log.trace("endpoint={}, gen_id_string={}", endpoint, gen_id_string);
     return gms::versioned_value::cdc_generation_id_from_string(gen_id_string);
 }
@@ -763,8 +766,8 @@ future<> generation_service::stop() {
         cdc_log.error("CDC stream rewrite failed: ", std::current_exception());
     }
 
-    if (this_shard_id() == 0) {
-        co_await _gossiper.unregister_(shared_from_this());
+    if (_joined && (this_shard_id() == 0)) {
+        co_await leave_ring();
     }
 
     _stopped = true;
@@ -776,7 +779,6 @@ generation_service::~generation_service() {
 
 future<> generation_service::after_join(std::optional<cdc::generation_id>&& startup_gen_id) {
     assert_shard_zero(__PRETTY_FUNCTION__);
-    assert(_sys_ks.local().bootstrap_complete());
 
     _gen_id = std::move(startup_gen_id);
     _gossiper.register_(shared_from_this());
@@ -794,10 +796,16 @@ future<> generation_service::after_join(std::optional<cdc::generation_id>&& star
     _cdc_streams_rewrite_complete = maybe_rewrite_streams_descriptions();
 }
 
-future<> generation_service::on_join(gms::inet_address ep, gms::endpoint_state ep_state, gms::permit_id pid) {
+future<> generation_service::leave_ring() {
+    assert_shard_zero(__PRETTY_FUNCTION__);
+    _joined = false;
+    co_await _gossiper.unregister_(shared_from_this());
+}
+
+future<> generation_service::on_join(gms::inet_address ep, gms::endpoint_state_ptr ep_state, gms::permit_id pid) {
     assert_shard_zero(__PRETTY_FUNCTION__);
 
-    auto val = ep_state.get_application_state_ptr(gms::application_state::CDC_GENERATION_ID);
+    auto val = ep_state->get_application_state_ptr(gms::application_state::CDC_GENERATION_ID);
     if (!val) {
         return make_ready_future();
     }
@@ -825,22 +833,21 @@ future<> generation_service::check_and_repair_cdc_streams() {
     }
 
     std::optional<cdc::generation_id> latest = _gen_id;
-    const auto& endpoint_states = _gossiper.get_endpoint_states();
-    for (const auto& [addr, state] : endpoint_states) {
+    _gossiper.for_each_endpoint_state([&] (const gms::inet_address& addr, const gms::endpoint_state& state) {
         if (_gossiper.is_left(addr)) {
             cdc_log.info("check_and_repair_cdc_streams ignored node {} because it is in LEFT state", addr);
-            continue;
+            return;
         }
         if (!_gossiper.is_normal(addr)) {
             throw std::runtime_error(format("All nodes must be in NORMAL or LEFT state while performing check_and_repair_cdc_streams"
                     " ({} is in state {})", addr, _gossiper.get_gossip_status(state)));
         }
 
-        const auto gen_id = get_generation_id_for(addr, _gossiper);
+        const auto gen_id = get_generation_id_for(addr, state);
         if (!latest || (gen_id && get_ts(*gen_id) > get_ts(*latest))) {
             latest = gen_id;
         }
-    }
+    });
 
     auto tmptr = _token_metadata.get();
     auto sys_dist_ks = get_sys_dist_ks();
@@ -957,16 +964,12 @@ future<> generation_service::legacy_handle_cdc_generation(std::optional<cdc::gen
         co_return;
     }
 
-    if (!_sys_ks.local().bootstrap_complete() || !_sys_dist_ks.local_is_initialized()
-            || !_sys_dist_ks.local().started()) {
-        // The service should not be listening for generation changes until after the node
-        // is bootstrapped. Therefore we would previously assume that this condition
-        // can never become true and call on_internal_error here, but it turns out that
-        // it may become true on decommission: the node enters NEEDS_BOOTSTRAP
-        // state before leaving the token ring, so bootstrap_complete() becomes false.
-        // In that case we can simply return.
-        co_return;
+    if (!_sys_dist_ks.local_is_initialized() || !_sys_dist_ks.local().started()) {
+        on_internal_error(cdc_log, "Legacy handle CDC generation with sys.dist.ks. down");
     }
+
+    // The service should not be listening for generation changes until after the node
+    // is bootstrapped and since the node leaves the ring on decommission
 
     if (co_await container().map_reduce(and_reducer(), [ts = get_ts(*gen_id)] (generation_service& svc) {
         return !svc._cdc_metadata.prepare(ts);
@@ -1030,12 +1033,12 @@ future<> generation_service::legacy_scan_cdc_generations() {
     assert_shard_zero(__PRETTY_FUNCTION__);
 
     std::optional<cdc::generation_id> latest;
-    for (const auto& ep: _gossiper.get_endpoint_states()) {
-        auto gen_id = get_generation_id_for(ep.first, _gossiper);
+    _gossiper.for_each_endpoint_state([&] (const gms::inet_address& node, const gms::endpoint_state& eps) {
+        auto gen_id = get_generation_id_for(node, eps);
         if (!latest || (gen_id && get_ts(*gen_id) > get_ts(*latest))) {
             latest = gen_id;
         }
-    }
+    });
 
     if (latest) {
         cdc_log.info("Latest generation seen during startup: {}", *latest);

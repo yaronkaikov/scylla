@@ -155,11 +155,6 @@ table::find_partition(schema_ptr s, reader_permit permit, const dht::decorated_k
     });
 }
 
-future<table::const_mutation_partition_ptr>
-table::find_partition_slow(schema_ptr s, reader_permit permit, const partition_key& key) const {
-    return find_partition(s, std::move(permit), dht::decorate_key(*s, key));
-}
-
 future<table::const_row_ptr>
 table::find_row(schema_ptr s, reader_permit permit, const dht::decorated_key& partition_key, clustering_key clustering_key) const {
     return find_partition(s, std::move(permit), partition_key).then([clustering_key = std::move(clustering_key), s] (const_mutation_partition_ptr p) {
@@ -628,6 +623,23 @@ compaction_group& table::compaction_group_for_token(dht::token token) const noex
     return ret;
 }
 
+std::vector<size_t> table::compaction_group_ids_for_token_range(dht::token_range tr) const {
+    std::vector<size_t> ret;
+    auto cmp = dht::token_comparator();
+
+    size_t candidate_start = tr.start() ? compaction_group_for_token(tr.start()->value()).group_id() : size_t(0);
+    size_t candidate_end = tr.end() ? compaction_group_for_token(tr.end()->value()).group_id() : (_compaction_groups.size() - 1);
+
+    while (candidate_start <= candidate_end) {
+        auto& cg = _compaction_groups[candidate_start++];
+        if (cg && tr.overlaps(cg->token_range(), cmp)) {
+            ret.push_back(cg->group_id());
+        }
+    }
+
+    return ret;
+}
+
 compaction_group& table::compaction_group_for_key(partition_key_view key, const schema_ptr& s) const noexcept {
     // fast path when table owns a single compaction group, to avoid overhead of calculating token.
     if (auto cg = single_compaction_group_if_available()) {
@@ -650,6 +662,30 @@ future<> table::parallel_foreach_compaction_group(std::function<future<>(compact
     co_await coroutine::parallel_for_each(compaction_groups(), [&] (const compaction_group_ptr& cg) {
         return action(*cg);
     });
+}
+
+future<sstables::sstable_list> table::take_storage_snapshot(dht::token_range tr) {
+    sstables::sstable_list ret;
+
+    for (auto cg_id : compaction_group_ids_for_token_range(tr)) {
+        auto& cg = _compaction_groups[cg_id];
+
+        // We don't care about sstables in snapshot being unlinked, as the file
+        // descriptors remain opened until last reference to them are gone.
+        // Also, we should be careful with taking a deletion lock here as a
+        // deadlock might occur due to memtable flush backpressure waiting on
+        // compaction to reduce the backlog.
+
+        co_await cg->flush();
+
+        auto all_sstables = cg->make_compound_sstable_set();
+
+        all_sstables->for_each_sstable([&ret] (const sstables::shared_sstable& sst) mutable {
+           ret.insert(sst);
+        });
+    }
+
+    co_return ret;
 }
 
 void table::update_stats_for_new_sstable(const sstables::shared_sstable& sst) noexcept {
@@ -1865,7 +1901,7 @@ future<std::unordered_map<sstring, table::snapshot_details>> table::get_snapshot
                         // All the others should just generate an exception: there is something wrong, so don't blindly
                         // add it to the size.
                         if (name != "manifest.json" && name != "schema.cql") {
-                            sstables::entry_descriptor::make_descriptor(snapshot_dir.native(), name);
+                            sstables::entry_descriptor::make_descriptor(snapshot_dir / name);
                             all_snapshots.at(snapshot_name).total += size;
                         } else {
                             size = 0;
@@ -2294,7 +2330,7 @@ table::cache_hit_rate table::get_hit_rate(const gms::gossiper& gossiper, gms::in
     auto it = _cluster_cache_hit_rates.find(addr);
     if (it == _cluster_cache_hit_rates.end()) {
         // no data yet, get it from the gossiper
-        auto* eps = gossiper.get_endpoint_state_for_endpoint_ptr(addr);
+        auto eps = gossiper.get_endpoint_state_ptr(addr);
         if (eps) {
             auto* state = eps->get_application_state_ptr(gms::application_state::CACHE_HITRATES);
             float f = -1.0f; // missing state means old node

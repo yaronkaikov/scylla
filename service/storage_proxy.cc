@@ -1216,6 +1216,10 @@ public:
     // this is called with an id of a replica that replied to learn request
     // adn returns true when quorum of such requests are accumulated
     bool learned(gms::inet_address ep);
+
+    const locator::effective_replication_map_ptr& get_effective_replication_map() const noexcept {
+        return _effective_replication_map_ptr;
+    }
 };
 
 thread_local uint64_t paxos_response_handler::next_id = 0;
@@ -1862,8 +1866,8 @@ paxos_response_handler::begin_and_repair_paxos(client_state& cs, unsigned& conte
         if (missing_mrc.size() > 0) {
             paxos::paxos_state::logger.debug("CAS[{}] Repairing replicas that missed the most recent commit", _id);
             tracing::trace(tr_state, "Repairing replicas that missed the most recent commit");
-            std::array<std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, inet_address_vector_replica_set>, 1>
-                m{std::make_tuple(make_lw_shared<paxos::proposal>(std::move(*summary.most_recent_commit)), _schema, _key.token(), std::move(missing_mrc))};
+            std::array<std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, shared_ptr<paxos_response_handler>, dht::token, inet_address_vector_replica_set>, 1>
+                m{std::make_tuple(make_lw_shared<paxos::proposal>(std::move(*summary.most_recent_commit)), _schema, shared_from_this(), _key.token(), std::move(missing_mrc))};
             // create_write_response_handler is overloaded for paxos::proposal and will
             // create cas_mutation holder, which consequently will ensure paxos::learn is
             // used.
@@ -3115,16 +3119,14 @@ storage_proxy::create_write_response_handler(const std::tuple<lw_shared_ptr<paxo
 }
 
 result<storage_proxy::response_id_type>
-storage_proxy::create_write_response_handler(const std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, dht::token, inet_address_vector_replica_set>& meta,
+storage_proxy::create_write_response_handler(const std::tuple<lw_shared_ptr<paxos::proposal>, schema_ptr, shared_ptr<paxos_response_handler>, dht::token, inet_address_vector_replica_set>& meta,
         db::consistency_level cl, db::write_type type, tracing::trace_state_ptr tr_state, service_permit permit, db::allow_per_partition_rate_limit allow_limit) {
-    auto& [commit, s, token, endpoints] = meta;
+    auto& [commit, s, paxos_handler, token, endpoints] = meta;
 
     slogger.trace("creating write handler for paxos repair token: {} endpoint: {}", token, endpoints);
     tracing::trace(tr_state, "Creating write handler for paxos repair token: {} endpoint: {}", token, endpoints);
 
-    auto keyspace_name = s->ks_name();
-    replica::table& table = _db.local().find_column_family(s->id());
-    auto ermp = table.get_effective_replication_map();
+    auto ermp = paxos_handler->get_effective_replication_map();
 
     // No rate limiting for paxos (yet)
     return create_write_response_handler(std::move(ermp), cl, db::write_type::CAS, std::make_unique<cas_mutation>(std::move(commit), s, nullptr), std::move(endpoints),
@@ -3609,7 +3611,8 @@ storage_proxy::mutate_atomically_result(std::vector<mutation> mutations, db::con
 
     class context {
         storage_proxy& _p;
-        const locator::token_metadata_ptr _tmptr;
+        schema_ptr _schema;
+        locator::effective_replication_map_ptr _ermp;
         std::vector<mutation> _mutations;
         lw_shared_ptr<cdc::operation_result_tracker> _cdc_tracker;
         db::consistency_level _cl;
@@ -3624,7 +3627,8 @@ storage_proxy::mutate_atomically_result(std::vector<mutation> mutations, db::con
     public:
         context(storage_proxy & p, std::vector<mutation>&& mutations, lw_shared_ptr<cdc::operation_result_tracker>&& cdc_tracker, db::consistency_level cl, clock_type::time_point timeout, tracing::trace_state_ptr tr_state, service_permit permit)
                 : _p(p)
-                , _tmptr(p.get_token_metadata_ptr())
+                , _schema(_p.local_db().find_schema(db::system_keyspace::NAME, db::system_keyspace::BATCHLOG))
+                , _ermp(_p.local_db().find_column_family(_schema->id()).get_effective_replication_map())
                 , _mutations(std::move(mutations))
                 , _cdc_tracker(std::move(cdc_tracker))
                 , _cl(cl)
@@ -3636,7 +3640,7 @@ storage_proxy::mutate_atomically_result(std::vector<mutation> mutations, db::con
                 , _batchlog_endpoints(
                         [this]() -> inet_address_vector_replica_set {
                             auto local_addr = utils::fb_utilities::get_broadcast_address();
-                            auto& topology = _tmptr->get_topology();
+                            auto& topology = _ermp->get_topology();
                             auto local_dc = topology.get_datacenter();
                             auto& local_endpoints = topology.get_datacenter_racks().at(local_dc);
                             auto local_rack = topology.get_rack();
@@ -3657,26 +3661,23 @@ storage_proxy::mutate_atomically_result(std::vector<mutation> mutations, db::con
 
         future<result<>> send_batchlog_mutation(mutation m, db::consistency_level cl = db::consistency_level::ONE) {
             return _p.mutate_prepare<>(std::array<mutation, 1>{std::move(m)}, cl, db::write_type::BATCH_LOG, _permit, [this] (const mutation& m, db::consistency_level cl, db::write_type type, service_permit permit) {
-                auto& table = _p._db.local().find_column_family(m.schema()->id());
-                auto ermp = table.get_effective_replication_map();
-                return _p.create_write_response_handler(std::move(ermp), cl, type, std::make_unique<shared_mutation>(m), _batchlog_endpoints, {}, {}, _trace_state, _stats, std::move(permit), std::monostate(), is_cancellable::no);
+                return _p.create_write_response_handler(_ermp, cl, type, std::make_unique<shared_mutation>(m), _batchlog_endpoints, {}, {}, _trace_state, _stats, std::move(permit), std::monostate(), is_cancellable::no);
             }).then(utils::result_wrap([this, cl] (unique_response_handler_vector ids) {
                 _p.register_cdc_operation_result_tracker(ids, _cdc_tracker);
                 return _p.mutate_begin(std::move(ids), cl, _trace_state, _timeout);
             }));
         }
         future<result<>> sync_write_to_batchlog() {
-            auto m = _p.get_batchlog_mutation_for(_mutations, _batch_uuid, netw::messaging_service::current_version, db_clock::now());
+            auto m = _p.do_get_batchlog_mutation_for(_schema, _mutations, _batch_uuid, netw::messaging_service::current_version, db_clock::now());
             tracing::trace(_trace_state, "Sending a batchlog write mutation");
             return send_batchlog_mutation(std::move(m));
         };
         future<> async_remove_from_batchlog() {
             // delete batch
-            auto schema = _p._db.local().find_schema(db::system_keyspace::NAME, db::system_keyspace::BATCHLOG);
-            auto key = partition_key::from_exploded(*schema, {uuid_type->decompose(_batch_uuid)});
+            auto key = partition_key::from_exploded(*_schema, {uuid_type->decompose(_batch_uuid)});
             auto now = service::client_state(service::client_state::internal_tag()).get_timestamp();
-            mutation m(schema, key);
-            m.partition().apply_delete(*schema, clustering_key_prefix::make_empty(), tombstone(now, gc_clock::now()));
+            mutation m(_schema, key);
+            m.partition().apply_delete(*_schema, clustering_key_prefix::make_empty(), tombstone(now, gc_clock::now()));
 
             tracing::trace(_trace_state, "Sending a batchlog remove mutation");
             return send_batchlog_mutation(std::move(m), db::consistency_level::ANY).then_wrapped([] (future<result<>> f) {
@@ -3732,6 +3733,10 @@ storage_proxy::mutate_atomically_result(std::vector<mutation> mutations, db::con
 
 mutation storage_proxy::get_batchlog_mutation_for(const std::vector<mutation>& mutations, const utils::UUID& id, int32_t version, db_clock::time_point now) {
     auto schema = local_db().find_schema(db::system_keyspace::NAME, db::system_keyspace::BATCHLOG);
+    return do_get_batchlog_mutation_for(std::move(schema), mutations, id, version, now);
+}
+
+mutation storage_proxy::do_get_batchlog_mutation_for(schema_ptr schema, const std::vector<mutation>& mutations, const utils::UUID& id, int32_t version, db_clock::time_point now) {
     auto key = partition_key::from_singular(*schema, id);
     auto timestamp = api::new_timestamp();
     auto data = [&mutations] {
@@ -3759,6 +3764,7 @@ bool storage_proxy::cannot_hint(const Range& targets, db::write_type type) const
 
 future<> storage_proxy::send_to_endpoint(
         std::unique_ptr<mutation_holder> m,
+        locator::effective_replication_map_ptr ermp,
         gms::inet_address target,
         inet_address_vector_topology_change pending_endpoints,
         db::write_type type,
@@ -3777,7 +3783,7 @@ future<> storage_proxy::send_to_endpoint(
         timeout = clock_type::now() + 5min;
     }
     return mutate_prepare(std::array{std::move(m)}, cl, type, /* does view building should hold a real permit */ empty_service_permit(),
-            [this, tr_state, target = std::array{target}, pending_endpoints = std::move(pending_endpoints), &stats, cancellable] (
+            [this, tr_state, erm = std::move(ermp), target = std::array{target}, pending_endpoints = std::move(pending_endpoints), &stats, cancellable] (
                 std::unique_ptr<mutation_holder>& m,
                 db::consistency_level cl,
                 db::write_type type, service_permit permit) mutable {
@@ -3789,8 +3795,6 @@ future<> storage_proxy::send_to_endpoint(
                 std::inserter(targets, targets.begin()),
                 std::back_inserter(dead_endpoints),
                 std::bind_front(&storage_proxy::is_alive, this));
-        auto& table = _db.local().find_column_family(m->schema()->id());
-        auto erm = table.get_effective_replication_map();
         slogger.trace("Creating write handler with live: {}; dead: {}", targets, dead_endpoints);
         db::assure_sufficient_live_nodes(cl, *erm, targets, pending_endpoints);
         return create_write_response_handler(
@@ -3815,6 +3819,7 @@ future<> storage_proxy::send_to_endpoint(
 
 future<> storage_proxy::send_to_endpoint(
         frozen_mutation_and_schema fm_a_s,
+        locator::effective_replication_map_ptr ermp,
         gms::inet_address target,
         inet_address_vector_topology_change pending_endpoints,
         db::write_type type,
@@ -3823,6 +3828,7 @@ future<> storage_proxy::send_to_endpoint(
         is_cancellable cancellable) {
     return send_to_endpoint(
             std::make_unique<shared_mutation>(std::move(fm_a_s)),
+            std::move(ermp),
             std::move(target),
             std::move(pending_endpoints),
             type,
@@ -3834,6 +3840,7 @@ future<> storage_proxy::send_to_endpoint(
 
 future<> storage_proxy::send_to_endpoint(
         frozen_mutation_and_schema fm_a_s,
+        locator::effective_replication_map_ptr ermp,
         gms::inet_address target,
         inet_address_vector_topology_change pending_endpoints,
         db::write_type type,
@@ -3843,6 +3850,7 @@ future<> storage_proxy::send_to_endpoint(
         is_cancellable cancellable) {
     return send_to_endpoint(
             std::make_unique<shared_mutation>(std::move(fm_a_s)),
+            std::move(ermp),
             std::move(target),
             std::move(pending_endpoints),
             type,
@@ -3852,10 +3860,11 @@ future<> storage_proxy::send_to_endpoint(
             cancellable);
 }
 
-future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s, gms::inet_address target) {
+future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s, locator::effective_replication_map_ptr ermp, gms::inet_address target) {
     if (!_features.hinted_handoff_separate_connection) {
         return send_to_endpoint(
                 std::make_unique<shared_mutation>(std::move(fm_a_s)),
+                std::move(ermp),
                 std::move(target),
                 { },
                 db::write_type::SIMPLE,
@@ -3867,6 +3876,7 @@ future<> storage_proxy::send_hint_to_endpoint(frozen_mutation_and_schema fm_a_s,
 
     return send_to_endpoint(
             std::make_unique<hint_mutation>(std::move(fm_a_s)),
+            std::move(ermp),
             std::move(target),
             { },
             db::write_type::SIMPLE,
@@ -3920,6 +3930,15 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
 
         for(auto dest: handler.get_targets()) {
             auto node = topology.find_node(dest);
+            if (!node) {
+                // The caller is supposed to pick target nodes from the topology
+                // contained in the effective_replication_map that is kept in the handler.
+                // If the e_r_m is not in sync with the topology used to pick the targets
+                // endpoints may be missing here and we better off returning an error
+                // (or aborting in testing) rather than segfaulting here
+                // (See https://github.com/scylladb/scylladb/issues/15138)
+                on_internal_error(slogger, fmt::format("Node {} was not found in topology", dest));
+            }
             const auto& dc = node->dc_rack().dc;
             // read repair writes do not go through coordinator since mutations are per destination
             if (handler.read_repair_write() || dc == local_dc) {

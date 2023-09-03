@@ -59,13 +59,33 @@ static mutation extract_history_mutation(std::vector<canonical_mutation>& muts, 
     return res;
 }
 
+static bool should_flush_system_topology_after_applying(const mutation& mut, const data_dictionary::database db) {
+    auto s_topology = db.find_schema(db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
+    if (mut.column_family_id() == s_topology->id()) {
+        auto enabled_features_id = s_topology->columns_by_name().at("enabled_features")->id;
+        if (mut.partition().static_row().find_cell(enabled_features_id)) {
+            return true;
+        }
+        auto supported_features_id = s_topology->columns_by_name().at("supported_features")->id;
+        for (const auto& r : mut.partition().clustered_rows()) {
+            if (r.row().cells().find_cell(supported_features_id) != nullptr) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static future<> write_mutations_to_database(storage_proxy& proxy, gms::inet_address from, std::vector<canonical_mutation> cms) {
     std::vector<mutation> mutations;
     mutations.reserve(cms.size());
+    bool need_system_topology_flush = false;
     try {
         for (const auto& cm : cms) {
             auto& tbl = proxy.local_db().find_column_family(cm.column_family_id());
-            mutations.emplace_back(cm.to_mutation(tbl.schema()));
+            auto mut = cm.to_mutation(tbl.schema());
+            need_system_topology_flush = need_system_topology_flush || should_flush_system_topology_after_applying(mut, proxy.data_dictionary());
+            mutations.emplace_back(std::move(mut));
         }
     } catch (replica::no_such_column_family& e) {
         slogger.error("Error while applying mutations from {}: {}", from, e);
@@ -73,6 +93,10 @@ static future<> write_mutations_to_database(storage_proxy& proxy, gms::inet_addr
     }
 
     co_await proxy.mutate_locally(std::move(mutations), tracing::trace_state_ptr());
+    if (need_system_topology_flush) {
+        slogger.trace("write_mutations_to_database: flushing {}.{}", db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
+        co_await proxy.get_db().local().flush(db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
+    }
 }
 
 future<> group0_state_machine::merge_and_apply(group0_state_machine_merger& merger) {
@@ -101,7 +125,7 @@ future<> group0_state_machine::merge_and_apply(group0_state_machine_merger& merg
     },
     [&] (topology_change& chng) -> future<> {
         co_await write_mutations_to_database(_sp, cmd.creator_addr, std::move(chng.mutations));
-        co_await _ss.topology_transition(_cdc_gen_svc);
+        co_await _ss.topology_transition();
     },
     [&] (write_mutations& muts) -> future<> {
         return write_mutations_to_database(_sp, cmd.creator_addr, std::move(muts.mutations));
@@ -171,7 +195,7 @@ future<> group0_state_machine::load_snapshot(raft::snapshot_id id) {
     // topology_state_load applies persisted state machine state into
     // memory and thus needs to be protected with apply mutex
     auto read_apply_mutex_holder = co_await _client.hold_read_apply_mutex();
-    co_await _ss.topology_state_load(_cdc_gen_svc);
+    co_await _ss.topology_state_load();
     _ss._topology_state_machine.event.broadcast();
 }
 
@@ -207,6 +231,8 @@ future<> group0_state_machine::transfer_snapshot(gms::inet_address from, raft::s
 
     if (!topology_snp.topology_mutations.empty()) {
         co_await _ss.merge_topology_snapshot(std::move(topology_snp));
+        // Flush so that current supported and enabled features are readable before commitlog replay
+        co_await _sp.get_db().local().flush(db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
     }
 
     co_await _sp.mutate_locally({std::move(history_mut)}, nullptr);
