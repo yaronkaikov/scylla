@@ -556,6 +556,10 @@ If you are using AWS KMS to encrypt tables or system information, add the KMS in
              aws_region: <aws region> (optional if `endpoint` is specified)
              aws_access_key_id: <aws access key id> (optional)
              aws_secret_access_key: <aws secret access key> (optional)
+             aws_profile: <aws credentials profile to use> (optional)
+             aws_use_ec2_credentials: (bool : default false)
+             aws_use_ec2_region: (bool : default false)
+             aws_assume_role_arn: <arn of aws role to assume before call> (optional)
              master_key: <named KMS key for encrypting data keys> (required)
              certificate: <identifying certificate> (optional)
              keyfile: <identifying key> (optional)
@@ -570,6 +574,10 @@ If you are using AWS KMS to encrypt tables or system information, add the KMS in
    * ``aws_region`` - An AWS region. If not provided, ``endpoint`` is used for connection.
    * ``aws_access_key_id`` - AWS access key used for authentication. If not specified, the provider reads it from your AWS credentials.
    * ``aws_secret_access_key`` - AWS secret access key used for authentication. If not specified, the provider reads it from your AWS credentials.
+   * ``aws_profile`` - AWS profile to use if reading credentials from file
+   * ``aws_use_ec2_credentials`` - If true, KMS queries will use the credentials provided by ec2 instance role metadata as initial access key.
+   * ``aws_use_ec2_region`` - If true, KMS queries will use the AWS region indicated by ec2 instance metadata.
+   * ``aws_assume_role_arn`` - If set, any KMS query will first attempt to assume this role. 
    * ``master_key`` - The ID or alias of your AWS KMS key. The key must be generated with an appropriate access policy so that the AWS user has permissions to read the key and encrypt data using that key. This parameter is required.
    * ``certificate`` - The name of the certificate and the path used to identify yourself to the KMS server.
    * ``keyfile`` - The name of the key for the certificate. It is generated together with the certificate.
@@ -578,7 +586,7 @@ If you are using AWS KMS to encrypt tables or system information, add the KMS in
 
    .. note::
 
-      Not that either ``endpoint`` or ``aws_region`` must be set (one of them is required for connection).
+      Not that either ``endpoint``, ``aws_region`` or ``aws_use_ec2_region`` must be set (one of them is required for connection).
 
 #. Save the file. 
 #. Drain the node with :doc:`nodetool drain </operating-scylla/nodetool-commands/drain>`
