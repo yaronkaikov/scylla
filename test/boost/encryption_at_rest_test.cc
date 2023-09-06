@@ -36,7 +36,7 @@
 using namespace encryption;
 namespace fs = std::filesystem;
 
-static future<> test_provider(const std::string& options, const tmpdir& tmp, const std::string& extra_yaml = {}, unsigned n_tables = 1, unsigned n_restarts = 1) {
+static future<> test_provider(const std::string& options, const tmpdir& tmp, const std::string& extra_yaml = {}, unsigned n_tables = 1, unsigned n_restarts = 1, const std::string& explicit_provider = {}) {
     auto host_id = locator::host_id::create_random_id();
     auto make_config = [&] {
         auto ext = std::make_shared<db::extensions>();
@@ -65,7 +65,11 @@ static future<> test_provider(const std::string& options, const tmpdir& tmp, con
 
         co_await do_with_cql_env_thread([&] (cql_test_env& env) {
             for (auto i = 0u; i < n_tables; ++i) {
-                env.execute_cql(fmt::format("create table t{} (pk text primary key, v text) WITH scylla_encryption_options={{{}}}", i, options)).get();
+                if (options.empty()) {
+                    env.execute_cql(fmt::format("create table t{} (pk text primary key, v text)", i)).get();
+                } else {
+                    env.execute_cql(fmt::format("create table t{} (pk text primary key, v text) WITH scylla_encryption_options={{{}}}", i, options)).get();
+                }
                 env.execute_cql(fmt::format("insert into ks.t{} (pk, v) values ('{}', '{}')", i, pk, v)).get();
             }
         }, cfg, {}, cql_test_init_configurables{ *ext });
@@ -78,14 +82,18 @@ static future<> test_provider(const std::string& options, const tmpdir& tmp, con
             for (auto i = 0u; i < n_tables; ++i) {
                 require_rows(env, fmt::format("select * from ks.t{}", i), {{utf8_type->decompose(pk), utf8_type->decompose(v)}});
 
+                auto provider = explicit_provider;
+
                 // check that all sstables have the defined provider class (i.e. are encrypted using correct optons)
-                if (options.find("'key_provider'") != std::string::npos) {
+                if (provider.empty() && options.find("'key_provider'") != std::string::npos) {
                     static std::regex ex(R"foo('key_provider'\s*:\s*'(\w+)')foo");
 
                     std::smatch m;
                     BOOST_REQUIRE(std::regex_search(options.begin(), options.end(), m, ex));
-                    auto provider = m[1].str();
-
+                    provider = m[1].str();
+                    BOOST_REQUIRE(!provider.empty());
+                }
+                if (!provider.empty()) {
                     env.db().invoke_on_all([&](replica::database& db) {
                         auto& cf = db.find_column_family("ks", "t" + std::to_string(i));
                         auto sstables = cf.get_sstables_including_compacted_undeleted();
@@ -382,4 +390,22 @@ SEASTAR_TEST_CASE(test_kms_provider_with_master_key_in_cf) {
             , tmp, yaml
             );
     });
+}
+
+
+SEASTAR_TEST_CASE(test_user_info_encryption) {
+    tmpdir tmp;
+    auto keyfile = tmp.path() / "secret_key";
+
+    auto yaml = fmt::format(R"foo(
+        user_info_encryption:
+            enabled: True
+            key_provider: LocalFileSystemKeyProviderFactory
+            secret_key_file: {}
+            cipher_algorithm: AES/CBC/PKCS5Padding
+            secret_key_strength: 128
+        )foo"
+    , keyfile.string());
+
+    co_await test_provider({}, tmp, yaml, 4, 1, "LocalFileSystemKeyProviderFactory" /* verify encrypted even though no kp in options*/);
 }
