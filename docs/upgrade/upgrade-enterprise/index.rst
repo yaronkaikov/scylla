@@ -6,6 +6,7 @@ Upgrade Scylla Enterprise
    :hidden:
    :titlesonly:
 
+   ScyllaDB Enterprise 2023 <upgrade-guide-from-2023.x.y-to-2023.x.z/index>
    ScyllaDB Enterprise 2022 <upgrade-guide-from-2022.x.y-to-2022.x.z/index>
    ScyllaDB Enterprise 2021 <upgrade-guide-from-2021.x.y-to-2021.x.z/index>
    ScyllaDB Enterprise 2020 <upgrade-guide-from-2020.x.y-to-2020.x.z/index>
@@ -30,6 +31,7 @@ Upgrade Scylla Enterprise
 
   Patch Release Upgrade
 
+  * :doc:`Upgrade Guide - ScyllaDB Enterprise 2023.x </upgrade/upgrade-enterprise/upgrade-guide-from-2023.x.y-to-2023.x.z/index>`
   * :doc:`Upgrade Guide - ScyllaDB Enterprise 2022.x </upgrade/upgrade-enterprise/upgrade-guide-from-2022.x.y-to-2022.x.z/index>`
   * :doc:`Upgrade Guide - ScyllaDB Enterprise 2021.x <upgrade-guide-from-2021.x.y-to-2021.x.z/index>`
   * :doc:`Upgrade Guide - ScyllaDB Enterprise 2020.x <upgrade-guide-from-2020.x.y-to-2020.x.z/index>`
