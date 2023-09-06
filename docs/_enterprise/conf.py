@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
 import warnings
 from datetime import date
 
 from sphinx_scylladb_theme.utils import multiversion_regex_builder
 from recommonmark.transform import AutoStructify
 from redirects_cli import cli as redirects_cli
+
+sys.path.insert(0, os.path.abspath('../_ext'))
+sys.path.insert(0, os.path.abspath(".."))
 
 # -- Global variables
 
@@ -35,7 +39,12 @@ extensions = [
     "sphinx_scylladb_theme",
     "sphinx_multiversion",  # optional
     "recommonmark",  # optional
+    "sphinxcontrib.datatemplates",
+    "scylladb_cc_properties",
 ]
+
+templates_path = ['_templates', '../_templates']
+
 
 # The suffix(es) of source filenames.
 source_suffix = [".rst", ".md"]
