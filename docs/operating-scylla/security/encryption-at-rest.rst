@@ -11,7 +11,7 @@ In particular, it provides an additional level of protection for your data persi
 
 When Scylla Enterprise Encryption at Rest is used together with Encryption in Transit (:doc:`Node to Node </operating-scylla/security/node-node-encryption>`  and :doc:`Client to Node </operating-scylla/security/client-node-encryption>`), you benefit from end to end data encryption.
 
-.. note:: Encryption at Rest is available for Scylla Enterprise customers version 2019.1.1 and later. :abbr:`KMIP (Key Management Interoperability Protocol)` support is available for Scylla Enterprise customers version 2019.1.3 and later.
+.. note:: KMS support is available since ScyllaDB Enterprise **2023.1.1**.
 
 About Encryption at Rest
 ========================
@@ -543,6 +543,8 @@ If you are using :term:`KMIP <Key Management Interoperability Protocol (KMIP)>` 
 
 Set the KMS Host
 =================
+
+.. note:: KMS support is available since ScyllaDB Enterprise **2023.1.1**.
 
 If you are using AWS KMS to encrypt tables or system information, add the KMS information to the ``scylla.yaml`` configuration file. 
 
