@@ -91,6 +91,8 @@ When encrypting the system tables or SSTables, you need to state which provider 
      - KmsKeyProviderFactory
      - Uses key(s) provided by the AWS KMS service.
 
+.. _ear-cipher-algorithms:
+
 Cipher Algorithms
 =================
 
@@ -123,6 +125,8 @@ With local key storage, keys are stored locally on disk in a text file. The loca
 .. caution:: Care should be taken so that no unauthorized person can access the key data from the file system. Make sure that the owner of this file is the ``scylla`` user and that the file is **not** readable by **other users**, not accessible by **other roles**. 
 
 You should also consider keeping the key directory on a network drive (using TLS for the file sharing) to avoid having keys and data on the same storage media, in case your storage is stolen or discarded. 
+
+.. _ear-create-table:
 
 Encrypt a Single Table
 ======================
@@ -169,7 +173,7 @@ This procedure demonstrates how to encrypt a new table.
    * ``key_provider`` is the name or type of key provider. Refer to `Key Providers`_ for more information.
    * ``secret_key_file`` - the location that Scylla will store the key it creates (if one does not exist in this location) or the location of the key. By default the location is ``/etc/scylla/data_encryption_keys``. 
 
-   Example:
+   **Example:**
 
    Continuing the example from above, this command will instruct Scylla to encrypt the table and will save the key in the location created in step 1. 
 
@@ -184,6 +188,43 @@ This procedure demonstrates how to encrypt a new table.
         }
       ;
 
+   **Example for KMS:**
+
+   .. code-block:: cql
+
+      CREATE TABLE myks.mytable (...<columns>...) WITH 
+        scylla_encryption_options = { 
+          'cipher_algorithm' :  'AES/CBC/PKCS5Padding',   
+          'secret_key_strength' : 128,   
+          'key_provider': 'KmsKeyProviderFactory', 
+          'kms_host': 'my-kms1'
+        }
+      ;
+
+   You can skip ``cipher_algorithm`` and ``secret_key_strength`` (the :ref:`defaults <ear-cipher-algorithms>` will be used):
+
+   .. code-block:: cql
+
+      CREATE TABLE myks.mytable (...<columns>...) WITH 
+        scylla_encryption_options = { 
+          'key_provider': 'KmsKeyProviderFactory', 
+          'kms_host': 'my-kms1'
+        }
+      ;
+
+   You can specify a different master key than the one configured for ``kms_host`` in the ``scylla.yaml`` file:
+
+   .. code-block:: cql
+
+      CREATE TABLE myks.mytable (...<columns>...) WITH 
+        scylla_encryption_options = { 
+          'key_provider': 'KmsKeyProviderFactory', 
+          'kms_host': 'my-kms1',
+          'master_key':'myorg/SomeOtherKey'
+        }
+      ;
+
+
 #. From this point, every new SSTable created for the ``atrest`` table is encrypted, using the ``data_encryption_keys`` key located in ``/etc/scylla/encryption_keys/``. This table will remain encrypted with this key until you either change the key, change the key properties, or disable encryption.
 
 #. To ensure all SSTables for this table on every node are encrypted, run the :doc:`Nodetool upgradesstables </operating-scylla/nodetool-commands/upgradesstables>` command. If not, the SSTables remain unencrypted until they are compacted or flushed from MemTables. 
@@ -195,6 +236,8 @@ This procedure demonstrates how to encrypt a new table.
       nodetool upgradesstables data atrest
 
 #. Your SSTables are encrypted. If you want to change the key at any point, use the `Update Encryption Properties of Existing Tables`_ procedure. Always keep your key in a safe location known to you. Do not lose it. See `When a Key is Lost`_.
+
+.. _ear-alter-table:
 
 Update Encryption Properties of Existing Tables
 -----------------------------------------------
@@ -217,7 +260,7 @@ You can encrypt any existing table or use this procedure to change the cipher al
       ;
 
 
-   Example:
+   **Example:**
 
    Continuing the example from above, this command will instruct Scylla to encrypt the table and will save the key in the location created in step 1. 
 
@@ -231,8 +274,19 @@ You can encrypt any existing table or use this procedure to change the cipher al
           'secret_key_file': '/etc/scylla/encryption_keys/data_encryption_keys'
         }
       ;
+   
+   **Example for KMS:**
 
+   .. code-block:: cql
 
+      ALTER TABLE myks.mytable (...<columns>...) WITH 
+        scylla_encryption_options = { 
+          'cipher_algorithm' :  'AES/CBC/PKCS5Padding',   
+          'secret_key_strength' : 128,   
+          'key_provider': 'KmsKeyProviderFactory', 
+          'kms_host': 'my-kms1'
+        }
+      ;
 
 #. If you want to make sure that SSTables that existed before this change are also encrypted, you can either upgrade them using the ``nodetool upgradesstables`` command or wait until the next compaction. If you decide to wait, Scylla will still be able to read the old unencrypted tables. If you change the key or remove encryption, Scylla will still continue to read the old tables as long as you still have the key. If your data is encrypted and you do not have the key, your data is unreadable. 
 
@@ -571,7 +625,7 @@ If you are using AWS KMS to encrypt tables or system information, add the KMS in
    
    Where:
 
-   * ``<name>`` - The cluster name.
+   * ``<name>`` - The name to identify the KMS host. You have to provide this name to encrypt a :ref:`new <ear-create-table>` or :ref:`existing <ear-alter-table>` table.
    * ``endpoint`` - The explicit KMS host endpoint. If not provided, ``aws_region`` is used for connection.
    * ``aws_region`` - An AWS region. If not provided, ``endpoint`` is used for connection.
    * ``aws_access_key_id`` - AWS access key used for authentication. If not specified, the provider reads it from your AWS credentials.
@@ -589,6 +643,16 @@ If you are using AWS KMS to encrypt tables or system information, add the KMS in
    .. note::
 
       Not that either ``endpoint``, ``aws_region`` or ``aws_use_ec2_region`` must be set (one of them is required for connection).
+
+   Example:
+
+   .. code-block:: yaml
+
+       kms_hosts:
+         my-kms1:
+             aws_use_ec2_credentials: true
+             aws_use_ec2_region: true
+             master_key: myorg/MyKey
 
 #. Save the file. 
 #. Drain the node with :doc:`nodetool drain </operating-scylla/nodetool-commands/drain>`
