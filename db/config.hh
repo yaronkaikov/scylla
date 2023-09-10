@@ -227,7 +227,7 @@ public:
     named_value<uint32_t> stream_throughput_outbound_megabits_per_sec;
     named_value<uint32_t> inter_dc_stream_throughput_outbound_megabits_per_sec;
     named_value<uint32_t> stream_io_throughput_mb_per_sec;
-    named_value<double> stream_plan_ranges_percentage;
+    named_value<double> stream_plan_ranges_fraction;
     named_value<bool> trickle_fsync;
     named_value<uint32_t> trickle_fsync_interval_in_kb;
     named_value<bool> auto_bootstrap;
@@ -336,7 +336,6 @@ public:
     named_value<bool> developer_mode;
     named_value<int32_t> skip_wait_for_gossip_to_settle;
     named_value<int32_t> force_gossip_generation;
-    named_value<bool> experimental;
     named_value<std::vector<enum_option<experimental_features_t>>> experimental_features;
     named_value<size_t> lsa_reclamation_step;
     named_value<uint16_t> prometheus_port;
@@ -424,6 +423,7 @@ public:
     named_value<uint32_t> nodeops_heartbeat_interval_seconds;
 
     named_value<bool> cache_index_pages;
+    named_value<double> index_cache_fraction;
 
     named_value<bool> consistent_cluster_management;
 
@@ -440,7 +440,6 @@ public:
     // configuring the Seastar memory subsystem.
     static constexpr size_t wasm_udf_reserved_memory = 50 * 1024 * 1024;
 
-    named_value<unsigned> minimum_keyspace_rf;
     named_value<bool> live_updatable_config_params_changeable_via_cql;
     bool are_live_updatable_config_params_changeable_via_cql() const override {
         return live_updatable_config_params_changeable_via_cql();
@@ -451,6 +450,11 @@ public:
     named_value<std::string> auth_superuser_salted_password;
 
     named_value<std::vector<std::unordered_map<sstring, sstring>>> auth_certificate_role_queries;
+
+    named_value<int> minimum_replication_factor_fail_threshold;
+    named_value<int> minimum_replication_factor_warn_threshold;
+    named_value<int> maximum_replication_factor_warn_threshold;
+    named_value<int> maximum_replication_factor_fail_threshold;
 
     named_value<sstring> audit;
     named_value<sstring> audit_categories;

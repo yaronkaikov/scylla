@@ -98,6 +98,10 @@ using inet_address = gms::inet_address;
 
 extern logging::logger cdc_log;
 
+namespace db {
+    extern thread_local data_type cdc_generation_id_v2_type;
+}
+
 namespace service {
 
 static logging::logger slogger("storage_service");
@@ -411,8 +415,6 @@ future<> storage_service::topology_state_load() {
                     [[fallthrough]];
                 case topology::transition_state::commit_cdc_generation:
                     [[fallthrough]];
-                case topology::transition_state::publish_cdc_generation:
-                    [[fallthrough]];
                 case topology::transition_state::write_both_read_old:
                     return read_new_t::no;
                 case topology::transition_state::write_both_read_new:
@@ -605,10 +607,12 @@ public:
     topology_mutation_builder& set_version(topology::version_t);
     topology_mutation_builder& set_current_cdc_generation_id(const cdc::generation_id_v2&);
     topology_mutation_builder& set_new_cdc_generation_data_uuid(const utils::UUID& value);
+    topology_mutation_builder& set_unpublished_cdc_generations(const std::vector<cdc::generation_id_v2>& values);
     topology_mutation_builder& set_global_topology_request(global_topology_request);
     template<typename S>
     requires std::constructible_from<sstring, S>
     topology_mutation_builder& add_enabled_features(const std::set<S>& value);
+    topology_mutation_builder& add_unpublished_cdc_generation(const cdc::generation_id_v2& value);
     topology_mutation_builder& del_transition_state();
     topology_mutation_builder& del_global_topology_request();
     topology_node_mutation_builder& with_node(raft::server_id);
@@ -772,6 +776,13 @@ topology_mutation_builder& topology_mutation_builder::set_new_cdc_generation_dat
     return apply_atomic("new_cdc_generation_data_uuid", value);
 }
 
+topology_mutation_builder& topology_mutation_builder::set_unpublished_cdc_generations(const std::vector<cdc::generation_id_v2>& values) {
+    auto dv = values | boost::adaptors::transformed([&] (const auto& v) {
+        return make_tuple_value(db::cdc_generation_id_v2_type, tuple_type_impl::native_type({v.ts, v.id}));
+    });
+    return apply_set("unpublished_cdc_generations", collection_apply_mode::overwrite, std::move(dv));
+}
+
 topology_mutation_builder& topology_mutation_builder::set_global_topology_request(global_topology_request value) {
     return apply_atomic("global_topology_request", ::format("{}", value));
 }
@@ -780,6 +791,11 @@ template<typename S>
 requires std::constructible_from<sstring, S>
 topology_mutation_builder& topology_mutation_builder::add_enabled_features(const std::set<S>& features) {
     return apply_set("enabled_features", collection_apply_mode::update, features | boost::adaptors::transformed([] (const auto& f) { return sstring(f); }));
+}
+
+topology_mutation_builder& topology_mutation_builder::add_unpublished_cdc_generation(const cdc::generation_id_v2& value) {
+    auto dv = make_tuple_value(db::cdc_generation_id_v2_type, tuple_type_impl::native_type({value.ts, value.id}));
+    return apply_set("unpublished_cdc_generations", collection_apply_mode::update, std::vector<data_value>{std::move(dv)});
 }
 
 topology_mutation_builder& topology_mutation_builder::del_global_topology_request() {
@@ -1184,6 +1200,76 @@ class topology_coordinator {
         }
 
         co_return std::tuple{gen_uuid, std::move(guard), std::move(updates.back())};
+    }
+
+    // If there are some unpublished CDC generations, publishes the one with the oldest timestamp
+    // to user-facing description tables.
+    future<> publish_oldest_cdc_generation(group0_guard guard) {
+        const auto& unpublished_gens = _topo_sm._topology.unpublished_cdc_generations;
+        if (unpublished_gens.empty()) {
+            co_return;
+        }
+
+        // The generation under index 0 is the oldest because unpublished_cdc_generations are sorted by timestamp.
+        auto gen_id = unpublished_gens[0];
+
+        auto gen_data = co_await _sys_ks.read_cdc_generation(gen_id.id);
+
+        co_await _sys_dist_ks.local().create_cdc_desc(
+                gen_id.ts, gen_data, { get_token_metadata().count_normal_token_owners() });
+
+        std::vector<cdc::generation_id_v2> new_unpublished_gens(unpublished_gens.begin() + 1, unpublished_gens.end());
+        topology_mutation_builder builder(guard.write_timestamp());
+        builder.set_unpublished_cdc_generations(std::move(new_unpublished_gens));
+
+        auto str = ::format("published CDC generation, ID: {}", gen_id);
+        co_await update_topology_state(std::move(guard), {builder.build()}, std::move(str));
+    }
+
+    // The background fiber of the topology coordinator that continually publishes committed yet unpublished
+    // CDC generations. Every generation is published in a separate group 0 operation.
+    future<> cdc_generation_publisher_fiber() {
+        slogger.trace("raft topology: start CDC generation publisher fiber");
+
+        while (!_as.abort_requested()) {
+            co_await utils::get_local_injector().inject_with_handler("cdc_generation_publisher_fiber", [] (auto& handler) -> future<> {
+                slogger.info("raft toplogy: CDC generation publisher fiber sleeps after injection");
+                co_await handler.wait_for_message(std::chrono::steady_clock::now() + std::chrono::minutes{5});
+                slogger.info("raft toplogy: CDC generation publisher fiber finishes sleeping after injection");
+            });
+
+            bool sleep = false;
+            try {
+                auto guard = co_await start_operation();
+
+                co_await publish_oldest_cdc_generation(std::move(guard));
+
+                if (_topo_sm._topology.unpublished_cdc_generations.empty()) {
+                    // No CDC generations to publish. Wait until one appears or the topology coordinator aborts.
+                    slogger.trace("raft topology: CDC generation publisher fiber has nothing to do. Sleeping.");
+                    co_await _topo_sm.event.when([&] () {
+                        return !_topo_sm._topology.unpublished_cdc_generations.empty() || _as.abort_requested();
+                    });
+                    slogger.trace("raft topology: CDC generation publisher fiber wakes up");
+                }
+            } catch (raft::request_aborted&) {
+                slogger.debug("raft topology: CDC generation publisher fiber aborted");
+            } catch (group0_concurrent_modification&) {
+            } catch (term_changed_error&) {
+                slogger.debug("raft topology: CDC generation publisher fiber notices term change {} -> {}", _term, _raft.get_current_term());
+            } catch (...) {
+                slogger.error("raft topology: CDC generation publisher fiber got error {}", std::current_exception());
+                sleep = true;
+            }
+            if (sleep) {
+                try {
+                    co_await seastar::sleep_abortable(std::chrono::seconds(1), _as);
+                } catch (...) {
+                    slogger.debug("raft topology: CDC generation publisher: sleep failed: {}", std::current_exception());
+                }
+            }
+            co_await coroutine::maybe_yield();
+        }
     }
 
     // Precondition: there is no node request and no ongoing topology transition
@@ -1635,32 +1721,16 @@ class topology_coordinator {
                 // committed) - they won't coordinate CDC-enabled writes until they reconnect to the
                 // majority and commit.
                 topology_mutation_builder builder(guard.write_timestamp());
-                builder.set_transition_state(topology::transition_state::publish_cdc_generation)
-                       .set_current_cdc_generation_id(cdc_gen_id)
+                builder.set_current_cdc_generation_id(cdc_gen_id)
+                       .add_unpublished_cdc_generation(cdc_gen_id)
                        .set_version(_topo_sm._topology.version + 1);
                 if (_topo_sm._topology.global_request == global_topology_request::new_cdc_generation) {
                     builder.del_global_topology_request();
-                }
-                auto str = ::format("committed new CDC generation, ID: {}", cdc_gen_id);
-                co_await update_topology_state(std::move(guard), {builder.build()}, std::move(str));
-            }
-                break;
-            case topology::transition_state::publish_cdc_generation: {
-                // We just committed a new CDC generation in the commit_cdc_generation step.
-                // Publish it to the user-facing distributed CDC description tables.
-                auto curr_gen_id = _topo_sm._topology.current_cdc_generation_id.value();
-                auto gen_data = co_await _sys_ks.read_cdc_generation(curr_gen_id.id);
-
-                co_await _sys_dist_ks.local().create_cdc_desc(
-                    curr_gen_id.ts, gen_data, { get_token_metadata().count_normal_token_owners() });
-
-                topology_mutation_builder builder(guard.write_timestamp());
-                if (_topo_sm._topology.transition_nodes.empty()) {
                     builder.del_transition_state();
                 } else {
                     builder.set_transition_state(topology::transition_state::write_both_read_old);
                 }
-                auto str = ::format("published CDC generation, ID: {}", curr_gen_id);
+                auto str = ::format("committed new CDC generation, ID: {}", cdc_gen_id);
                 co_await update_topology_state(std::move(guard), {builder.build()}, std::move(str));
             }
                 break;
@@ -2058,6 +2128,8 @@ future<> topology_coordinator::run() {
         _topo_sm.event.broadcast();
     });
 
+    auto cdc_generation_publisher = cdc_generation_publisher_fiber();
+
     while (!_as.abort_requested()) {
         bool sleep = false;
         try {
@@ -2092,7 +2164,9 @@ future<> topology_coordinator::run() {
         }
         co_await coroutine::maybe_yield();
     }
+
     co_await _async_gate.close();
+    co_await std::move(cdc_generation_publisher);
 }
 
 future<> storage_service::raft_state_monitor_fiber(raft::server& raft, sharded<db::system_distributed_keyspace>& sys_dist_ks) {
@@ -2346,8 +2420,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
         std::unordered_set<gms::inet_address> initial_contact_nodes,
         std::unordered_set<gms::inet_address> loaded_endpoints,
         std::unordered_map<gms::inet_address, sstring> loaded_peer_features,
-        std::chrono::milliseconds delay,
-        cql3::query_processor& qp) {
+        std::chrono::milliseconds delay) {
     std::unordered_set<token> bootstrap_tokens;
     std::map<gms::application_state, gms::versioned_value> app_states;
     /* The timestamp of the CDC streams generation that this node has proposed when joining.
@@ -2571,7 +2644,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
 
     assert(_group0);
     // if the node is bootstrapped the functin will do nothing since we already created group0 in main.cc
-    co_await _group0->setup_group0(_sys_ks.local(), initial_contact_nodes, raft_replace_info, *this, qp, _migration_manager.local());
+    co_await _group0->setup_group0(_sys_ks.local(), initial_contact_nodes, raft_replace_info, *this, *_qp, _migration_manager.local());
 
     raft::server* raft_server = co_await [this] () -> future<raft::server*> {
         if (!_raft_topology_change_enabled) {
@@ -2637,7 +2710,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
             throw std::runtime_error(err);
         }
 
-        co_await _group0->finish_setup_after_join(*this, qp, _migration_manager.local());
+        co_await _group0->finish_setup_after_join(*this, *_qp, _migration_manager.local());
         co_return;
     }
 
@@ -2819,7 +2892,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     }
 
     assert(_group0);
-    co_await _group0->finish_setup_after_join(*this, qp, _migration_manager.local());
+    co_await _group0->finish_setup_after_join(*this, *_qp, _migration_manager.local());
     co_await _cdc_gens.local().after_join(std::move(cdc_gen_id));
 }
 
@@ -3534,8 +3607,9 @@ void storage_service::set_group0(raft_group0& group0, bool raft_topology_change_
     _raft_topology_change_enabled = raft_topology_change_enabled;
 }
 
-future<> storage_service::join_cluster(sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy, cql3::query_processor& qp) {
+future<> storage_service::join_cluster(sharded<db::system_distributed_keyspace>& sys_dist_ks, sharded<service::storage_proxy>& proxy) {
     assert(this_shard_id() == 0);
+    assert(_qp != nullptr);
 
     set_mode(mode::STARTING);
 
@@ -3599,7 +3673,7 @@ future<> storage_service::join_cluster(sharded<db::system_distributed_keyspace>&
     for (auto& x : loaded_peer_features) {
         slogger.info("peer={}, supported_features={}", x.first, x.second);
     }
-    co_return co_await join_token_ring(sys_dist_ks, proxy, std::move(initial_contact_nodes), std::move(loaded_endpoints), std::move(loaded_peer_features), get_ring_delay(), qp);
+    co_return co_await join_token_ring(sys_dist_ks, proxy, std::move(initial_contact_nodes), std::move(loaded_endpoints), std::move(loaded_peer_features), get_ring_delay());
 }
 
 future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept {
