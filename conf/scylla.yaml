@@ -658,22 +658,22 @@ strict_is_not_null_in_views: true
 # system_traces keyspace. Those tables should be configured to encrypt their data
 # on disk.
 #
-# It is recommended to use remote encryption keys from a KMIP server when using
+# It is recommended to use remote encryption keys from a KMIP server/KMS when using
 # Transparent Data Encryption (TDE) features.
-# Local key support is provided when a KMIP server is not available.
+# Local key support is provided when a KMIP server/KMS is not available.
 #
 # See the scylla documentation for more info on available key providers and 
 # their properties.
 #
 # system_info_encryption:
-#   enabled: false
+#   enabled: true
 #   cipher_algorithm: AES
 #   secret_key_strength: 128  
 #   key_provider: LocalFileSystemKeyProviderFactory
 #   secret_key_file: <key file>
 #
 # system_info_encryption:
-#   enabled: false
+#   enabled: true
 #   cipher_algorithm: AES
 #   secret_key_strength: 128  
 #   key_provider: KmipKeyProviderFactory
@@ -751,4 +751,38 @@ strict_is_not_null_in_views: true
 #       priority_string: <kmip tls priority string> (optional)
 #   <name>:
 #       ...
+#
+
+#
+# Server-global user information encryption settings
+#
+# If enabled, all user tables are encrypted with the
+# encryption settings below, unless the table has local scylla_encryption_options
+# specified.
+#
+# When enabling user table encryption on a node with existing data, run
+# `nodetool upgradesstables -a` on all user tables to encrypt existing data.
+#
+# It is recommended to use remote encryption keys from a KMIP server or KMS when using
+# Transparent Data Encryption (TDE) features.
+# Local key support is provided when a KMIP server/KMS is not available.
+#
+# See the scylla documentation for more info on available key providers and 
+# their properties.
+#
+# user_info_encryption:
+#   enabled: true
+#   cipher_algorithm: AES
+#   secret_key_strength: 128  
+#   key_provider: LocalFileSystemKeyProviderFactory
+#   secret_key_file: <key file>
+#
+# user_info_encryption:
+#   enabled: true
+#   cipher_algorithm: AES
+#   secret_key_strength: 128  
+#   key_provider: KmipKeyProviderFactory
+#   kmip_host: <kmip host group>
+#   template_name: <kmip key template name> (optional)
+#   key_namespace: <kmip key namespace> (optional)
 #

@@ -92,6 +92,16 @@ master_key is an AWS KMS key id or alias from which all keys used for actual enc
 This key must be pre-created with access policy allowing the above AWS id Encrypt, Decrypt and GenerateDataKey operations.
 
 )foo")
+        , user_info_encryption(this, "user_info_encryption", value_status::Used,
+                                { { "enabled", "false" }, { "cipher_algorithm",
+                                                "AES/CBC/PKCS5Padding" }, {
+                                                "secret_key_strength", "128" },
+                                                },
+                                R"foo(Global user table encryption settings. If enabled, all user tables
+                                will be encrypted using the provided settings, unless overridden
+                                by table scylla_encryption_options.)foo")
+
+
 // END entry definitions
 {}
 

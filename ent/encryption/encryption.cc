@@ -243,6 +243,8 @@ sstring encryption_context::maybe_decrypt_config_value(const sstring& s) const {
     return s;
 }
 
+class encryption_schema_extension;
+
 class encryption_context_impl : public encryption_context {
     // poor mans per-thread instance variable. We need a lookup map
     // per shard, so preallocate it, much like a "sharded" thing would,
@@ -253,6 +255,7 @@ class encryption_context_impl : public encryption_context {
     std::vector<std::unordered_map<sstring, shared_ptr<system_key>>> _per_thread_system_key_cache;
     std::vector<std::unordered_map<sstring, shared_ptr<kmip_host>>> _per_thread_kmip_host_cache;
     std::vector<std::unordered_map<sstring, shared_ptr<kms_host>>> _per_thread_kms_host_cache;
+    std::vector<shared_ptr<encryption_schema_extension>> _per_thread_global_user_extension;
     const encryption_config& _cfg;
     sharded<cql3::query_processor>* _qp;;
     sharded<service::migration_manager>* _mm;
@@ -265,6 +268,7 @@ public:
         , _per_thread_system_key_cache(smp::count)
         , _per_thread_kmip_host_cache(smp::count)
         , _per_thread_kms_host_cache(smp::count)
+        , _per_thread_global_user_extension(smp::count)
         , _cfg(cfg)
         , _qp(&services.find<cql3::query_processor>())
         , _mm(&services.find<service::migration_manager>())
@@ -405,7 +409,16 @@ public:
             _per_thread_system_key_cache[this_shard_id()].clear();
             _per_thread_kmip_host_cache[this_shard_id()].clear();
             _per_thread_kms_host_cache[this_shard_id()].clear();
+            _per_thread_global_user_extension[this_shard_id()] = {};
         });
+    }
+
+    void add_global_user_encryption(shared_ptr<encryption_schema_extension> ext) {
+        _per_thread_global_user_extension[this_shard_id()] = std::move(ext);
+    }
+    
+    shared_ptr<encryption_schema_extension> get_global_user_encryption() const {
+        return _per_thread_global_user_extension[this_shard_id()];
     }
 };
 
@@ -500,9 +513,9 @@ encryption_schema_extension::encryption_schema_extension(key_info info, shared_p
 }
 
 class encryption_file_io_extension : public sstables::file_io_extension {
-    ::shared_ptr<encryption_context> _ctxt;
+    ::shared_ptr<encryption_context_impl> _ctxt;
 public:
-    encryption_file_io_extension(::shared_ptr<encryption_context> ctxt)
+    encryption_file_io_extension(::shared_ptr<encryption_context_impl> ctxt)
         : _ctxt(std::move(ctxt))
     {}
 
@@ -608,8 +621,14 @@ public:
             }
         } else {
             auto s = sst.get_schema();
+            shared_ptr<encryption_schema_extension> esx;
             auto e = s->extensions().find(encryption_attribute);
             if (e != s->extensions().end()) {
+                esx = static_pointer_cast<encryption_schema_extension>(e->second);
+            } else if (!is_system_keyspace(s->ks_name())) {
+                esx = _ctxt->get_global_user_encryption();
+            }
+            if (esx) {
                 auto& sc = sst.get_shared_components();
                 if (!sc.scylla_metadata) {
                     sc.scylla_metadata.emplace();
@@ -625,8 +644,6 @@ public:
                 if (ext.map.count(key_id_attribute_ds)) {
                     id = ext.map.at(key_id_attribute_ds).value;
                 }
-
-                auto esx = static_pointer_cast<encryption_schema_extension>(e->second);
 
                 logg.debug("Write encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
 
@@ -788,12 +805,15 @@ future<seastar::shared_ptr<encryption_context>> register_extensions(const db::co
         return encryption_schema_extension::parse(*ctxt, std::move(v));
     });
     exts.add_sstable_file_io_extension(encryption_attribute, std::make_unique<encryption_file_io_extension>(ctxt));
-    options opts(cfg.system_info_encryption().begin(), cfg.system_info_encryption().end());
-    opt_wrapper sie(opts);
-    future<> f = make_ready_future<>();
-    if (!::strcasecmp(sie("enabled").value_or("false").c_str(), "true")) {
-        // commitlog/system table encryption should not use replicated keys,
-        // We default to local keys, but KMIP should be ok as well.
+    
+    auto maybe_get_options = [&](const utils::config_file::string_map& map, const sstring& what) -> std::optional<options> {
+        options opts(map.begin(), map.end());
+        opt_wrapper sie(opts);
+        if (!::strcasecmp(sie("enabled").value_or("false").c_str(), "false")) {
+            return std::nullopt;
+        }
+        // commitlog/system table encryption/global user encryption should not use replicated keys,
+        // We default to local keys, but KMIP/KMS is ok as well (better in fact).
         opts[KEY_PROVIDER] = sie(KEY_PROVIDER).value_or(LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY);
         if (opts[KEY_PROVIDER] == LOCAL_FILE_SYSTEM_KEY_PROVIDER_FACTORY && !sie(SECRET_KEY_FILE)) {
             // system encryption uses different key folder than user tables.
@@ -802,19 +822,26 @@ future<seastar::shared_ptr<encryption_context>> register_extensions(const db::co
         }
         // forbid replicated. we cannot guarantee being able to open sstables on populate
         if (opts[KEY_PROVIDER] == REPLICATED_KEY_PROVIDER_FACTORY) {
-            throw std::invalid_argument("Replicated provider is not allowed for system table encryption");
+            throw std::invalid_argument("Replicated provider is not allowed for " + what);
         }
+        return opts;
+    };
 
-        logg.info("Adding system info encryption using {}", opts);
+    future<> f = make_ready_future<>();
 
-        exts.add_commitlog_file_extension(encryption_attribute, std::make_unique<encryption_commitlog_file_extension>(ctxt, opts));
+    auto opts = maybe_get_options(cfg.system_info_encryption(), "system table encryption");
+    
+    if (opts) {
+        logg.info("Adding system info encryption using {}", *opts);
+
+        exts.add_commitlog_file_extension(encryption_attribute, std::make_unique<encryption_commitlog_file_extension>(ctxt, *opts));
 
         // modify schemas for tables holding sensitive data to use encryption w. key described
         // by the opts.
         // since schemas are duplicated across shards, we must call to each shard and augument
         // them all.
         // Since we are in pre-init phase, this should be safe.
-        f = f.then([opts, &exts] {
+        f = f.then([opts = *opts, &exts] {
             return smp::invoke_on_all([opts = make_lw_shared<options>(opts), &exts] () mutable {
                 auto& f = exts.schema_extensions().at(encryption_attribute);
                 for (auto& s : { db::system_keyspace::paxos(), db::system_keyspace::batchlog() }) {
@@ -852,6 +879,19 @@ future<seastar::shared_ptr<encryption_context>> register_extensions(const db::co
     }
 
     replicated_key_provider_factory::init(exts);
+
+    auto user_opts = maybe_get_options(cfg.user_info_encryption(), "user table encryption");
+    
+    if (user_opts) {
+        logg.info("Adding user info encryption using {}", *user_opts);
+
+        f = f.then([user_opts = *user_opts, ctxt] {
+            return smp::invoke_on_all([user_opts = make_lw_shared<options>(user_opts), ctxt]()  {
+                auto ext = encryption_schema_extension::create(*ctxt, *user_opts);
+                ctxt->add_global_user_encryption(std::move(ext));
+            });
+        });
+    }
 
     return f.then([ctxt]() -> ::shared_ptr<encryption_context> {
         return ctxt;
