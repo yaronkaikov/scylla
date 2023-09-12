@@ -132,12 +132,18 @@ incremental_compaction_strategy::most_interesting_bucket(std::vector<std::vector
 compaction_descriptor
 incremental_compaction_strategy::find_garbage_collection_job(const compaction::table_state& t, std::vector<size_bucket_t>& buckets) {
     auto worth_dropping_tombstones = [this, now = db_clock::now()] (const sstable_run& run, gc_clock::time_point gc_before) {
-        // for the purpose of checking if a run is stale, picking any fragment *composing the same run*
-        // will be enough as the difference in write time is acceptable.
-        if (run.all().empty() || (now-_tombstone_compaction_interval < (*run.all().begin())->data_file_write_time())) {
+        if (run.all().empty()) {
             return false;
         }
-        return run.estimate_droppable_tombstone_ratio(gc_before) >= _tombstone_threshold;
+        // for the purpose of checking if a run is stale, picking any fragment *composing the same run*
+        // will be enough as the difference in write time is acceptable.
+        bool satisfy_staleness = (now - _tombstone_compaction_interval) > (*run.all().begin())->data_file_write_time();
+        // If interval is not satisfied, we still consider tombstone GC if the gain outweighs the increased frequency.
+        // By increasing threshold to a minimum of 0.5, we're only adding a maximum of 1 to write amp as we'll be halving
+        // the SSTable, containing garbage, on every GC round.
+        float actual_threshold = satisfy_staleness ? _tombstone_threshold : std::clamp(_tombstone_threshold * 2, 0.5f, 1.0f);
+
+        return run.estimate_droppable_tombstone_ratio(gc_before) >= actual_threshold;
     };
     auto gc_before = gc_clock::now() - t.schema()->gc_grace_seconds();
     auto can_garbage_collect = [&] (const size_bucket_t& bucket) {
