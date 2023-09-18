@@ -143,8 +143,8 @@ table_for_tests::table_for_tests(sstables::sstables_manager& sstables_manager, s
     _data->cfg.cf_stats = &_data->cf_stats;
     _data->cfg.enable_commitlog = false;
     _data->cm.enable();
-    _data->cf = make_lw_shared<replica::column_family>(_data->s, _data->cfg, make_lw_shared<replica::storage_options>(), replica::column_family::no_commitlog(), _data->cm, sstables_manager, _data->cl_stats, _data->tracker, nullptr);
-    _data->cf->mark_ready_for_writes();
+    _data->cf = make_lw_shared<replica::column_family>(_data->s, _data->cfg, make_lw_shared<replica::storage_options>(), _data->cm, sstables_manager, _data->cl_stats, _data->tracker, nullptr);
+    _data->cf->mark_ready_for_writes(nullptr);
     _data->table_s = std::make_unique<table_state>(*_data, sstables_manager);
     _data->cm.add(*_data->table_s);
     _data->storage = std::move(storage);
@@ -174,6 +174,12 @@ std::unordered_map<sstring, s3::endpoint_config> make_storage_options_config(con
         [&cfg] (const data_dictionary::storage_options::s3& os) mutable -> void {
             cfg[os.endpoint] = s3::endpoint_config {
                 .port = std::stoul(tests::getenv_safe("S3_SERVER_PORT_FOR_TEST")),
+                .use_https = ::getenv("AWS_DEFAULT_REGION") != nullptr,
+                .aws = {{
+                    .key = tests::getenv_safe("AWS_ACCESS_KEY_ID"),
+                    .secret = tests::getenv_safe("AWS_SECRET_ACCESS_KEY"),
+                    .region = ::getenv("AWS_DEFAULT_REGION") ? : "local",
+                }},
             };
         }
     }, so.value);
@@ -183,7 +189,6 @@ std::unordered_map<sstring, s3::endpoint_config> make_storage_options_config(con
 std::unique_ptr<db::config> make_db_config(sstring temp_dir, const data_dictionary::storage_options so) {
     auto cfg = std::make_unique<db::config>();
     cfg->data_file_directories.set({ temp_dir });
-    cfg->host_id = locator::host_id::create_random_id();
     cfg->object_storage_config = make_storage_options_config(so);
     return cfg;
 }
@@ -193,7 +198,9 @@ test_env::impl::impl(test_env_config cfg, sstables::storage_manager* sstm)
     , db_config(make_db_config(dir.path().native(), cfg.storage))
     , dir_sem(1)
     , feature_service(gms::feature_config_from_db_config(*db_config))
-    , mgr(cfg.large_data_handler == nullptr ? nop_ld_handler : *cfg.large_data_handler, *db_config, feature_service, cache_tracker, memory::stats().total_memory(), dir_sem, sstm)
+    , mgr(cfg.large_data_handler == nullptr ? nop_ld_handler : *cfg.large_data_handler, *db_config,
+        feature_service, cache_tracker, memory::stats().total_memory(), dir_sem,
+        [host_id = locator::host_id::create_random_id()]{ return host_id; }, sstm)
     , semaphore(reader_concurrency_semaphore::no_limits{}, "sstables::test_env")
     , storage(std::move(cfg.storage))
 { }
@@ -228,7 +235,7 @@ future<> test_env::do_with_async(noncopyable_function<void (test_env&)> func, te
 data_dictionary::storage_options make_test_object_storage_options() {
     data_dictionary::storage_options ret;
     ret.value = data_dictionary::storage_options::s3 {
-        .bucket = tests::getenv_safe("S3_PUBLIC_BUCKET_FOR_TEST"),
+        .bucket = tests::getenv_safe("S3_BUCKET_FOR_TEST"),
         .endpoint = tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"),
     };
     return ret;

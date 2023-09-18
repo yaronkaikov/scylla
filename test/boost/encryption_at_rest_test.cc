@@ -37,12 +37,10 @@ using namespace encryption;
 namespace fs = std::filesystem;
 
 static future<> test_provider(const std::string& options, const tmpdir& tmp, const std::string& extra_yaml = {}, unsigned n_tables = 1, unsigned n_restarts = 1, const std::string& explicit_provider = {}) {
-    auto host_id = locator::host_id::create_random_id();
     auto make_config = [&] {
         auto ext = std::make_shared<db::extensions>();
         auto cfg = seastar::make_shared<db::config>(ext);
         cfg->data_file_directories({tmp.path().string()});
-        cfg->host_id = host_id;
 
         // Currently the test fails with consistent_cluster_management = true. See #2995.
         cfg->consistent_cluster_management(false);

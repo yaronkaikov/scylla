@@ -16,6 +16,7 @@
 #include "service/endpoint_lifecycle_subscriber.hh"
 #include "locator/abstract_replication_strategy.hh"
 #include "locator/tablets.hh"
+#include "locator/tablet_metadata_guard.hh"
 #include "inet_address_vectors.hh"
 #include <seastar/core/distributed.hh>
 #include <seastar/core/condition-variable.hh>
@@ -37,13 +38,14 @@
 #include <seastar/core/lowres_clock.hh>
 #include "cdc/generation_id.hh"
 #include "raft/raft.hh"
-#include "repair/id.hh"
+#include "node_ops/id.hh"
 #include "raft/server.hh"
 #include "service/topology_state_machine.hh"
 #include "service/tablet_allocator.hh"
 
 class node_ops_cmd_request;
 class node_ops_cmd_response;
+struct node_ops_ctl;
 class node_ops_info;
 enum class node_ops_cmd : uint32_t;
 class repair_service;
@@ -95,7 +97,6 @@ class raft_group0;
 enum class disk_error { regular, commit };
 
 class node_ops_meta_data;
-struct node_ops_ctl;
 
 /**
  * This abstraction contains the token/identifier of this node
@@ -118,6 +119,13 @@ private:
     using application_state = gms::application_state;
     using inet_address = gms::inet_address;
     using versioned_value = gms::versioned_value;
+
+    struct tablet_operation {
+        sstring name;
+        shared_future<> done;
+    };
+
+    using tablet_op_registry = std::unordered_map<locator::global_tablet_id, tablet_operation>;
 
     abort_source& _abort_source;
     gms::feature_service& _feature_service;
@@ -154,7 +162,11 @@ private:
     future<> node_ops_abort(node_ops_id ops_uuid);
     void node_ops_signal_abort(std::optional<node_ops_id> ops_uuid);
     future<> node_ops_abort_thread();
+    future<> do_tablet_operation(locator::global_tablet_id tablet,
+                                 sstring op_name,
+                                 std::function<future<>(locator::tablet_metadata_guard&)> op);
     future<> stream_tablet(locator::global_tablet_id);
+    future<> cleanup_tablet(locator::global_tablet_id);
     inet_address host2ip(locator::host_id);
 public:
     storage_service(abort_source& as, distributed<replica::database>& db,
@@ -176,7 +188,7 @@ public:
 
     // Needed by distributed<>
     future<> stop();
-    void init_messaging_service(sharded<service::storage_proxy>& proxy, sharded<db::system_distributed_keyspace>& sys_dist_ks);
+    void init_messaging_service(sharded<db::system_distributed_keyspace>& sys_dist_ks);
     future<> uninit_messaging_service();
 
     future<> load_tablet_metadata();
@@ -232,7 +244,7 @@ private:
         return _gossiper;
     };
 
-    friend struct node_ops_ctl;
+    friend struct ::node_ops_ctl;
 public:
 
     locator::effective_replication_map_factory& get_erm_factory() noexcept {
@@ -325,7 +337,7 @@ public:
      * API.
      * \see init_server_without_the_messaging_service_part
      */
-    future<> init_messaging_service_part(sharded<service::storage_proxy>& proxy, sharded<db::system_distributed_keyspace>& sys_dist_ks);
+    future<> init_messaging_service_part(sharded<db::system_distributed_keyspace>& sys_dist_ks);
     /*!
      * \brief Uninit the messaging service part of the service.
      */
@@ -488,7 +500,8 @@ private:
     future<> do_update_system_peers_table(gms::inet_address endpoint, const application_state& state, const versioned_value& value);
 
     std::unordered_set<token> get_tokens_for(inet_address endpoint);
-    locator::endpoint_dc_rack get_dc_rack_for(inet_address endpoint);
+    std::optional<locator::endpoint_dc_rack> get_dc_rack_for(const gms::endpoint_state& ep_state);
+    std::optional<locator::endpoint_dc_rack> get_dc_rack_for(inet_address endpoint);
 private:
     // Should be serialized under token_metadata_lock.
     future<> replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept;
@@ -694,6 +707,9 @@ public:
      */
     future<> drain();
 
+    // Recalculates schema digests on this node from contents of tables on disk.
+    future<> reload_schema();
+
     future<std::map<gms::inet_address, float>> get_ownership();
 
     future<std::map<gms::inet_address, float>> effective_ownership(sstring keyspace_name);
@@ -777,7 +793,7 @@ private:
     std::optional<shared_future<>> _decomission_result;
     std::optional<shared_future<>> _rebuild_result;
     std::unordered_map<raft::server_id, std::optional<shared_future<>>> _remove_result;
-    std::unordered_map<locator::global_tablet_id, std::optional<shared_future<>>> _tablet_streaming;
+    tablet_op_registry _tablet_ops;
     // During decommission, the node waits for the coordinator to tell it to shut down.
     std::optional<promise<>> _shutdown_request_promise;
     struct {

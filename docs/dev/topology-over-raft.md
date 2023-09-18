@@ -76,7 +76,7 @@ such as `check_and_repair_cdc_streams`.
 If there is no work for the state machine, tablet load balancer is invoked to
 check if we need to rebalance. If so, it computes an incremental tablet migration
 plan, persists it by moving tablets into transitional states, and moves the state machine
-into the tablet migration track. All this happens atomically form the perspective
+into the tablet migration track. All this happens atomically from the perspective
 of group0 state machine.
 
 The tablet migration track also invokes the load balancer and starts new migrations
@@ -84,9 +84,9 @@ to keep the cluster saturated with streaming. The load balancer is invoked
 on transition of tablet stages, and also continuously as long as it generates
 new migrations.
 
-If there is a pending topology change request, the load balancer
-will not be invoked to allow for current migrations to drain, after which the
-state machine will exit the tablet migration track and allow pending topology
+If there is a pending topology change request during tablet migration track,
+the load balancer will not be invoked to allow for current migrations to drain,
+after which the state machine will exit the tablet migration track and allow pending topology
 operation to start.
 
 The tablet migration track excludes with other topology changes, so node operations
@@ -102,6 +102,12 @@ When the topology state machine is not in the tablet_migration track, it is guar
 that there are no tablet transitions in the system.
 
 Tablets are migrated in parallel and independently.
+
+There is a variant of tablet migration track called tablet draining track, which is invoked
+as a step of certain topology operations (e.g. decommission). Its goal is to readjust tablet replicas
+so that a given topology change can proceed. For example, when decommissioning a node, we
+need to migrate tablet replicas away from the node being decommissioned.
+Tablet draining happens before making changes to vnode-based replication.
 
 # Tablet migration
 
@@ -187,10 +193,10 @@ CREATE TABLE system.topology (
     topology_request text,
     transition_state text static,
     current_cdc_generation_timestamp timestamp static,
-    current_cdc_generation_uuid uuid static,
-    unpublished_cdc_generations set<tuple<timestamp, id>> static,
+    current_cdc_generation_uuid timeuuid static,
+    unpublished_cdc_generations set<tuple<timestamp, timeuuid>> static,
     global_topology_request text static,
-    new_cdc_generation_data_uuid uuid static,
+    new_cdc_generation_data_uuid timeuuid static,
     PRIMARY KEY (key, host_id)
 )
 ```
@@ -214,7 +220,7 @@ Each node has a clustering row in the table where its `host_id` is the clusterin
 There are also a few static columns for cluster-global properties:
 - `transition_state` - the transitioning state of the cluster (as described earlier), may be null
 - `current_cdc_generation_timestamp` - the timestamp of the last introduced CDC generation
-- `current_cdc_generation_uuid` - the UUID of the last introduced CDC generation (used to access its data)
+- `current_cdc_generation_uuid` - the time UUID of the last introduced CDC generation (used to access its data)
 - `unpublished_cdc_generations` - the IDs of the committed yet unpublished CDC generations
 - `global_topology_request` - if set, contains one of the supported global topology requests
-- `new_cdc_generation_data_uuid` - used in `commit_cdc_generation` state, the UUID of the generation to be committed
+- `new_cdc_generation_data_uuid` - used in `commit_cdc_generation` state, the time UUID of the generation to be committed

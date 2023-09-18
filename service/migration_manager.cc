@@ -63,6 +63,7 @@ migration_manager::migration_manager(migration_notifier& notifier, gms::feature_
         , _schema_push([this] { return passive_announce(); })
         , _concurrent_ddl_retries{10}
 {
+    init_messaging_service();
 }
 
 future<> migration_manager::stop() {
@@ -1167,6 +1168,7 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
     if (use_raft) {
         // Schema is synchronized through Raft, so perform a group 0 read barrier.
         // Batch the barriers so we don't invoke them redundantly.
+        mlogger.trace("Performing raft read barrier because schema is not synced, version: {}", v);
         co_await (as ? _group0_barrier.trigger(*as) : _group0_barrier.trigger());
     }
 
@@ -1174,6 +1176,7 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
 
     if (use_raft) {
         // If Raft is used the schema is synced already (through barrier above), mark it as such.
+        mlogger.trace("Mark schema {} as synced", v);
         co_await s->registry_entry()->maybe_sync([] { return make_ready_future<>(); });
     } else {
         co_await maybe_sync(s, dst);

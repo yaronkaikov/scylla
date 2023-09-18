@@ -356,7 +356,8 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             std::map<sstring, sstring> options;
             options.emplace("tombstone_threshold", "0.3f");
             // that's needed because sstable with droppable data should be old enough.
-            options.emplace("tombstone_compaction_interval", "0");
+            options.emplace("tombstone_compaction_interval", "1");
+            sleep(2s).get();
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
             auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *control, {sst});
             BOOST_REQUIRE(descriptor.sstables.size() == 1);

@@ -362,7 +362,6 @@ private:
 public:
     /**
      * Handles switching the endpoint's state from REMOVING_TOKEN to REMOVED_TOKEN
-     * This should only be called after advertise_removing
      *
      * @param endpoint
      * @param host_id
@@ -443,8 +442,6 @@ public:
     // Returns stop_iteration::yes iff `func` returns stop_iteration::yes.
     // Called function must not yield
     stop_iteration for_each_endpoint_state_until(std::function<stop_iteration(const inet_address&, const endpoint_state&)>) const;
-
-    bool uses_host_id(inet_address endpoint) const;
 
     locator::host_id get_host_id(inet_address endpoint) const;
 
@@ -599,6 +596,8 @@ public:
 
 private:
     void build_seeds_list();
+    // Must be called on shard 0
+    future<> do_stop_gossiping();
 
 public:
     /**
@@ -623,7 +622,6 @@ public:
     future<> shutdown();
     // Needed by seastar::sharded
     future<> stop();
-    future<> do_stop_gossiping();
 
 public:
     bool is_enabled() const;

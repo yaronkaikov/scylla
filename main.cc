@@ -97,6 +97,7 @@
 #include "lang/wasm_instance_cache.hh"
 #include "lang/wasm_alien_thread_runner.hh"
 #include "sstables/sstables_manager.hh"
+#include "db/virtual_tables.hh"
 
 #include "service/raft/raft_address_map.hh"
 #include "service/raft/raft_group_registry.hh"
@@ -541,6 +542,27 @@ void dump_performance_profiles() {
     }
 }
 
+static locator::host_id initialize_local_info_thread(sharded<db::system_keyspace>& sys_ks,
+        sharded<locator::snitch_ptr>& snitch,
+        const gms::inet_address& listen_address,
+        const db::config& cfg)
+{
+    auto linfo = sys_ks.local().load_local_info().get0();
+    if (linfo.cluster_name.empty()) {
+        linfo.cluster_name = cfg.cluster_name();
+    } else if (linfo.cluster_name != cfg.cluster_name()) {
+        throw exceptions::configuration_exception("Saved cluster name " + linfo.cluster_name + " != configured name " + cfg.cluster_name());
+    }
+    if (!linfo.host_id) {
+        linfo.host_id = locator::host_id::create_random_id();
+        startlog.info("Setting local host id to {}", linfo.host_id);
+    }
+
+    linfo.listen_address = listen_address;
+    sys_ks.local().save_local_info(std::move(linfo), snitch.local()->get_location()).get();
+    return linfo.host_id;
+}
+
 static int scylla_main(int ac, char** av) {
     // Allow core dumps. The would be disabled by default if
     // CAP_SYS_NICE was added to the binary, as is suggested by the
@@ -762,7 +784,11 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     throw bad_configuration_error();
                 }
             }
+            const bool raft_topology_change_enabled = cfg->consistent_cluster_management() &&
+                cfg->check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES);
+
             gms::feature_config fcfg = gms::feature_config_from_db_config(*cfg);
+            fcfg.use_raft_cluster_features = raft_topology_change_enabled;
 
             debug::the_feature_service = &feature_service;
             feature_service.start(fcfg).get();
@@ -882,7 +908,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             supervisor::notify("starting tokens manager");
             locator::token_metadata::config tm_cfg;
             tm_cfg.topo_cfg.this_endpoint = utils::fb_utilities::get_broadcast_address();
-            tm_cfg.topo_cfg.local_dc_rack = { snitch.local()->get_datacenter(), snitch.local()->get_rack() };
+            tm_cfg.topo_cfg.local_dc_rack = snitch.local()->get_location();
             if (snitch.local()->get_name() == "org.apache.cassandra.locator.SimpleSnitch") {
                 //
                 // Simple snitch wants sort_by_proximity() not to reorder nodes anyhow
@@ -1122,8 +1148,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             static sharded<db::view::view_update_generator> view_update_generator;
             static sharded<cdc::generation_service> cdc_generation_service;
 
+            db::sstables_format_selector sst_format_selector(db);
+
             supervisor::notify("starting system keyspace");
-            sys_ks.start(std::ref(qp), std::ref(db), std::ref(snitch)).get();
+            sys_ks.start(std::ref(qp), std::ref(db)).get();
             // TODO: stop()?
 
             // Initialization of a keyspace is done by shard 0 only. For system
@@ -1134,37 +1162,81 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // done only by shard 0, so we'll no longer face race conditions as
             // described here: https://github.com/scylladb/scylla/issues/1014
             supervisor::notify("loading system sstables");
-            replica::distributed_loader::init_system_keyspace(sys_ks, erm_factory, db, *cfg, system_table_load_phase::phase1).get();
+            replica::distributed_loader::init_system_keyspace(sys_ks, erm_factory, db).get();
 
-            auto listen_address = utils::resolve(cfg->listen_address, family).get0();
+            // 1. Here we notify dependent services that system tables have been loaded,
+            //    and they in turn can load the necessary data from them;
+            // 2. This notification is important for the services that are needed
+            //    during schema commitlog replay;
+            // 3. The data this services load should be written with accompanying
+            //    table.flush, since commitlog is not replayed yet;
+            // 4. This is true for the following services:
+            //   * features_service: we need to re-enable previously enabled features,
+            //     this should be done before commitlog starts replaying
+            //     since some features affect storage.
+            //   * sstables_format_selector: we need to choose the appropriate format,
+            //     since schema commitlog replay can write to sstables.
+            when_all_succeed(feature_service.local().on_system_tables_loaded(sys_ks.local()),
+                sst_format_selector.on_system_tables_loaded(sys_ks.local())).get();
 
-            auto linfo = sys_ks.local().load_local_info().get0();
-            if (linfo.cluster_name.empty()) {
-                linfo.cluster_name = cfg->cluster_name();
-            } else if (linfo.cluster_name != cfg->cluster_name()) {
-                throw exceptions::configuration_exception("Saved cluster name " + linfo.cluster_name + " != configured name " + cfg->cluster_name());
+            db.local().maybe_init_schema_commitlog();
+
+            // Mark all the system tables writable and assign the proper commitlog to them.
+            sys_ks.invoke_on_all(&db::system_keyspace::mark_writable).get();
+
+            supervisor::notify("starting schema commit log");
+            sys_ks.local().cache_truncation_record().get();
+
+            // Check there is no truncation record for schema tables.
+            // Needs to happen before replaying the schema commitlog, which interprets
+            // replay position in the truncation record.
+            db.local().get_tables_metadata().for_each_table([] (table_id, lw_shared_ptr<replica::table> table_ptr) {
+              if (table_ptr->schema()->ks_name() == db::schema_tables::NAME) {
+                  if (table_ptr->get_truncation_record() != db_clock::time_point::min()) {
+                      // replay_position stored in the truncation record may belong to
+                      // the old (default) commitlog domain. It's not safe to interpret
+                      // that replay position in the schema commitlog domain.
+                      // Refuse to boot in this case. We assume no one truncated schema tables.
+                      // We will hit this during rolling upgrade, in which case the user will
+                      // roll back and let us know.
+                      throw std::runtime_error(format("Schema table {}.{} has a truncation record. Booting is not safe.",
+                          table_ptr->schema()->ks_name(), table_ptr->schema()->cf_name()));
+                  }
+              }
+            });
+
+            auto sch_cl = db.local().schema_commitlog();
+            if (sch_cl != nullptr) {
+              auto paths = sch_cl->get_segments_to_replay().get();
+              if (!paths.empty()) {
+                  supervisor::notify("replaying schema commit log");
+                  auto rp = db::commitlog_replayer::create_replayer(db, sys_ks).get0();
+                  rp.recover(paths, db::schema_tables::COMMITLOG_FILENAME_PREFIX).get();
+                  supervisor::notify("replaying schema commit log - flushing memtables");
+                  db.invoke_on_all(&replica::database::flush_all_memtables).get();
+                  supervisor::notify("replaying schema commit log - removing old commitlog segments");
+                  //FIXME: discarded future
+                  (void)sch_cl->delete_segments(std::move(paths));
+              }
             }
-            if (!linfo.host_id) {
-                linfo.host_id = locator::host_id::create_random_id();
-                startlog.info("Setting local host id to {}", linfo.host_id);
-            }
 
-            cfg->host_id = linfo.host_id;
-            linfo.listen_address = listen_address;
-            sys_ks.local().save_local_info(std::move(linfo)).get();
+            sys_ks.local().build_bootstrap_info().get();
 
-          shared_token_metadata::mutate_on_all_shards(token_metadata, [hostid = cfg->host_id, endpoint = utils::fb_utilities::get_broadcast_address()] (locator::token_metadata& tm) {
+            const auto listen_address = utils::resolve(cfg->listen_address, family).get0();
+            const auto host_id = initialize_local_info_thread(sys_ks, snitch, listen_address, *cfg);
+
+          shared_token_metadata::mutate_on_all_shards(token_metadata, [host_id, endpoint = utils::fb_utilities::get_broadcast_address()] (locator::token_metadata& tm) {
               // Makes local host id available in topology cfg as soon as possible.
               // Raft topology discard the endpoint-to-id map, so the local id can
               // still be found in the config.
-              tm.get_topology().set_host_id_cfg(hostid);
-              tm.get_topology().add_or_update_endpoint(endpoint, hostid);
+              tm.get_topology().set_host_id_cfg(host_id);
+              tm.get_topology().add_or_update_endpoint(endpoint, host_id);
               return make_ready_future<>();
           }).get();
 
             netw::messaging_service::config mscfg;
 
-            mscfg.id = cfg->host_id;
+            mscfg.id = host_id;
             mscfg.ip = listen_address;
             mscfg.port = cfg->storage_port();
             mscfg.ssl_port = cfg->ssl_storage_port();
@@ -1280,7 +1352,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 fd.stop().get();
             });
 
-            raft_gr.start(cfg->consistent_cluster_management(), raft::server_id{cfg->host_id.id},
+            raft_gr.start(cfg->consistent_cluster_management(), raft::server_id{host_id.id},
                 std::ref(raft_address_map), std::ref(messaging), std::ref(gossiper), std::ref(fd)).get();
 
             // group0 client exists only on shard 0.
@@ -1316,7 +1388,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 ss.stop().get();
             });
             supervisor::notify("initializing virtual tables");
-            sys_ks.invoke_on_all(&db::system_keyspace::initialize_virtual_tables, std::ref(db), std::ref(ss), std::ref(gossiper), std::ref(raft_gr), std::ref(*cfg)).get();
+            smp::invoke_on_all([&] {
+                return db::initialize_virtual_tables(db, ss, gossiper, raft_gr, sys_ks, *cfg);
+            }).get();
 
             supervisor::notify("starting forward service");
             forward_service.start(std::ref(messaging), std::ref(proxy), std::ref(db), std::ref(token_metadata)).get();
@@ -1351,36 +1425,12 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // engine().at_exit([&qp] { return qp.stop(); });
             sstables::init_metrics().get();
 
-            supervisor::notify("initializing batchlog manager");
-            db::batchlog_manager_config bm_cfg;
-            bm_cfg.write_request_timeout = cfg->write_request_timeout_in_ms() * 1ms;
-            bm_cfg.replay_rate = cfg->batchlog_replay_throttle_in_kb() * 1000;
-            bm_cfg.delay = std::chrono::milliseconds(cfg->ring_delay_ms());
+            db::sstables_format_listener sst_format_listener(gossiper.local(), feature_service, sst_format_selector);
 
-            bm.start(std::ref(qp), std::ref(sys_ks), bm_cfg).get();
-
-            db::sstables_format_selector sst_format_selector(gossiper.local(), feature_service, db, sys_ks.local());
-
-            sst_format_selector.start().get();
-            auto stop_format_selector = defer_verbose_shutdown("sstables format selector", [&sst_format_selector] {
-                sst_format_selector.stop().get();
+            sst_format_listener.start().get();
+            auto stop_format_listener = defer_verbose_shutdown("sstables format listener", [&sst_format_listener] {
+                sst_format_listener.stop().get();
             });
-
-            const bool raft_topology_change_enabled = group0_service.is_raft_enabled()
-                    && cfg->check_experimental(db::experimental_features_t::feature::CONSISTENT_TOPOLOGY_CHANGES);
-
-            // Re-enable previously enabled features on node startup.
-            // This should be done before commitlog starts replaying
-            // since some features affect storage.
-            feature_service.local().enable_features_on_startup(sys_ks.local(), raft_topology_change_enabled).get();
-
-            db.local().maybe_init_schema_commitlog();
-
-            // Init schema tables only after enable_features_on_startup()
-            // because table construction consults enabled features.
-            // Needs to be before system_keyspace::setup(), which writes to schema tables.
-            supervisor::notify("loading system_schema sstables");
-            replica::distributed_loader::init_system_keyspace(sys_ks, erm_factory, db, *cfg, system_table_load_phase::phase2).get();
 
             if (raft_gr.local().is_enabled()) {
                 if (!db.local().uses_schema_commitlog()) {
@@ -1403,54 +1453,11 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             // schema migration, if needed, is also done on shard 0
             db::legacy_schema_migrator::migrate(proxy, db, sys_ks, qp.local()).get();
+            db::schema_tables::save_system_schema(qp.local()).get();
+            db::schema_tables::recalculate_schema_version(sys_ks, proxy, feature_service.local()).get();
 
             // making compaction manager api available, after system keyspace has already been established.
             api::set_server_compaction_manager(ctx).get();
-
-            supervisor::notify("setting up system keyspace");
-            // FIXME -- should happen in start(), but
-            // 1. messaging is on the way with its preferred ip cache
-            // 2. cql_test_env() doesn't do it
-            // 3. need to check if it depends on any of the above steps
-            sys_ks.local().setup(messaging).get();
-
-            supervisor::notify("starting schema commit log");
-
-            // Check there is no truncation record for schema tables.
-            // Needs to happen before replaying the schema commitlog, which interprets
-            // replay position in the truncation record.
-            // Needs to happen before system_keyspace::setup(), which reads truncation records.
-            db.local().get_tables_metadata().for_each_table([] (table_id, lw_shared_ptr<replica::table> table_ptr) {
-                if (table_ptr->schema()->ks_name() == db::schema_tables::NAME) {
-                    if (table_ptr->get_truncation_record() != db_clock::time_point::min()) {
-                        // replay_position stored in the truncation record may belong to
-                        // the old (default) commitlog domain. It's not safe to interpret
-                        // that replay position in the schema commitlog domain.
-                        // Refuse to boot in this case. We assume no one truncated schema tables.
-                        // We will hit this during rolling upgrade, in which case the user will
-                        // roll back and let us know.
-                        throw std::runtime_error(format("Schema table {}.{} has a truncation record. Booting is not safe.",
-                                                        table_ptr->schema()->ks_name(), table_ptr->schema()->cf_name()));
-                    }
-                }
-            });
-
-            auto sch_cl = db.local().schema_commitlog();
-            if (sch_cl != nullptr) {
-                auto paths = sch_cl->get_segments_to_replay().get();
-                if (!paths.empty()) {
-                    supervisor::notify("replaying schema commit log");
-                    auto rp = db::commitlog_replayer::create_replayer(db, sys_ks).get0();
-                    rp.recover(paths, db::schema_tables::COMMITLOG_FILENAME_PREFIX).get();
-                    supervisor::notify("replaying schema commit log - flushing memtables");
-                    db.invoke_on_all(&replica::database::flush_all_memtables).get();
-                    supervisor::notify("replaying schema commit log - removing old commitlog segments");
-                    //FIXME: discarded future
-                    (void)sch_cl->delete_segments(std::move(paths));
-                }
-            }
-
-            db::schema_tables::recalculate_schema_version(sys_ks, proxy, feature_service.local()).get();
 
             supervisor::notify("loading tablet metadata");
             ss.local().load_tablet_metadata().get();
@@ -1516,8 +1523,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
             static seastar::sharded<memory_threshold_guard> mtg;
             mtg.start(cfg->large_memory_allocation_warning_threshold()).get();
-            supervisor::notify("initializing migration manager RPC verbs");
-            mm.invoke_on_all(&service::migration_manager::init_messaging_service).get();
             supervisor::notify("initializing storage proxy RPC verbs");
             proxy.invoke_on_all(&service::storage_proxy::start_remote, std::ref(messaging), std::ref(gossiper), std::ref(mm), std::ref(sys_ks)).get();
             auto stop_proxy_handlers = defer_verbose_shutdown("storage proxy RPC verbs", [&proxy] {
@@ -1603,7 +1608,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             supervisor::notify("starting storage service", true);
-            ss.local().init_messaging_service_part(proxy, sys_dist_ks).get();
+            ss.local().init_messaging_service_part(sys_dist_ks).get();
             auto stop_ss_msg = defer_verbose_shutdown("storage service messaging", [&ss] {
                 ss.local().uninit_messaging_service_part().get();
             });
@@ -1751,7 +1756,12 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             supervisor::notify("starting batchlog manager");
-            bm.invoke_on_all(&db::batchlog_manager::start).get();
+            db::batchlog_manager_config bm_cfg;
+            bm_cfg.write_request_timeout = cfg->write_request_timeout_in_ms() * 1ms;
+            bm_cfg.replay_rate = cfg->batchlog_replay_throttle_in_kb() * 1000;
+            bm_cfg.delay = std::chrono::milliseconds(cfg->ring_delay_ms());
+
+            bm.start(std::ref(qp), std::ref(sys_ks), bm_cfg).get();
             auto stop_batchlog_manager = defer_verbose_shutdown("batchlog manager", [&bm] {
                 bm.stop().get();
             });
@@ -1994,6 +2004,7 @@ int main(int ac, char** av) {
         {"server", scylla_main, "the scylladb server"},
         {"types", tools::scylla_types_main, "a command-line tool to examine values belonging to scylla types"},
         {"sstable", tools::scylla_sstable_main, "a multifunctional command-line tool to examine the content of sstables"},
+        {"nodetool", tools::scylla_nodetool_main, "a command-line tool to administer local or remote ScyllaDB nodes"},
         {"perf-fast-forward", perf::scylla_fast_forward_main, "run performance tests by fast forwarding the reader on this server"},
         {"perf-row-cache-update", perf::scylla_row_cache_update_main, "run performance tests by updating row cache on this server"},
         {"perf-tablets", perf::scylla_tablets_main, "run performance tests of tablet metadata management"},

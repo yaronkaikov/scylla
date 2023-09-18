@@ -402,7 +402,7 @@ future<std::unordered_map<locator::host_id, sstring>> system_distributed_keyspac
 }
 
 future<> system_distributed_keyspace::start_view_build(sstring ks_name, sstring view_name) const {
-    auto host_id = _sp.local_db().get_config().host_id;
+    auto host_id = _sp.local_db().get_token_metadata().get_my_id();
     return _qp.execute_internal(
             format("INSERT INTO {}.{} (keyspace_name, view_name, host_id, status) VALUES (?, ?, ?, ?)", NAME, VIEW_BUILD_STATUS),
             db::consistency_level::ONE,
@@ -412,7 +412,7 @@ future<> system_distributed_keyspace::start_view_build(sstring ks_name, sstring 
 }
 
 future<> system_distributed_keyspace::finish_view_build(sstring ks_name, sstring view_name) const {
-    auto host_id = _sp.local_db().get_config().host_id;
+    auto host_id = _sp.local_db().get_token_metadata().get_my_id();
     return _qp.execute_internal(
             format("UPDATE {}.{} SET status = ? WHERE keyspace_name = ? AND view_name = ? AND host_id = ?", NAME, VIEW_BUILD_STATUS),
             db::consistency_level::ONE,
@@ -563,7 +563,7 @@ system_distributed_keyspace::insert_cdc_generation(
 
     auto s = _qp.db().real_database().find_schema(
         system_distributed_keyspace::NAME_EVERYWHERE, system_distributed_keyspace::CDC_GENERATIONS_V2);
-    auto ms = co_await cdc::get_cdc_generation_mutations(s, id, desc, mutation_size_threshold, api::new_timestamp());
+    auto ms = co_await cdc::get_cdc_generation_mutations_v2(s, id, desc, mutation_size_threshold, api::new_timestamp());
     co_await max_concurrent_for_each(ms, concurrency, [&] (mutation& m) -> future<> {
         co_await _sp.mutate(
             { std::move(m) },

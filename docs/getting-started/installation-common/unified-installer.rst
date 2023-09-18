@@ -31,7 +31,7 @@ Download and Install
 
    .. code:: console
 
-    tar xvfz tar scylla-unified-5.2.4-0.20230623.cebbf6c5df2b.x86_64.tar.gz
+    tar xvfz scylla-unified-5.2.4-0.20230623.cebbf6c5df2b.x86_64.tar.gz
 
 #. Install OpenJDK 8 or 11.
 
@@ -39,7 +39,7 @@ Download and Install
 
    .. code:: console
     
-    sudo yum install -y java-11-openjdk
+    sudo yum install -y java-11-openjdk-headless
 
    For root offline installation on Debian-like systems, two additional packages, ``xfsprogs`` 
    and ``mdadm``, should be installed to be used in RAID setup.
@@ -48,7 +48,7 @@ Download and Install
 
    .. code:: console
 
-    sh -x ./install.sh --nonroot --python3 ~/scylladb/python3/bin/python3
+    ./install.sh --nonroot --python3 ~/scylladb/python3/bin/python3
 
 Configure and Run ScyllaDB
 ----------------------------
@@ -90,7 +90,7 @@ Run cassandra-stress:
 
 .. code:: console
 
-    ~/scylladb/share/cassandra/bin/cassandra-stress write -node xxx
+    ~/scylladb/share/cassandra/bin/cassandra-stress write
 
 .. note::
 

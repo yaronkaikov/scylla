@@ -579,6 +579,9 @@ class TestScyllaSsstableSchemaLoading:
 
     def check(self, scylla_path, extra_args, sstable, dump_reference, cwd=None, env=None):
         dump_common_args = [scylla_path, "sstable", "dump-data", "--output-format", "json", "--logger-log-level", "scylla-sstable=debug"]
+        if env is None:
+            env = os.environ.copy()
+        env['ASAN_OPTIONS'] = 'detect_leaks=0'
         dump = json.loads(subprocess.check_output(dump_common_args + extra_args + [sstable], cwd=cwd, env=env))["sstables"]
         dump = list(dump.values())[0]
         assert dump == dump_reference

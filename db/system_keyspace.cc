@@ -44,7 +44,6 @@
 #include "cdc/generation.hh"
 #include "replica/tablets.hh"
 #include "replica/query.hh"
-#include "db/virtual_tables.hh"
 
 using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
 
@@ -52,51 +51,42 @@ namespace db {
 namespace {
     const auto set_null_sharder = schema_builder::register_static_configurator([](const sstring& ks_name, const sstring& cf_name, schema_static_props& props) {
         // tables in the "system" keyspace which need to use null sharder
-        static const std::unordered_set<sstring> system_ks_null_shard_tables = {
+        static const std::unordered_set<sstring> tables = {
             schema_tables::SCYLLA_TABLE_SCHEMA_HISTORY,
-            system_keyspace::RAFT,
-            system_keyspace::RAFT_SNAPSHOTS,
-            system_keyspace::RAFT_SNAPSHOT_CONFIG,
-            system_keyspace::GROUP0_HISTORY,
-            system_keyspace::DISCOVERY,
             system_keyspace::BROADCAST_KV_STORE,
             system_keyspace::TOPOLOGY,
             system_keyspace::CDC_GENERATIONS_V3,
-            system_keyspace::TABLETS,
         };
-        if (ks_name == system_keyspace::NAME && system_ks_null_shard_tables.contains(cf_name)) {
+        if (ks_name == system_keyspace::NAME && tables.contains(cf_name)) {
             props.use_null_sharder = true;
         }
     });
     const auto set_wait_for_sync_to_commitlog = schema_builder::register_static_configurator([](const sstring& ks_name, const sstring& cf_name, schema_static_props& props) {
-        static const std::unordered_set<sstring> extra_durable_tables = {
+        static const std::unordered_set<sstring> tables = {
             system_keyspace::PAXOS,
-            system_keyspace::SCYLLA_LOCAL,
-            system_keyspace::RAFT,
-            system_keyspace::RAFT_SNAPSHOTS,
-            system_keyspace::RAFT_SNAPSHOT_CONFIG,
-            system_keyspace::DISCOVERY,
             system_keyspace::BROADCAST_KV_STORE,
             system_keyspace::TOPOLOGY,
             system_keyspace::CDC_GENERATIONS_V3,
-            system_keyspace::TABLETS,
         };
-        if (ks_name == system_keyspace::NAME && extra_durable_tables.contains(cf_name)) {
+        if (ks_name == system_keyspace::NAME && tables.contains(cf_name)) {
             props.wait_for_sync_to_commitlog = true;
         }
     });
     const auto set_use_schema_commitlog = schema_builder::register_static_configurator([](const sstring& ks_name, const sstring& cf_name, schema_static_props& props) {
-        static const std::unordered_set<sstring> raft_tables = {
+        static const std::unordered_set<sstring> tables = {
             system_keyspace::RAFT,
             system_keyspace::RAFT_SNAPSHOTS,
             system_keyspace::RAFT_SNAPSHOT_CONFIG,
             system_keyspace::GROUP0_HISTORY,
             system_keyspace::DISCOVERY,
             system_keyspace::TABLETS,
+            system_keyspace::LOCAL,
+            system_keyspace::PEERS,
+            system_keyspace::SCYLLA_LOCAL,
+            system_keyspace::v3::CDC_LOCAL
         };
-        if (ks_name == system_keyspace::NAME && raft_tables.contains(cf_name)) {
-            props.use_schema_commitlog = true;
-            props.load_phase = system_table_load_phase::phase2;
+        if (ks_name == system_keyspace::NAME && tables.contains(cf_name)) {
+            props.enable_schema_commitlog();
         }
     });
 }
@@ -213,7 +203,7 @@ schema_ptr system_keyspace::batchlog() {
     return paxos;
 }
 
-thread_local data_type cdc_generation_id_v2_type = tuple_type_impl::get_instance({timestamp_type, uuid_type});
+thread_local data_type cdc_generation_ts_id_type = tuple_type_impl::get_instance({timestamp_type, timeuuid_type});
 
 schema_ptr system_keyspace::topology() {
     static thread_local auto schema = [] {
@@ -234,12 +224,12 @@ schema_ptr system_keyspace::topology() {
             .with_column("shard_count", int32_type)
             .with_column("ignore_msb", int32_type)
             .with_column("supported_features", set_type_impl::get_instance(utf8_type, true))
-            .with_column("new_cdc_generation_data_uuid", uuid_type, column_kind::static_column)
+            .with_column("new_cdc_generation_data_uuid", timeuuid_type, column_kind::static_column)
             .with_column("version", long_type, column_kind::static_column)
             .with_column("transition_state", utf8_type, column_kind::static_column)
-            .with_column("current_cdc_generation_uuid", uuid_type, column_kind::static_column)
+            .with_column("current_cdc_generation_uuid", timeuuid_type, column_kind::static_column)
             .with_column("current_cdc_generation_timestamp", timestamp_type, column_kind::static_column)
-            .with_column("unpublished_cdc_generations", set_type_impl::get_instance(cdc_generation_id_v2_type, true), column_kind::static_column)
+            .with_column("unpublished_cdc_generations", set_type_impl::get_instance(cdc_generation_ts_id_type, true), column_kind::static_column)
             .with_column("global_topology_request", utf8_type, column_kind::static_column)
             .with_column("enabled_features", set_type_impl::get_instance(utf8_type, true), column_kind::static_column)
             .set_comment("Current state of topology change machine")
@@ -257,15 +247,18 @@ schema_ptr system_keyspace::cdc_generations_v3() {
     thread_local auto schema = [] {
         auto id = generate_legacy_id(NAME, CDC_GENERATIONS_V3);
         return schema_builder(NAME, CDC_GENERATIONS_V3, {id})
+            /* This is a single-partition table with key 'cdc_generations'. */
+            .with_column("key", utf8_type, column_kind::partition_key)
             /* The unique identifier of this generation. */
-            .with_column("id", uuid_type, column_kind::partition_key)
+            .with_column("id", timeuuid_type, column_kind::clustering_key)
             /* The generation describes a mapping from all tokens in the token ring to a set of stream IDs.
              * This mapping is built from a bunch of smaller mappings, each describing how tokens in a
              * subrange of the token ring are mapped to stream IDs; these subranges together cover the entire
-             * token ring.  Each such range-local mapping is represented by a row of this table. The
-             * clustering key of the row is the end of the range being described by this row. The start of
-             * this range is the range_end of the previous row (in the clustering order, which is the integer
-             * order) or of the last row of this partition if this is the first the first row. */
+             * token ring. Each such range-local mapping is represented by a row of this table. The second
+             * column of the clustering key of the row is the end of the range being described by this row.
+             * The start of this range is the range_end of the previous row (in the clustering order, which
+             * is the integer order) or of the last row with the same id value if this is the first row with
+             * such id. */
             .with_column("range_end", long_type, column_kind::clustering_key)
             /* The set of streams mapped to in this range.  The number of streams mapped to a single range in
              * a CDC generation is bounded from above by the number of shards on the owner of that range in
@@ -278,10 +271,6 @@ schema_ptr system_keyspace::cdc_generations_v3() {
              * range when the generation was first created. Together with the set of streams above it fully
              * describes the mapping for this particular range. */
             .with_column("ignore_msb", byte_type)
-            /* Column used for sanity checking. For a given generation it's equal to the number of ranges in
-             * this generation; thus, after the generation is fully inserted, it must be equal to the number
-             * of rows in the partition. */
-            .with_column("num_ranges", int32_type, column_kind::static_column)
             .with_version(system_keyspace::generate_schema_version(id))
             .build();
     }();
@@ -1378,7 +1367,7 @@ future<system_keyspace::local_info> system_keyspace::load_local_info() {
     co_return ret;
 }
 
-future<> system_keyspace::save_local_info(local_info sysinfo) {
+future<> system_keyspace::save_local_info(local_info sysinfo, locator::endpoint_dc_rack location) {
     auto& cfg = _db.get_config();
     sstring req = fmt::format("INSERT INTO system.{} (key, host_id, cluster_name, release_version, cql_version, thrift_version, native_protocol_version, data_center, rack, partitioner, rpc_address, broadcast_address, listen_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     , db::system_keyspace::LOCAL);
@@ -1390,8 +1379,8 @@ future<> system_keyspace::save_local_info(local_info sysinfo) {
                             cql3::query_processor::CQL_VERSION,
                             ::cassandra::thrift_version,
                             to_sstring(unsigned(cql_serialization_format::latest().protocol_version())),
-                            local_dc_rack().dc,
-                            local_dc_rack().rack,
+                            location.dc,
+                            location.rack,
                             sstring(cfg.partitioner()),
                             utils::fb_utilities::get_broadcast_rpc_address().addr(),
                             utils::fb_utilities::get_broadcast_address().addr(),
@@ -1410,7 +1399,6 @@ future<> system_keyspace::save_local_supported_features(const std::set<std::stri
 // is different than the one that wrote, may see a corrupted value. invoke_on_all will be used to guarantee that all
 // updates are propagated correctly.
 struct local_cache {
-    locator::endpoint_dc_rack _local_dc_rack_info;
     system_keyspace::bootstrap_state _state;
 };
 
@@ -1451,16 +1439,6 @@ future<> system_keyspace::build_bootstrap_info() {
             sys_ks._cache->_state = state;
         });
     });
-}
-
-future<> system_keyspace::setup(sharded<netw::messaging_service>& ms) {
-    assert(this_shard_id() == 0);
-
-    co_await build_bootstrap_info();
-    co_await db::schema_tables::save_system_keyspace_schema(_qp);
-    // #2514 - make sure "system" is written to system_schema.keyspaces.
-    co_await db::schema_tables::save_system_schema(_qp, NAME);
-    co_await cache_truncation_record();
 }
 
 struct truncation_record {
@@ -1523,6 +1501,8 @@ future<> system_keyspace::cache_truncation_record() {
 future<> system_keyspace::save_truncation_record(table_id id, db_clock::time_point truncated_at, db::replay_position rp) {
     sstring req = format("INSERT INTO system.{} (table_uuid, shard, position, segment_id, truncated_at) VALUES(?,?,?,?,?)", TRUNCATED);
     co_await _qp.execute_internal(req, {id.uuid(), int32_t(rp.shard_id()), int32_t(rp.pos), int64_t(rp.base_id()), truncated_at}, cql3::query_processor::cache_internal::yes);
+    // Flush the table so that the value is available on boot before commitlog replay.
+    // Commit log replay depends on truncation records to determine the minimum replay position.
     co_await force_blocking_flush(TRUNCATED);
 }
 
@@ -1597,7 +1577,6 @@ future<> system_keyspace::update_tokens(gms::inet_address ep, const std::unorder
     slogger.debug("INSERT INTO system.{} (peer, tokens) VALUES ({}, {})", PEERS, ep, tokens);
     auto set_type = set_type_impl::get_instance(utf8_type, true);
     co_await execute_cql(req, ep.addr(), make_set_value(set_type, prepare_tokens(tokens))).discard_result();
-    co_await force_blocking_flush(PEERS);
 }
 
 
@@ -1699,15 +1678,13 @@ template future<> system_keyspace::update_peer_info<utils::UUID>(gms::inet_addre
 template future<> system_keyspace::update_peer_info<net::inet_address>(gms::inet_address ep, sstring column_name, net::inet_address);
 
 template <typename T>
-future<> system_keyspace::set_scylla_local_param_as(const sstring& key, const T& value) {
+future<> system_keyspace::set_scylla_local_param_as(const sstring& key, const T& value, bool visible_before_cl_replay) {
     sstring req = format("UPDATE system.{} SET value = ? WHERE key = ?", system_keyspace::SCYLLA_LOCAL);
     auto type = data_type_for<T>();
     co_await execute_cql(req, type->to_string_impl(data_value(value)), key).discard_result();
-    // Flush the table so that the value is available on boot before commitlog replay.
-    // database::maybe_init_schema_commitlog() depends on it.
-    co_await container().invoke_on_all([] (auto& sys_ks) -> future<> {
-        co_await sys_ks._db.flush(db::system_keyspace::NAME, system_keyspace::SCYLLA_LOCAL);
-    });
+    if (visible_before_cl_replay) {
+        co_await force_blocking_flush(SCYLLA_LOCAL);
+    }
 }
 
 template <typename T>
@@ -1724,8 +1701,8 @@ future<std::optional<T>> system_keyspace::get_scylla_local_param_as(const sstrin
     });
 }
 
-future<> system_keyspace::set_scylla_local_param(const sstring& key, const sstring& value) {
-    return set_scylla_local_param_as<sstring>(key, value);
+future<> system_keyspace::set_scylla_local_param(const sstring& key, const sstring& value, bool visible_before_cl_replay) {
+    return set_scylla_local_param_as<sstring>(key, value, visible_before_cl_replay);
 }
 
 future<std::optional<sstring>> system_keyspace::get_scylla_local_param(const sstring& key){
@@ -1744,7 +1721,6 @@ future<> system_keyspace::remove_endpoint(gms::inet_address ep) {
     sstring req = format("DELETE FROM system.{} WHERE peer = ?", PEERS);
     slogger.debug("DELETE FROM system.{} WHERE peer = {}", PEERS, ep);
     co_await execute_cql(req, ep.addr()).discard_result();
-    co_await force_blocking_flush(PEERS);
 }
 
 future<> system_keyspace::update_tokens(const std::unordered_set<dht::token>& tokens) {
@@ -1755,7 +1731,6 @@ future<> system_keyspace::update_tokens(const std::unordered_set<dht::token>& to
     sstring req = format("INSERT INTO system.{} (key, tokens) VALUES (?, ?)", LOCAL);
     auto set_type = set_type_impl::get_instance(utf8_type, true);
     co_await execute_cql(req, sstring(LOCAL), make_set_value(set_type, prepare_tokens(tokens)));
-    co_await force_blocking_flush(LOCAL);
 }
 
 future<> system_keyspace::force_blocking_flush(sstring cfname) {
@@ -1801,8 +1776,6 @@ future<> system_keyspace::update_cdc_generation_id(cdc::generation_id gen_id) {
                 sstring(v3::CDC_LOCAL), id.ts, id.id);
     }
     ), gen_id);
-
-    co_await force_blocking_flush(v3::CDC_LOCAL);
 }
 
 future<std::optional<cdc::generation_id>> system_keyspace::get_cdc_generation_id() {
@@ -1884,7 +1857,6 @@ future<> system_keyspace::set_bootstrap_state(bootstrap_state state) {
 
     sstring req = format("INSERT INTO system.{} (key, bootstrapped) VALUES (?, ?)", LOCAL);
     co_await execute_cql(req, sstring(LOCAL), state_name).discard_result();
-    co_await force_blocking_flush(LOCAL);
     co_await container().invoke_on_all([state] (auto& sys_ks) {
         sys_ks._cache->_state = state;
     });
@@ -1942,32 +1914,16 @@ static bool maybe_write_in_user_memory(schema_ptr s) {
 
 future<> system_keyspace::make(
         locator::effective_replication_map_factory& erm_factory,
-        replica::database& db, db::config& cfg, system_table_load_phase phase) {
+        replica::database& db) {
     for (auto&& table : system_keyspace::all_tables(db.get_config())) {
-        if (table->static_props().load_phase != phase) {
-            continue;
-        }
-
         co_await db.create_local_system_table(table, maybe_write_in_user_memory(table), erm_factory);
     }
 }
 
-future<> system_keyspace::initialize_virtual_tables(
-        distributed<replica::database>& dist_db, distributed<service::storage_service>& dist_ss,
-        sharded<gms::gossiper>& dist_gossiper, distributed<service::raft_group_registry>& dist_raft_gr,
-        db::config& cfg) {
-    register_virtual_tables(dist_db, dist_ss, dist_gossiper, dist_raft_gr, cfg);
-
-    auto& db = dist_db.local();
-    for (auto&& table: all_virtual_tables()) {
-        co_await db.create_local_system_table(table, false, dist_ss.local().get_erm_factory());
+void system_keyspace::mark_writable() {
+    for (auto&& table : system_keyspace::all_tables(_db.get_config())) {
+        _db.find_column_family(table).mark_ready_for_writes(_db.commitlog_for(table));
     }
-
-    install_virtual_readers(*this, db);
-}
-
-locator::endpoint_dc_rack system_keyspace::local_dc_rack() const {
-    return _cache->_local_dc_rack_info;
 }
 
 future<foreign_ptr<lw_shared_ptr<reconcilable_result>>>
@@ -2100,7 +2056,6 @@ future<int> system_keyspace::increment_and_get_generation() {
     }
     req = format("INSERT INTO system.{} (key, gossip_generation) VALUES ('{}', ?)", LOCAL, LOCAL);
     co_await _qp.execute_internal(req, {generation.value()}, cql3::query_processor::cache_internal::yes);
-    co_await force_blocking_flush(LOCAL);
     co_return generation;
 }
 
@@ -2352,9 +2307,9 @@ future<std::set<sstring>> system_keyspace::load_local_enabled_features() {
     co_return features;
 }
 
-future<> system_keyspace::save_local_enabled_features(std::set<sstring> features) {
+future<> system_keyspace::save_local_enabled_features(std::set<sstring> features, bool visible_before_cl_replay) {
     auto features_str = fmt::to_string(fmt::join(features, ","));
-    co_await set_scylla_local_param(gms::feature_service::ENABLED_FEATURES_KEY, features_str);
+    co_await set_scylla_local_param(gms::feature_service::ENABLED_FEATURES_KEY, features_str, visible_before_cl_replay);
 }
 
 future<utils::UUID> system_keyspace::get_raft_group0_id() {
@@ -2363,7 +2318,7 @@ future<utils::UUID> system_keyspace::get_raft_group0_id() {
 }
 
 future<> system_keyspace::set_raft_group0_id(utils::UUID uuid) {
-    return set_scylla_local_param_as<utils::UUID>("raft_group0_id", uuid);
+    return set_scylla_local_param_as<utils::UUID>("raft_group0_id", uuid, false);
 }
 
 static constexpr auto GROUP0_HISTORY_KEY = "history";
@@ -2447,7 +2402,7 @@ future<std::optional<sstring>> system_keyspace::load_group0_upgrade_state() {
 }
 
 future<> system_keyspace::save_group0_upgrade_state(sstring value) {
-    return set_scylla_local_param(GROUP0_UPGRADE_STATE_KEY, value);
+    return set_scylla_local_param(GROUP0_UPGRADE_STATE_KEY, value, false);
 }
 
 static constexpr auto MUST_SYNCHRONIZE_TOPOLOGY_KEY = "must_synchronize_topology";
@@ -2458,7 +2413,7 @@ future<bool> system_keyspace::get_must_synchronize_topology() {
 }
 
 future<> system_keyspace::set_must_synchronize_topology(bool value) {
-    return set_scylla_local_param_as<bool>(MUST_SYNCHRONIZE_TOPOLOGY_KEY, value);
+    return set_scylla_local_param_as<bool>(MUST_SYNCHRONIZE_TOPOLOGY_KEY, value, false);
 }
 
 static std::set<sstring> decode_features(const set_type_impl::native_type& features) {
@@ -2625,7 +2580,7 @@ future<service::topology> system_keyspace::load_topology_state() {
             auto gen_uuid = some_row.get_as<utils::UUID>("current_cdc_generation_uuid");
             if (!some_row.has("current_cdc_generation_timestamp")) {
                 on_internal_error(slogger, format(
-                    "load_topology_state: current CDC generation UUID ({}) present, but timestamp missing", gen_uuid));
+                    "load_topology_state: current CDC generation time UUID ({}) present, but timestamp missing", gen_uuid));
             }
             auto gen_ts = some_row.get_as<db_clock::time_point>("current_cdc_generation_timestamp");
             ret.current_cdc_generation_id = cdc::generation_id_v2 {
@@ -2636,22 +2591,16 @@ future<service::topology> system_keyspace::load_topology_state() {
             // Sanity check for CDC generation data consistency.
             {
                 auto gen_rows = co_await execute_cql(
-                    format("SELECT count(range_end) as cnt, num_ranges FROM system.{} WHERE id = ?",
-                           CDC_GENERATIONS_V3),
+                    format("SELECT count(range_end) as cnt FROM {}.{} WHERE key = '{}' AND id = ?",
+                           NAME, CDC_GENERATIONS_V3, cdc::CDC_GENERATIONS_V3_KEY),
                     gen_uuid);
                 assert(gen_rows);
                 if (gen_rows->empty()) {
                     on_internal_error(slogger, format(
-                        "load_topology_state: current CDC generation UUID ({}) present, but data missing", gen_uuid));
+                        "load_topology_state: current CDC generation time UUID ({}) present, but data missing", gen_uuid));
                 }
-                auto& row = gen_rows->one();
-                auto counted_ranges = row.get_as<int64_t>("cnt");
-                auto num_ranges = row.get_as<int32_t>("num_ranges");
-                if (counted_ranges != num_ranges) {
-                    on_internal_error(slogger, format(
-                        "load_topology_state: inconsistency in CDC generation data (UUID {}):"
-                        " counted {} ranges, should be {}", gen_uuid, counted_ranges, num_ranges));
-                }
+                auto cnt = gen_rows->one().get_as<int64_t>("cnt");
+                slogger.debug("load_topology_state: current CDC generation time UUID ({}), loaded {} ranges", gen_uuid, cnt);
             }
         } else {
             if (!ret.normal_nodes.empty()) {
@@ -2713,16 +2662,15 @@ future<int64_t> system_keyspace::get_topology_fence_version() {
 }
 
 future<> system_keyspace::update_topology_fence_version(int64_t value) {
-    return set_scylla_local_param_as<int64_t>("topology_fence_version", value);
+    return set_scylla_local_param_as<int64_t>("topology_fence_version", value, false);
 }
 
 future<cdc::topology_description>
 system_keyspace::read_cdc_generation(utils::UUID id) {
     std::vector<cdc::token_range_description> entries;
-    size_t num_ranges = 0;
     co_await _qp.query_internal(
-            format("SELECT range_end, streams, ignore_msb, num_ranges FROM {}.{} WHERE id = ?",
-                   NAME, CDC_GENERATIONS_V3),
+            format("SELECT range_end, streams, ignore_msb FROM {}.{} WHERE key = '{}' AND id = ?",
+                   NAME, CDC_GENERATIONS_V3, cdc::CDC_GENERATIONS_V3_KEY),
             db::consistency_level::ONE,
             { id },
             1000, // for ~1KB rows, ~1MB page size
@@ -2733,7 +2681,6 @@ system_keyspace::read_cdc_generation(utils::UUID id) {
             dht::token::from_int64(row.get_as<int64_t>("range_end")),
             std::move(streams),
             uint8_t(row.get_as<int8_t>("ignore_msb"))});
-        num_ranges = row.get_as<int32_t>("num_ranges");
         return make_ready_future<stop_iteration>(stop_iteration::no);
     });
 
@@ -2741,12 +2688,6 @@ system_keyspace::read_cdc_generation(utils::UUID id) {
         // The data must be present by precondition.
         on_internal_error(slogger, format(
             "read_cdc_generation: data for CDC generation {} not present", id));
-    }
-
-    if (entries.size() != num_ranges) {
-        throw std::runtime_error(format(
-            "read_cdc_generation: wrong number of rows. The `num_ranges` column claimed {} rows,"
-            " but reading the partition returned {}.", num_ranges, entries.size()));
     }
 
     co_return cdc::topology_description{std::move(entries)};
@@ -2805,19 +2746,12 @@ sstring system_keyspace_name() {
 }
 
 system_keyspace::system_keyspace(
-        cql3::query_processor& qp, replica::database& db, const locator::snitch_ptr& snitch) noexcept
+        cql3::query_processor& qp, replica::database& db) noexcept
     : _qp(qp)
     , _db(db)
     , _cache(std::make_unique<local_cache>())
 {
     _db.plug_system_keyspace(*this);
-
-    // FIXME
-    // This should be coupled with setup_version()'s part committing these values into
-    // the system.local table. However, cql_test_env needs cached local_dc_rack strings,
-    // but it doesn't call system_keyspace::setup() and thus ::setup_version() either
-    _cache->_local_dc_rack_info.dc = snitch->get_datacenter();
-    _cache->_local_dc_rack_info.rack = snitch->get_rack();
 }
 
 system_keyspace::~system_keyspace() {

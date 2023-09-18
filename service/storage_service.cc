@@ -22,6 +22,7 @@
 #include "db/consistency_level.hh"
 #include "service/tablet_allocator.hh"
 #include "locator/tablets.hh"
+#include "locator/tablet_metadata_guard.hh"
 #include "replica/tablet_mutation_builder.hh"
 #include <seastar/core/smp.hh>
 #include "mutation/canonical_mutation.hh"
@@ -84,6 +85,7 @@
 #include "service/raft/raft_address_map.hh"
 #include "protocol_server.hh"
 #include "types/set.hh"
+#include "node_ops/node_ops_ctl.hh"
 #include "audit/audit.hh"
 #include "service/qos/service_level_controller.hh"
 #include "service/qos/standard_service_level_distributed_data_accessor.hh"
@@ -99,7 +101,7 @@ using inet_address = gms::inet_address;
 extern logging::logger cdc_log;
 
 namespace db {
-    extern thread_local data_type cdc_generation_id_v2_type;
+    extern thread_local data_type cdc_generation_ts_id_type;
 }
 
 namespace service {
@@ -132,6 +134,7 @@ storage_service::storage_service(abort_source& abort_source,
         , _stream_manager(stream_manager)
         , _snitch(snitch)
         , _sl_controller(sl_controller)
+        , _group0(nullptr)
         , _node_ops_abort_thread(node_ops_abort_thread())
         , _shared_token_metadata(stm)
         , _erm_factory(erm_factory)
@@ -307,6 +310,21 @@ future<> storage_service::wait_for_ring_to_settle() {
     slogger.info("Checking bootstrapping/leaving nodes: ok");
 }
 
+static locator::node::state to_topology_node_state(node_state ns) {
+    switch (ns) {
+        case node_state::bootstrapping: return locator::node::state::bootstrapping;
+        case node_state::decommissioning: return locator::node::state::being_decommissioned;
+        case node_state::removing: return locator::node::state::being_removed;
+        case node_state::normal: return locator::node::state::normal;
+        case node_state::left_token_ring: return locator::node::state::left;
+        case node_state::left: return locator::node::state::left;
+        case node_state::replacing: return locator::node::state::replacing;
+        case node_state::rebuilding: return locator::node::state::normal;
+        case node_state::none: return locator::node::state::none;
+    }
+    on_internal_error(slogger, format("unhandled node state: {}", ns));
+}
+
 future<> storage_service::topology_state_load() {
 #ifdef SEASTAR_DEBUG
     static bool running = false;
@@ -332,7 +350,7 @@ future<> storage_service::topology_state_load() {
     // Update the legacy `enabled_features` key in `system.scylla_local`.
     // It's OK to update it after enabling features because `system.topology` now
     // is the source of truth about enabled features.
-    co_await _sys_ks.local().save_local_enabled_features(_topology_state_machine._topology.features.enabled_features);
+    co_await _sys_ks.local().save_local_enabled_features(_topology_state_machine._topology.features.enabled_features, false);
 
     const auto& am = _group0->address_map();
     auto id2ip = [this, &am] (raft::server_id id) -> future<gms::inet_address> {
@@ -368,8 +386,10 @@ future<> storage_service::topology_state_load() {
 
         tmptr->set_version(_topology_state_machine._topology.version);
 
-        auto update_topology = [&] (inet_address ip, const replica_state& rs) {
-            tmptr->update_topology(ip, locator::endpoint_dc_rack{rs.datacenter, rs.rack}, std::nullopt, rs.shard_count);
+        auto update_topology = [&] (locator::host_id id, inet_address ip, const replica_state& rs) {
+            tmptr->update_topology(ip, locator::endpoint_dc_rack{rs.datacenter, rs.rack},
+                                   to_topology_node_state(rs.state), rs.shard_count);
+            tmptr->update_host_id(id, ip);
         };
 
         auto add_normal_node = [&] (raft::server_id id, const replica_state& rs) -> future<> {
@@ -396,9 +416,8 @@ future<> storage_service::topology_state_load() {
                 co_await _sys_ks.local().update_tokens(rs.ring.value().tokens);
                 co_await _gossiper.add_local_application_state({{ gms::application_state::STATUS, gms::versioned_value::normal(rs.ring.value().tokens) }});
             }
-            update_topology(ip, rs);
+            update_topology(host_id, ip, rs);
             co_await tmptr->update_normal_tokens(rs.ring.value().tokens, ip);
-            tmptr->update_host_id(host_id, ip);
         };
 
         for (const auto& [id, rs]: _topology_state_machine._topology.normal_nodes) {
@@ -415,6 +434,8 @@ future<> storage_service::topology_state_load() {
                     [[fallthrough]];
                 case topology::transition_state::commit_cdc_generation:
                     [[fallthrough]];
+                case topology::transition_state::tablet_draining:
+                    [[fallthrough]];
                 case topology::transition_state::write_both_read_old:
                     return read_new_t::no;
                 case topology::transition_state::write_both_read_new:
@@ -427,7 +448,10 @@ future<> storage_service::topology_state_load() {
             auto ip = co_await id2ip(id);
 
             slogger.trace("raft topology: loading topology: raft id={} ip={} node state={} dc={} rack={} tokens state={} tokens={}",
-                          id, ip, rs.state, rs.datacenter, rs.rack, _topology_state_machine._topology.tstate, rs.ring->tokens);
+                          id, ip, rs.state, rs.datacenter, rs.rack, _topology_state_machine._topology.tstate,
+                          seastar::value_of([&] () -> sstring {
+                              return rs.ring ? ::format("{}", rs.ring->tokens) : sstring("null");
+                          }));
 
             switch (rs.state) {
             case node_state::bootstrapping:
@@ -436,7 +460,7 @@ future<> storage_service::topology_state_load() {
                     co_await _sys_ks.local().update_tokens(ip, {});
                     co_await _sys_ks.local().update_peer_info(ip, "host_id", id.uuid());
                 }
-                update_topology(ip, rs);
+                update_topology(host_id, ip, rs);
                 if (_topology_state_machine._topology.normal_nodes.empty()) {
                     // This is the first node in the cluster. Insert the tokens as normal to the token ring early
                     // so we can perform writes to regular 'distributed' tables during the bootstrap procedure
@@ -450,9 +474,8 @@ future<> storage_service::topology_state_load() {
                 break;
             case node_state::decommissioning:
             case node_state::removing:
-                update_topology(ip, rs);
+                update_topology(host_id, ip, rs);
                 co_await tmptr->update_normal_tokens(rs.ring.value().tokens, ip);
-                tmptr->update_host_id(host_id, ip);
                 tmptr->add_leaving_endpoint(ip);
                 co_await update_topology_change_info(tmptr, ::format("{} {}/{}", rs.state, id, ip));
                 break;
@@ -465,7 +488,10 @@ future<> storage_service::topology_state_load() {
                     on_fatal_internal_error(slogger, ::format("Cannot map id of a node being replaced {} to its ip", replaced_id));
                 }
                 assert(existing_ip);
-                update_topology(ip, rs);
+                // FIXME: Topology cannot hold two IPs with different host ids yet so
+                // when replacing we must advertise the replaced_id for the ip, otherwise
+                // topology will complain about host id of a local node changing and fail.
+                update_topology(ip == existing_ip ? locator::host_id(replaced_id.uuid()) : host_id, ip, rs);
                 tmptr->add_replacing_endpoint(*existing_ip, ip);
                 co_await update_topology_change_info(tmptr, ::format("replacing {}/{} by {}/{}", replaced_id, *existing_ip, id, ip));
             }
@@ -778,7 +804,7 @@ topology_mutation_builder& topology_mutation_builder::set_new_cdc_generation_dat
 
 topology_mutation_builder& topology_mutation_builder::set_unpublished_cdc_generations(const std::vector<cdc::generation_id_v2>& values) {
     auto dv = values | boost::adaptors::transformed([&] (const auto& v) {
-        return make_tuple_value(db::cdc_generation_id_v2_type, tuple_type_impl::native_type({v.ts, v.id}));
+        return make_tuple_value(db::cdc_generation_ts_id_type, tuple_type_impl::native_type({v.ts, timeuuid_native_type{v.id}}));
     });
     return apply_set("unpublished_cdc_generations", collection_apply_mode::overwrite, std::move(dv));
 }
@@ -794,7 +820,7 @@ topology_mutation_builder& topology_mutation_builder::add_enabled_features(const
 }
 
 topology_mutation_builder& topology_mutation_builder::add_unpublished_cdc_generation(const cdc::generation_id_v2& value) {
-    auto dv = make_tuple_value(db::cdc_generation_id_v2_type, tuple_type_impl::native_type({value.ts, value.id}));
+    auto dv = make_tuple_value(db::cdc_generation_ts_id_type, tuple_type_impl::native_type({value.ts, timeuuid_native_type{value.id}}));
     return apply_set("unpublished_cdc_generations", collection_apply_mode::update, std::vector<data_value>{std::move(dv)});
 }
 
@@ -1140,14 +1166,15 @@ class topology_coordinator {
             }
         };
 
-        auto [gen_uuid, gen_desc] = cdc::make_new_generation_data(
+        auto gen_uuid = guard.new_group0_state_id();
+        auto gen_desc = cdc::make_new_generation_description(
             binfo ? binfo->bootstrap_tokens : std::unordered_set<token>{}, get_sharding_info, tmptr);
         auto gen_table_schema = _db.find_schema(
             db::system_keyspace::NAME, db::system_keyspace::CDC_GENERATIONS_V3);
 
         const size_t max_command_size = _raft.max_command_size();
         const size_t mutation_size_threshold = max_command_size / 2;
-        auto gen_mutations = co_await cdc::get_cdc_generation_mutations(
+        auto gen_mutations = co_await cdc::get_cdc_generation_mutations_v3(
             gen_table_schema, gen_uuid, gen_desc, mutation_size_threshold, guard.write_timestamp());
 
         co_return std::pair{gen_uuid, std::move(gen_mutations)};
@@ -1382,6 +1409,7 @@ class topology_coordinator {
     // Next migration of the same tablet is guaranteed to use a different instance.
     struct tablet_migration_state {
         background_action_holder streaming;
+        background_action_holder cleanup;
         std::unordered_map<locator::tablet_transition_stage, background_action_holder> barriers;
     };
 
@@ -1449,13 +1477,17 @@ class topology_coordinator {
     }
 
     future<> generate_migration_updates(std::vector<canonical_mutation>& out, const group0_guard& guard, const migration_plan& plan) {
-        for (const tablet_migration_info& mig : plan) {
+        for (const tablet_migration_info& mig : plan.migrations()) {
             co_await coroutine::maybe_yield();
             generate_migration_update(out, guard, mig);
         }
     }
 
-    future<> handle_tablet_migration(group0_guard guard) {
+    // When "drain" is true, we migrate tablets only as long as there are nodes to drain
+    // and then change the transition state to write_both_read_old. Also, while draining,
+    // we ignore pending topology requests which normally interrupt load balancing.
+    // When "drain" is false, we do regular load balancing.
+    future<> handle_tablet_migration(group0_guard guard, bool drain) {
         // This step acts like a pump which advances state machines of individual tablets,
         // batching barriers and group0 updates.
         // If progress cannot be made, e.g. because all transitions are streaming, we block
@@ -1491,11 +1523,15 @@ class topology_coordinator {
                         .build());
             };
 
-            auto transition_to_with_barrier = [&] (locator::tablet_transition_stage stage) {
-                if (advance_in_background(gid, tablet_state.barriers[stage], "barrier", [&] {
+            auto do_barrier = [&] {
+                return advance_in_background(gid, tablet_state.barriers[trinfo.stage], "barrier", [&] {
                     needs_barrier = true;
                     return barrier.get_shared_future();
-                })) {
+                });
+            };
+
+            auto transition_to_with_barrier = [&] (locator::tablet_transition_stage stage) {
+                if (do_barrier()) {
                     transition_to(stage);
                 }
             };
@@ -1527,30 +1563,51 @@ class topology_coordinator {
                     transition_to_with_barrier(locator::tablet_transition_stage::cleanup);
                     break;
                 case locator::tablet_transition_stage::cleanup:
-                    // FIXME: Actually perform the cleanup. Block on integration with compaction groups.
-                    _tablets.erase(gid);
-                    updates.emplace_back(
-                        replica::tablet_mutation_builder(guard.write_timestamp(), s->ks_name(), table)
-                            .del_transition(last_token)
-                            .set_replicas(last_token, trinfo.next)
-                            .build());
+                    if (advance_in_background(gid, tablet_state.cleanup, "cleanup", [&] {
+                        locator::tablet_replica dst = locator::get_leaving_replica(tmap.get_tablet_info(gid.tablet), trinfo);
+                        slogger.info("raft topology: Initiating tablet cleanup of {} on {}", gid, dst);
+                        return ser::storage_service_rpc_verbs::send_tablet_cleanup(&_messaging,
+                                                                                   netw::msg_addr(id2ip(dst.host)), _as, gid);
+                    })) {
+                        transition_to(locator::tablet_transition_stage::end_migration);
+                    }
+                    break;
+                case locator::tablet_transition_stage::end_migration:
+                    // Need a separate stage and a barrier after cleanup RPC to cut off stale RPCs.
+                    // See do_tablet_operation() doc.
+                    if (do_barrier()) {
+                        _tablets.erase(gid);
+                        updates.emplace_back(
+                            replica::tablet_mutation_builder(guard.write_timestamp(), s->ks_name(), table)
+                                .del_transition(last_token)
+                                .set_replicas(last_token, trinfo.next)
+                                .build());
+                    }
                     break;
             }
         });
 
         // In order to keep the cluster saturated, ask the load balancer for more transitions.
         // Unless there is a pending topology change operation.
-        auto ts = guard.write_timestamp();
-        auto [preempt, new_guard] = should_preempt_balancing(std::move(guard));
-        guard = std::move(new_guard);
-        if (ts != guard.write_timestamp()) {
-            // We rely on the fact that should_preempt_balancing() does not release the guard
-            // so that tablet metadata reading and updates are atomic.
-            on_internal_error(slogger, "should_preempt_balancing() retook the guard");
+        bool preempt = false;
+        if (!drain) {
+            // When draining, this method is invoked with an active node transition, which
+            // would normally cause preemption, which we don't want here.
+            auto ts = guard.write_timestamp();
+            auto [new_preempt, new_guard] = should_preempt_balancing(std::move(guard));
+            preempt = new_preempt;
+            guard = std::move(new_guard);
+            if (ts != guard.write_timestamp()) {
+                // We rely on the fact that should_preempt_balancing() does not release the guard
+                // so that tablet metadata reading and updates are atomic.
+                on_internal_error(slogger, "should_preempt_balancing() retook the guard");
+            }
         }
         if (!preempt) {
             auto plan = co_await _tablet_allocator.balance_tablets(get_token_metadata_ptr());
-            co_await generate_migration_updates(updates, guard, plan);
+            if (!drain || plan.has_nodes_to_drain()) {
+                co_await generate_migration_updates(updates, guard, plan);
+            }
         }
 
         // The updates have to be executed under the same guard which was used to read tablet metadata
@@ -1592,11 +1649,19 @@ class topology_coordinator {
             co_return;
         }
 
-        updates.emplace_back(
-            topology_mutation_builder(guard.write_timestamp())
-                .del_transition_state()
-                .set_version(_topo_sm._topology.version + 1)
-                .build());
+        if (drain) {
+            updates.emplace_back(
+                topology_mutation_builder(guard.write_timestamp())
+                    .set_transition_state(topology::transition_state::write_both_read_old)
+                    .set_version(_topo_sm._topology.version + 1)
+                    .build());
+        } else {
+            updates.emplace_back(
+                topology_mutation_builder(guard.write_timestamp())
+                    .del_transition_state()
+                    .set_version(_topo_sm._topology.version + 1)
+                    .build());
+        }
         co_await update_topology_state(std::move(guard), std::move(updates), "Finished tablet migration");
     }
 
@@ -1733,6 +1798,9 @@ class topology_coordinator {
                 auto str = ::format("committed new CDC generation, ID: {}", cdc_gen_id);
                 co_await update_topology_state(std::move(guard), {builder.build()}, std::move(str));
             }
+                break;
+            case topology::transition_state::tablet_draining:
+                co_await handle_tablet_migration(std::move(guard), true);
                 break;
             case topology::transition_state::write_both_read_old: {
                 auto node = get_node_to_work_on(std::move(guard));
@@ -1886,7 +1954,8 @@ class topology_coordinator {
             }
                 break;
             case topology::transition_state::tablet_migration:
-                co_await handle_tablet_migration(std::move(guard));
+                co_await handle_tablet_migration(std::move(guard), false);
+                break;
         }
         co_return true;
     };
@@ -1933,7 +2002,7 @@ class topology_coordinator {
                         // start decommission and put tokens of decommissioning nodes into write_both_read_old state
                         // meaning that reads will go to the replica being decommissioned
                         // but writes will go to new owner as well
-                        builder.set_transition_state(topology::transition_state::write_both_read_old)
+                        builder.set_transition_state(topology::transition_state::tablet_draining)
                                .set_version(_topo_sm._topology.version + 1)
                                .with_node(node.id)
                                .set("node_state", node_state::decommissioning)
@@ -1943,10 +2012,7 @@ class topology_coordinator {
                         break;
                     case topology_request::remove:
                         assert(node.rs->ring);
-                        // start removing and put tokens of a node been removed into write_both_read_old state
-                        // meaning that reads will go to the replica being removed (it is dead though)
-                        // but writes will go to new owner as well
-                        builder.set_transition_state(topology::transition_state::write_both_read_old)
+                        builder.set_transition_state(topology::transition_state::tablet_draining)
                                .set_version(_topo_sm._topology.version + 1)
                                .with_node(node.id)
                                .set("node_state", node_state::removing)
@@ -1960,10 +2026,7 @@ class topology_coordinator {
                         auto it = _topo_sm._topology.normal_nodes.find(replaced_id);
                         assert(it != _topo_sm._topology.normal_nodes.end());
                         assert(it->second.ring && it->second.state == node_state::normal);
-                        // start replacing and take ownership of the tokens of a node been replaced
-                        // and put them into write_both_read_old state meaning that reads will go
-                        // to the replica being removed (it is dead though) but writes will go to new owner as well
-                        builder.set_transition_state(topology::transition_state::write_both_read_old)
+                        builder.set_transition_state(topology::transition_state::tablet_draining)
                                .set_version(_topo_sm._topology.version + 1)
                                .with_node(node.id)
                                .set("node_state", node_state::replacing)
@@ -2489,7 +2552,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
         _gossiper.check_knows_remote_features(local_features, loaded_peer_features);
         _gossiper.check_snitch_name_matches(_snitch.local()->get_name());
         // Check if the node is already removed from the cluster
-        auto local_host_id = _db.local().get_config().host_id;
+        auto local_host_id = get_token_metadata().get_my_id();
         auto my_ip = get_broadcast_address();
         if (!_gossiper.is_safe_for_restart(my_ip, local_host_id)) {
             throw std::runtime_error(::format("The node {} with host_id {} is removed from the cluster. Can not restart the removed node to join the cluster again!",
@@ -2515,7 +2578,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
         // This node must know about its chosen tokens before other nodes do
         // since they may start sending writes to this node after it gossips status = NORMAL.
         // Therefore we update _token_metadata now, before gossip starts.
-        tmptr->update_topology(get_broadcast_address(), _sys_ks.local().local_dc_rack(), locator::node::state::normal);
+        tmptr->update_topology(get_broadcast_address(), _snitch.local()->get_location(), locator::node::state::normal);
         co_await tmptr->update_normal_tokens(my_tokens, get_broadcast_address());
 
         cdc_gen_id = co_await _sys_ks.local().get_cdc_generation_id();
@@ -2534,7 +2597,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     // for bootstrap to get the load info it needs.
     // (we won't be part of the storage ring though until we add a counterId to our state, below.)
     // Seed the host ID-to-endpoint map with our own ID.
-    auto local_host_id = _db.local().get_config().host_id;
+    auto local_host_id = get_token_metadata().get_my_id();
     if (!replacing_a_node_with_diff_ip) {
         auto endpoint = get_broadcast_address();
         auto eps = _gossiper.get_endpoint_state_ptr(endpoint);
@@ -2806,7 +2869,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
         // This node must know about its chosen tokens before other nodes do
         // since they may start sending writes to this node after it gossips status = NORMAL.
         // Therefore, in case we haven't updated _token_metadata with our tokens yet, do it now.
-        tmptr->update_topology(get_broadcast_address(), _sys_ks.local().local_dc_rack(), locator::node::state::normal);
+        tmptr->update_topology(get_broadcast_address(), _snitch.local()->get_location(), locator::node::state::normal);
         return tmptr->update_normal_tokens(bootstrap_tokens, get_broadcast_address());
     });
 
@@ -2969,7 +3032,7 @@ future<> storage_service::bootstrap(std::unordered_set<token>& bootstrap_tokens,
                 slogger.debug("bootstrap: update pending ranges: endpoint={} bootstrap_tokens={}", get_broadcast_address(), bootstrap_tokens);
                 mutate_token_metadata([this, &bootstrap_tokens] (mutable_token_metadata_ptr tmptr) {
                     auto endpoint = get_broadcast_address();
-                    tmptr->update_topology(endpoint, _sys_ks.local().local_dc_rack(), locator::node::state::bootstrapping);
+                    tmptr->update_topology(endpoint, _snitch.local()->get_location(), locator::node::state::bootstrapping);
                     tmptr->add_bootstrap_tokens(bootstrap_tokens, endpoint);
                     return update_topology_change_info(std::move(tmptr), ::format("bootstrapping node {}", endpoint));
                 }).get();
@@ -2992,7 +3055,7 @@ future<> storage_service::bootstrap(std::unordered_set<token>& bootstrap_tokens,
 
                 slogger.info("sleeping {} ms for pending range setup", get_ring_delay().count());
                 _gossiper.wait_for_range_setup().get();
-                dht::boot_strapper bs(_db, _stream_manager, _abort_source, get_broadcast_address(), _sys_ks.local().local_dc_rack(), bootstrap_tokens, get_token_metadata_ptr());
+                dht::boot_strapper bs(_db, _stream_manager, _abort_source, get_broadcast_address(), _snitch.local()->get_location(), bootstrap_tokens, get_token_metadata_ptr());
                 slogger.info("Starting to bootstrap...");
                 bs.bootstrap(streaming::stream_reason::bootstrap, _gossiper).get();
             } else {
@@ -3089,9 +3152,7 @@ future<> storage_service::handle_state_bootstrap(inet_address endpoint, gms::per
 
     tmptr->update_topology(endpoint, get_dc_rack_for(endpoint), locator::node::state::bootstrapping);
     tmptr->add_bootstrap_tokens(tokens, endpoint);
-    if (_gossiper.uses_host_id(endpoint)) {
-        tmptr->update_host_id(_gossiper.get_host_id(endpoint), endpoint);
-    }
+    tmptr->update_host_id(_gossiper.get_host_id(endpoint), endpoint);
     co_await update_topology_change_info(tmptr, ::format("handle_state_bootstrap {}", endpoint));
     co_await replicate_to_all_cores(std::move(tmptr));
 }
@@ -3120,36 +3181,34 @@ future<> storage_service::handle_state_normal(inet_address endpoint, gms::permit
         endpoints_to_remove.insert(node);
     };
     // Order Matters, TM.updateHostID() should be called before TM.updateNormalToken(), (see CASSANDRA-4300).
-    if (_gossiper.uses_host_id(endpoint)) {
-        auto host_id = _gossiper.get_host_id(endpoint);
-        auto existing = tmptr->get_endpoint_for_host_id(host_id);
-        if (existing && *existing != endpoint) {
-            if (*existing == get_broadcast_address()) {
-                slogger.warn("Not updating host ID {} for {} because it's mine", host_id, endpoint);
-                do_remove_node(endpoint);
-            } else if (_gossiper.compare_endpoint_startup(endpoint, *existing) > 0) {
-                slogger.warn("Host ID collision for {} between {} and {}; {} is the new owner", host_id, *existing, endpoint, endpoint);
-                do_remove_node(*existing);
-                slogger.info("Set host_id={} to be owned by node={}, existing={}", host_id, endpoint, *existing);
-                tmptr->update_host_id(host_id, endpoint);
-            } else {
-                slogger.warn("Host ID collision for {} between {} and {}; ignored {}", host_id, *existing, endpoint, endpoint);
-                do_remove_node(endpoint);
-            }
-        } else if (existing && *existing == endpoint) {
-            tmptr->del_replacing_endpoint(endpoint);
-        } else {
-            tmptr->del_replacing_endpoint(endpoint);
-            auto nodes = _gossiper.get_nodes_with_host_id(host_id);
-            bool left = std::any_of(nodes.begin(), nodes.end(), [this] (const gms::inet_address& node) { return _gossiper.is_left(node); });
-            if (left) {
-                slogger.info("Skip to set host_id={} to be owned by node={}, because the node is removed from the cluster, nodes {} used to own the host_id", host_id, endpoint, nodes);
-                _normal_state_handled_on_boot.insert(endpoint);
-                co_return;
-            }
-            slogger.info("Set host_id={} to be owned by node={}", host_id, endpoint);
+    auto host_id = _gossiper.get_host_id(endpoint);
+    auto existing = tmptr->get_endpoint_for_host_id(host_id);
+    if (existing && *existing != endpoint) {
+        if (*existing == get_broadcast_address()) {
+            slogger.warn("Not updating host ID {} for {} because it's mine", host_id, endpoint);
+            do_remove_node(endpoint);
+        } else if (_gossiper.compare_endpoint_startup(endpoint, *existing) > 0) {
+            slogger.warn("Host ID collision for {} between {} and {}; {} is the new owner", host_id, *existing, endpoint, endpoint);
+            do_remove_node(*existing);
+            slogger.info("Set host_id={} to be owned by node={}, existing={}", host_id, endpoint, *existing);
             tmptr->update_host_id(host_id, endpoint);
+        } else {
+            slogger.warn("Host ID collision for {} between {} and {}; ignored {}", host_id, *existing, endpoint, endpoint);
+            do_remove_node(endpoint);
         }
+    } else if (existing && *existing == endpoint) {
+        tmptr->del_replacing_endpoint(endpoint);
+    } else {
+        tmptr->del_replacing_endpoint(endpoint);
+        auto nodes = _gossiper.get_nodes_with_host_id(host_id);
+        bool left = std::any_of(nodes.begin(), nodes.end(), [this] (const gms::inet_address& node) { return _gossiper.is_left(node); });
+        if (left) {
+            slogger.info("Skip to set host_id={} to be owned by node={}, because the node is removed from the cluster, nodes {} used to own the host_id", host_id, endpoint, nodes);
+            _normal_state_handled_on_boot.insert(endpoint);
+            co_return;
+        }
+        slogger.info("Set host_id={} to be owned by node={}", host_id, endpoint);
+        tmptr->update_host_id(host_id, endpoint);
     }
 
     // Tokens owned by the handled endpoint.
@@ -3537,13 +3596,24 @@ std::unordered_set<locator::token> storage_service::get_tokens_for(inet_address 
     return ret;
 }
 
-locator::endpoint_dc_rack storage_service::get_dc_rack_for(inet_address endpoint) {
-    auto* dc = _gossiper.get_application_state_ptr(endpoint, gms::application_state::DC);
-    auto* rack = _gossiper.get_application_state_ptr(endpoint, gms::application_state::RACK);
+std::optional<locator::endpoint_dc_rack> storage_service::get_dc_rack_for(const gms::endpoint_state& ep_state) {
+    auto* dc = ep_state.get_application_state_ptr(gms::application_state::DC);
+    auto* rack = ep_state.get_application_state_ptr(gms::application_state::RACK);
+    if (!dc || !rack) {
+        return std::nullopt;
+    }
     return locator::endpoint_dc_rack{
-        .dc = dc ? dc->value() : locator::endpoint_dc_rack::default_location.dc,
-        .rack = rack ? rack->value() : locator::endpoint_dc_rack::default_location.rack,
+        .dc = dc->value(),
+        .rack = rack->value(),
     };
+}
+
+std::optional<locator::endpoint_dc_rack> storage_service::get_dc_rack_for(inet_address endpoint) {
+    auto eps = _gossiper.get_endpoint_state_ptr(endpoint);
+    if (!eps) {
+        return std::nullopt;
+    }
+    return get_dc_rack_for(*eps);
 }
 
 void endpoint_lifecycle_notifier::register_subscriber(endpoint_lifecycle_subscriber* subscriber)
@@ -3592,9 +3662,9 @@ future<> storage_service::drain_on_shutdown() {
         _drain_finished.get_future() : do_drain();
 }
 
-future<> storage_service::init_messaging_service_part(sharded<service::storage_proxy>& proxy, sharded<db::system_distributed_keyspace>& sys_dist_ks) {
-    return container().invoke_on_all([&proxy, &sys_dist_ks] (storage_service& local) {
-        return local.init_messaging_service(proxy, sys_dist_ks);
+future<> storage_service::init_messaging_service_part(sharded<db::system_distributed_keyspace>& sys_dist_ks) {
+    return container().invoke_on_all([&sys_dist_ks] (storage_service& local) {
+        return local.init_messaging_service(sys_dist_ks);
     });
 }
 
@@ -3921,12 +3991,12 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
         }
     }
 
-    auto dc_rack = get_dc_rack_for(replace_address);
+    auto dc_rack = get_dc_rack_for(replace_address).value_or(locator::endpoint_dc_rack::default_location);
 
     if (!replace_host_id) {
         replace_host_id = _gossiper.get_host_id(replace_address);
     }
-    slogger.info("Host {}/{} is replacing {}/{}", _db.local().get_config().host_id, get_broadcast_address(), replace_host_id, replace_address);
+    slogger.info("Host {}/{} is replacing {}/{}", get_token_metadata().get_my_id(), get_broadcast_address(), replace_host_id, replace_address);
     co_await _gossiper.reset_endpoint_state_map();
 
     co_return replacement_info {
@@ -4133,213 +4203,6 @@ future<> storage_service::stop_gossiping() {
     });
 }
 
-class node_ops_ctl {
-    std::unordered_set<gms::inet_address> nodes_unknown_verb;
-    std::unordered_set<gms::inet_address> nodes_down;
-    std::unordered_set<gms::inet_address> nodes_failed;
-
-public:
-    const storage_service& ss;
-    sstring desc;
-    locator::host_id host_id;   // Host ID of the node operand (i.e. added, replaced, or leaving node)
-    inet_address endpoint;      // IP address of the node operand (i.e. added, replaced, or leaving node)
-    locator::token_metadata_ptr tmptr;
-    std::unordered_set<gms::inet_address> sync_nodes;
-    std::unordered_set<gms::inet_address> ignore_nodes;
-    node_ops_cmd_request req;
-    std::chrono::seconds heartbeat_interval;
-    abort_source as;
-    std::optional<future<>> heartbeat_updater_done_fut;
-
-    explicit node_ops_ctl(const storage_service& ss_, node_ops_cmd cmd, locator::host_id id, gms::inet_address ep, node_ops_id uuid = node_ops_id::create_random_id())
-        : ss(ss_)
-        , host_id(id)
-        , endpoint(ep)
-        , tmptr(ss.get_token_metadata_ptr())
-        , req(cmd, uuid)
-        , heartbeat_interval(ss._db.local().get_config().nodeops_heartbeat_interval_seconds())
-    {}
-
-    ~node_ops_ctl() {
-        if (heartbeat_updater_done_fut) {
-            on_internal_error_noexcept(slogger, "node_ops_ctl destroyed without stopping");
-        }
-    }
-
-    const node_ops_id& uuid() const noexcept {
-        return req.ops_uuid;
-    }
-
-    // may be called multiple times
-    void start(sstring desc_, std::function<bool(gms::inet_address)> sync_to_node = [] (gms::inet_address) { return true; }) {
-        desc = std::move(desc_);
-
-        slogger.info("{}[{}]: Started {} operation: node={}/{}", desc, uuid(), desc, host_id, endpoint);
-
-        refresh_sync_nodes(std::move(sync_to_node));
-    }
-
-    void refresh_sync_nodes(std::function<bool(gms::inet_address)> sync_to_node = [] (gms::inet_address) { return true; }) {
-        // sync data with all normal token owners
-        sync_nodes.clear();
-        const auto& topo = tmptr->get_topology();
-        auto can_sync_with_node = [] (const locator::node& node) {
-            // Sync with reachable token owners.
-            // Note that although nodes in `being_replaced` and `being_removed`
-            // are still token owners, they are known to be dead and can't be sync'ed with.
-            switch (node.get_state()) {
-            case locator::node::state::normal:
-            case locator::node::state::being_decommissioned:
-                return true;
-            default:
-                return false;
-            }
-        };
-        topo.for_each_node([&] (const locator::node* np) {
-            seastar::thread::maybe_yield();
-            // FIXME: use node* rather than endpoint
-            auto node = np->endpoint();
-            if (!ignore_nodes.contains(node) && can_sync_with_node(*np) && sync_to_node(node)) {
-                sync_nodes.insert(node);
-            }
-        });
-
-        for (auto& node : sync_nodes) {
-            if (!ss.gossiper().is_alive(node)) {
-                nodes_down.emplace(node);
-            }
-        }
-        if (!nodes_down.empty()) {
-            auto msg = ::format("{}[{}]: Cannot start: nodes={} needed for {} operation are down. It is highly recommended to fix the down nodes and try again.", desc, uuid(), nodes_down, desc);
-            slogger.warn("{}", msg);
-            throw std::runtime_error(msg);
-        }
-
-        slogger.info("{}[{}]: sync_nodes={}, ignore_nodes={}", desc, uuid(), sync_nodes, ignore_nodes);
-    }
-
-    future<> stop() noexcept {
-        co_await stop_heartbeat_updater();
-    }
-
-    // Caller should set the required req members before prepare
-    future<> prepare(node_ops_cmd cmd) noexcept {
-        return send_to_all(cmd);
-    }
-
-    void start_heartbeat_updater(node_ops_cmd cmd) {
-        if (heartbeat_updater_done_fut) {
-            on_internal_error(slogger, "heartbeat_updater already started");
-        }
-        heartbeat_updater_done_fut = heartbeat_updater(cmd);
-    }
-
-    future<> query_pending_op() {
-        req.cmd = node_ops_cmd::query_pending_ops;
-        co_await coroutine::parallel_for_each(sync_nodes, [this] (const gms::inet_address& node) -> future<> {
-            auto resp = co_await ss._messaging.local().send_node_ops_cmd(netw::msg_addr(node), req);
-            slogger.debug("{}[{}]: Got query_pending_ops response from node={}, resp.pending_ops={}", desc, uuid(), node, resp.pending_ops);
-            if (boost::find(resp.pending_ops, uuid()) == resp.pending_ops.end()) {
-                throw std::runtime_error(::format("{}[{}]: Node {} no longer tracks the operation", desc, uuid(), node));
-            }
-        });
-    }
-
-    future<> stop_heartbeat_updater() noexcept {
-        if (heartbeat_updater_done_fut) {
-            as.request_abort();
-            co_await *std::exchange(heartbeat_updater_done_fut, std::nullopt);
-        }
-    }
-
-    future<> done(node_ops_cmd cmd) noexcept {
-        co_await stop_heartbeat_updater();
-        co_await send_to_all(cmd);
-    }
-
-    future<> abort(node_ops_cmd cmd) noexcept {
-        co_await stop_heartbeat_updater();
-        co_await send_to_all(cmd);
-    }
-
-    future<> abort_on_error(node_ops_cmd cmd, std::exception_ptr ex) noexcept {
-        slogger.error("{}[{}]: Operation failed, sync_nodes={}: {}", desc, uuid(), sync_nodes, ex);
-        try {
-            co_await abort(cmd);
-        } catch (...) {
-            slogger.warn("{}[{}]: The {} command failed while handling a previous error, sync_nodes={}: {}. Ignoring", desc, uuid(), cmd, sync_nodes, std::current_exception());
-        }
-        co_await coroutine::return_exception_ptr(std::move(ex));
-    }
-
-    future<> send_to_all(node_ops_cmd cmd) {
-        req.cmd = cmd;
-        req.ignore_nodes = boost::copy_range<std::list<gms::inet_address>>(ignore_nodes);
-        sstring op_desc = ::format("{}", cmd);
-        slogger.info("{}[{}]: Started {}", desc, uuid(), req);
-        auto cmd_category = categorize_node_ops_cmd(cmd);
-        co_await coroutine::parallel_for_each(sync_nodes, [&] (const gms::inet_address& node) -> future<> {
-            if (nodes_unknown_verb.contains(node) || nodes_down.contains(node) ||
-                    (nodes_failed.contains(node) && (cmd_category != node_ops_cmd_category::abort))) {
-                // Note that we still send abort commands to failed nodes.
-                co_return;
-            }
-            try {
-                co_await ss._messaging.local().send_node_ops_cmd(netw::msg_addr(node), req);
-                slogger.debug("{}[{}]: Got {} response from node={}", desc, uuid(), op_desc, node);
-            } catch (const seastar::rpc::unknown_verb_error&) {
-                if (cmd_category == node_ops_cmd_category::prepare) {
-                    slogger.warn("{}[{}]: Node {} does not support the {} verb", desc, uuid(), node, op_desc);
-                } else {
-                    slogger.warn("{}[{}]: Node {} did not find ops_uuid={} or does not support the {} verb", desc, uuid(), node, uuid(), op_desc);
-                }
-                nodes_unknown_verb.emplace(node);
-            } catch (const seastar::rpc::closed_error&) {
-                slogger.warn("{}[{}]: Node {} is down for {} verb", desc, uuid(), node, op_desc);
-                nodes_down.emplace(node);
-            } catch (...) {
-                slogger.warn("{}[{}]: Node {} failed {} verb: {}", desc, uuid(), node, op_desc, std::current_exception());
-                nodes_failed.emplace(node);
-            }
-        });
-        std::vector<sstring> errors;
-        if (!nodes_failed.empty()) {
-            errors.emplace_back(::format("The {} command failed for nodes={}", op_desc, nodes_failed));
-        }
-        if (!nodes_unknown_verb.empty()) {
-            if (cmd_category == node_ops_cmd_category::prepare) {
-                errors.emplace_back(::format("The {} command is unsupported on nodes={}. Please upgrade your cluster and run operation again", op_desc, nodes_unknown_verb));
-            } else {
-                errors.emplace_back(::format("The ops_uuid={} was not found or the {} command is unsupported on nodes={}", uuid(), op_desc, nodes_unknown_verb));
-            }
-        }
-        if (!nodes_down.empty()) {
-            errors.emplace_back(::format("The {} command failed for nodes={}: the needed nodes are down. It is highly recommended to fix the down nodes and try again", op_desc, nodes_down));
-        }
-        if (!errors.empty()) {
-            co_await coroutine::return_exception(std::runtime_error(fmt::to_string(fmt::join(errors, "; "))));
-        }
-        slogger.info("{}[{}]: Finished {}", desc, uuid(), req);
-    }
-
-    future<> heartbeat_updater(node_ops_cmd cmd) {
-        slogger.info("{}[{}]: Started heartbeat_updater (interval={}s)", desc, uuid(), heartbeat_interval.count());
-        while (!as.abort_requested()) {
-            auto req = node_ops_cmd_request{cmd, uuid(), {}, {}, {}};
-            co_await coroutine::parallel_for_each(sync_nodes, [&] (const gms::inet_address& node) -> future<> {
-                try {
-                    co_await ss._messaging.local().send_node_ops_cmd(netw::msg_addr(node), req);
-                    slogger.debug("{}[{}]: Got heartbeat response from node={}", desc, uuid(), node);
-                } catch (...) {
-                    slogger.warn("{}[{}]: Failed to get heartbeat response from node={}", desc, uuid(), node);
-                };
-            });
-            co_await sleep_abortable(heartbeat_interval, as).handle_exception([] (std::exception_ptr) {});
-        }
-        slogger.info("{}[{}]: Stopped heartbeat_updater", desc, uuid());
-    }
-};
-
 static
 void on_streaming_finished() {
     utils::get_local_injector().inject("storage_service_streaming_sleep3", std::chrono::seconds{3}).get();
@@ -4406,7 +4269,7 @@ future<> storage_service::decommission() {
                 bool left_token_ring = false;
                 auto uuid = node_ops_id::create_random_id();
                 auto& db = ss._db.local();
-                node_ops_ctl ctl(ss, node_ops_cmd::decommission_prepare, db.get_config().host_id, ss.get_broadcast_address());
+                node_ops_ctl ctl(ss, node_ops_cmd::decommission_prepare, ss.get_token_metadata().get_my_id(), ss.get_broadcast_address());
                 auto stop_ctl = deferred_stop(ctl);
 
                 // Step 1: Decide who needs to sync data
@@ -4551,8 +4414,7 @@ future<> storage_service::decommission() {
 
 // Runs inside seastar::async context
 void storage_service::run_bootstrap_ops(std::unordered_set<token>& bootstrap_tokens) {
-    auto& db = _db.local();
-    node_ops_ctl ctl(*this, node_ops_cmd::bootstrap_prepare, db.get_config().host_id, get_broadcast_address());
+    node_ops_ctl ctl(*this, node_ops_cmd::bootstrap_prepare, get_token_metadata().get_my_id(), get_broadcast_address());
     auto stop_ctl = deferred_stop(ctl);
     const auto& uuid = ctl.uuid();
 
@@ -4656,7 +4518,7 @@ void storage_service::run_replace_ops(std::unordered_set<token>& bootstrap_token
             _repair.local().replace_with_repair(get_token_metadata_ptr(), bootstrap_tokens, ctl.ignore_nodes).get();
         } else {
             slogger.info("replace[{}]: Using streaming based node ops to sync data", uuid);
-            dht::boot_strapper bs(_db, _stream_manager, _abort_source, get_broadcast_address(), _sys_ks.local().local_dc_rack(), bootstrap_tokens, get_token_metadata_ptr());
+            dht::boot_strapper bs(_db, _stream_manager, _abort_source, get_broadcast_address(), _snitch.local()->get_location(), bootstrap_tokens, get_token_metadata_ptr());
             bs.bootstrap(streaming::stream_reason::replace, _gossiper, replace_address).get();
         }
         on_streaming_finished();
@@ -5195,6 +5057,16 @@ future<node_ops_cmd_response> storage_service::node_ops_cmd_handler(gms::inet_ad
     });
 }
 
+future<> storage_service::reload_schema() {
+    // Flush memtables and clear cache so that we use the same state we would after node restart
+    // to rule out potential discrepancies which could stem from merging with memtable/cache readers.
+    co_await replica::database::flush_keyspace_on_all_shards(_db, db::schema_tables::v3::NAME);
+    co_await replica::database::drop_cache_for_keyspace_on_all_shards(_db, db::schema_tables::v3::NAME);
+    co_await _migration_manager.invoke_on(0, [] (auto& mm) {
+        return mm.reload_schema();
+    });
+}
+
 future<> storage_service::drain() {
     return run_with_api_lock(sstring("drain"), [] (storage_service& ss) {
         if (ss._operation_mode == mode::DRAINED) {
@@ -5323,7 +5195,7 @@ future<> storage_service::rebuild(sstring source_dc) {
                 co_await ss._repair.local().rebuild_with_repair(tmptr, std::move(source_dc));
             } else {
                 auto streamer = make_lw_shared<dht::range_streamer>(ss._db, ss._stream_manager, tmptr, ss._abort_source,
-                        ss.get_broadcast_address(), ss._sys_ks.local().local_dc_rack(), "Rebuild", streaming::stream_reason::rebuild);
+                        ss.get_broadcast_address(), ss._snitch.local()->get_location(), "Rebuild", streaming::stream_reason::rebuild);
                 streamer->add_source_filter(std::make_unique<dht::range_streamer::failure_detector_source_filter>(ss._gossiper.get_unreachable_members()));
                 if (source_dc != "") {
                     streamer->add_source_filter(std::make_unique<dht::range_streamer::single_datacenter_filter>(source_dc));
@@ -5499,7 +5371,7 @@ future<> storage_service::removenode_with_stream(gms::inet_address leaving_node,
                 as.request_abort();
             }
         });
-        auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, tmptr, as, get_broadcast_address(), _sys_ks.local().local_dc_rack(), "Removenode", streaming::stream_reason::removenode);
+        auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, tmptr, as, get_broadcast_address(), _snitch.local()->get_location(), "Removenode", streaming::stream_reason::removenode);
         removenode_add_ranges(streamer, leaving_node).get();
         try {
             streamer->stream_async().get();
@@ -5550,7 +5422,7 @@ future<> storage_service::leave_ring() {
 
 future<>
 storage_service::stream_ranges(std::unordered_map<sstring, std::unordered_multimap<dht::token_range, inet_address>> ranges_to_stream_by_keyspace) {
-    auto streamer = dht::range_streamer(_db, _stream_manager, get_token_metadata_ptr(), _abort_source, get_broadcast_address(), _sys_ks.local().local_dc_rack(), "Unbootstrap", streaming::stream_reason::decommission);
+    auto streamer = dht::range_streamer(_db, _stream_manager, get_token_metadata_ptr(), _abort_source, get_broadcast_address(), _snitch.local()->get_location(), "Unbootstrap", streaming::stream_reason::decommission);
     for (auto& entry : ranges_to_stream_by_keyspace) {
         const auto& keyspace = entry.first;
         auto& ranges_with_endpoints = entry.second;
@@ -5756,12 +5628,7 @@ future<> storage_service::snitch_reconfigured() {
     auto& snitch = _snitch.local();
     co_await mutate_token_metadata([&snitch] (mutable_token_metadata_ptr tmptr) -> future<> {
         // re-read local rack and DC info
-        auto endpoint = utils::fb_utilities::get_broadcast_address();
-        auto dr = locator::endpoint_dc_rack {
-            .dc = snitch->get_datacenter(),
-            .rack = snitch->get_rack(),
-        };
-        tmptr->update_topology(endpoint, std::move(dr));
+        tmptr->update_topology(utils::fb_utilities::get_broadcast_address(), snitch->get_location());
         return make_ready_future<>();
     });
 
@@ -6003,7 +5870,7 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(shar
                             co_await _repair.local().rebuild_with_repair(tmptr, std::move(source_dc));
                         } else {
                             auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, tmptr, _abort_source,
-                                    get_broadcast_address(), _sys_ks.local().local_dc_rack(), "Rebuild", streaming::stream_reason::rebuild);
+                                    get_broadcast_address(), _snitch.local()->get_location(), "Rebuild", streaming::stream_reason::rebuild);
                             streamer->add_source_filter(std::make_unique<dht::range_streamer::failure_detector_source_filter>(_gossiper.get_unreachable_members()));
                             if (source_dc != "") {
                                 streamer->add_source_filter(std::make_unique<dht::range_streamer::single_datacenter_filter>(source_dc));
@@ -6076,59 +5943,130 @@ inet_address storage_service::host2ip(locator::host_id host) {
     return *ip;
 }
 
-// Streams data to the pending tablet replica of a given tablet on this node.
-// The source tablet replica is determined from the current transition info of the tablet.
-future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
-    // The coordinator does not execute global token metadata barrier before jumping to "streaming" stage, so we need
+// Performs a replica-side operation for a given tablet.
+// What operation is performed is determined by "op" based on the
+// current state of tablet metadata. The coordinator is supposed to prepare tablet
+// metadata according to his intent and trigger the operation,
+// without passing any transient information.
+//
+// If the operation succeeds, and the coordinator is still valid, it means
+// that the operation intended by the coordinator was performed.
+// If the coordinator is no longer valid, the operation may succeed but
+// the actual operation performed may be different than intended, it may
+// be the one intended by the new coordinator. This is not a problem
+// because the old coordinator should do nothing with such result.
+//
+// The triggers may be retried. They may also be reordered with older triggers, from
+// the same or a different coordinator. There is a protocol which ensures that
+// stale triggers won't cause operations to run beyond the migration stage they were
+// intended for. For example, that streaming is not still running after the coordinator
+// moved past the "streaming" stage, and that it won't be started when the stage is not appropriate.
+// A non-stale trigger is the one which completed successfully and caused the valid coordinator
+// to advance tablet migration to the next stage. Other triggers are called stale.
+// We can divide stale triggers into categories:
+//   (1) Those which start after the tablet was moved to the next stage
+//   Those which start before the tablet was moved to the next stage,
+//     (2) ...but after the non-stale trigger finished
+//     (3) ...but before the non-stale trigger finished
+//
+// By "start" I mean the atomic block which inserts into _tablet_ops, and by "finish" I mean
+// removal from _tablet_ops.
+// So event ordering is local from the perspective of this replica, and is linear because
+// this happens on the same shard.
+//
+// What prevents (1) from running is the fact that triggers check the state of tablet
+// metadata, and will fail immediately if the stage is not appropriate. It can happen
+// that the trigger is so stale that it will match with an appropriate stage of the next
+// migration of the same tablet. This is not a problem because we fall into the same
+// category as a stale trigger which was started in the new migration, so cases (2) or (3) apply.
+//
+// What prevents (2) from running is the fact that after the coordinator moves on to
+// the next stage, it executes a token metadata barrier, which will wait for such triggers
+// to complete as they hold on to erm via tablet_metadata_barrier. They should be aborted
+// soon after the coordinator changes the stage by the means of tablet_metadata_barrier::get_abort_source().
+//
+// What prevents (3) from running is that they will join with the non-stale trigger, or non-stale
+// trigger will join with them, depending on which came first. In that case they finish at the same time.
+//
+// It's very important that the global token metadata barrier involves all nodes which
+// may receive stale triggers started in the previous stage, so that those nodes will
+// see tablet metadata which reflects group0 state. This will cut-off stale triggers
+// as soon as the coordinator moves to the next stage.
+future<> storage_service::do_tablet_operation(locator::global_tablet_id tablet,
+                                              sstring op_name,
+                                              std::function<future<>(locator::tablet_metadata_guard&)> op) {
+    // The coordinator may not execute global token metadata barrier before triggering the operation, so we need
     // a barrier here to see the token metadata which is at least as recent as that of the sender.
     auto& raft_server = _group0->group0_server();
     co_await raft_server.read_barrier(&_abort_source);
 
-    auto tm = _shared_token_metadata.get();
-    auto& tmap = tm->tablets().get_tablet_map(tablet.table);
-    auto* trinfo = tmap.get_tablet_transition_info(tablet.tablet);
-
-    // Check if the request is still valid.
-    // If there is mismatch, it means this streaming was canceled and the coordinator moved on.
-    if (!trinfo) {
-        throw std::runtime_error(format("No transition info for tablet {}", tablet));
-    }
-    if (trinfo->stage != locator::tablet_transition_stage::streaming) {
-        throw std::runtime_error(format("Tablet {} stage is not at streaming", tablet));
-    }
-    if (trinfo->pending_replica.host != tm->get_my_id()) {
-        throw std::runtime_error(format("Tablet {} has pending replica different than this one", tablet));
-    }
-
-    auto& tinfo = tmap.get_tablet_info(tablet.tablet);
-    auto range = tmap.get_token_range(tablet.tablet);
-    locator::tablet_replica leaving_replica = locator::get_leaving_replica(tinfo, *trinfo);
-    if (leaving_replica.host == tm->get_my_id()) {
-        // The algorithm doesn't work with tablet migration within the same node because
-        // it assumes there is only one tablet replica, picked by the sharder, on local node.
-        throw std::runtime_error(format("Cannot stream within the same node, tablet: {}, shard {} -> {}",
-                                        tablet, leaving_replica.shard, trinfo->pending_replica.shard));
-    }
-    auto leaving_replica_ip = host2ip(leaving_replica.host);
-
-    if (_tablet_streaming[tablet]) {
-        slogger.debug("Streaming retry joining with existing session for tablet {}", tablet);
-        co_await _tablet_streaming[tablet]->get_future();
+    if (_tablet_ops.contains(tablet)) {
+        slogger.debug("{} retry joining with existing session for tablet {}", op_name, tablet);
+        co_await _tablet_ops[tablet].done.get_future();
         co_return;
     }
 
+    locator::tablet_metadata_guard guard(_db.local().find_column_family(tablet.table), tablet);
+    auto& as = guard.get_abort_source();
+    auto sub = _abort_source.subscribe([&as] () noexcept {
+        as.request_abort();
+    });
+
     auto async_gate_holder = _async_gate.hold();
     promise<> p;
-    _tablet_streaming[tablet] = seastar::shared_future<>(p.get_future());
-    auto erase_tablet_streaming = seastar::defer([&] {
-        _tablet_streaming.erase(tablet);
+    _tablet_ops.emplace(tablet, tablet_operation {
+        op_name, seastar::shared_future<>(p.get_future())
+    });
+    auto erase_registry_entry = seastar::defer([&] {
+        _tablet_ops.erase(tablet);
     });
 
     try {
+        co_await op(guard);
+        p.set_value();
+        slogger.debug("{} for tablet migration of {} successful", op_name, tablet);
+    } catch (...) {
+        p.set_exception(std::current_exception());
+        slogger.warn("{} for tablet migration of {} failed: {}", op_name, tablet, std::current_exception());
+        throw;
+    }
+}
+
+// Streams data to the pending tablet replica of a given tablet on this node.
+// The source tablet replica is determined from the current transition info of the tablet.
+future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
+    return do_tablet_operation(tablet, "Streaming", [this, tablet] (locator::tablet_metadata_guard& guard) -> future<> {
+        auto tm = guard.get_token_metadata();
+        auto& tmap = guard.get_tablet_map();
+        auto* trinfo = tmap.get_tablet_transition_info(tablet.tablet);
+
+        // Check if the request is still valid.
+        // If there is mismatch, it means this streaming was canceled and the coordinator moved on.
+        if (!trinfo) {
+            throw std::runtime_error(format("No transition info for tablet {}", tablet));
+        }
+        if (trinfo->stage != locator::tablet_transition_stage::streaming) {
+            throw std::runtime_error(format("Tablet {} stage is not at streaming", tablet));
+        }
+        if (trinfo->pending_replica.host != tm->get_my_id()) {
+            throw std::runtime_error(format("Tablet {} has pending replica different than this one", tablet));
+        }
+
+        auto& tinfo = tmap.get_tablet_info(tablet.tablet);
+        auto range = tmap.get_token_range(tablet.tablet);
+        locator::tablet_replica leaving_replica = locator::get_leaving_replica(tinfo, *trinfo);
+        if (leaving_replica.host == tm->get_my_id()) {
+            // The algorithm doesn't work with tablet migration within the same node because
+            // it assumes there is only one tablet replica, picked by the sharder, on local node.
+            throw std::runtime_error(format("Cannot stream within the same node, tablet: {}, shard {} -> {}",
+                                            tablet, leaving_replica.shard, trinfo->pending_replica.shard));
+        }
+        auto leaving_replica_ip = host2ip(leaving_replica.host);
+
         auto& table = _db.local().find_column_family(tablet.table);
         std::vector<sstring> tables = {table.schema()->cf_name()};
-        auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, tm, _abort_source,
-               get_broadcast_address(), _sys_ks.local().local_dc_rack(),
+        auto streamer = make_lw_shared<dht::range_streamer>(_db, _stream_manager, std::move(tm), guard.get_abort_source(),
+               get_broadcast_address(), _snitch.local()->get_location(),
                "Tablet migration", streaming::stream_reason::tablet_migration, std::move(tables));
         streamer->add_source_filter(std::make_unique<dht::range_streamer::failure_detector_source_filter>(
                 _gossiper.get_unreachable_members()));
@@ -6137,17 +6075,47 @@ future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
         ranges_per_endpoint[leaving_replica_ip].emplace_back(range);
         streamer->add_rx_ranges(table.schema()->ks_name(), std::move(ranges_per_endpoint));
         co_await streamer->stream_async();
-
-        p.set_value();
-        slogger.info("Streaming for tablet migration of {} successful", tablet);
-    } catch (...) {
-        p.set_exception(std::current_exception());
-        slogger.warn("Streaming for tablet migration of {} from {} failed: {}", tablet, leaving_replica, std::current_exception());
-        throw;
-    }
+        co_return;
+    });
 }
 
-void storage_service::init_messaging_service(sharded<service::storage_proxy>& proxy, sharded<db::system_distributed_keyspace>& sys_dist_ks) {
+future<> storage_service::cleanup_tablet(locator::global_tablet_id tablet) {
+    return do_tablet_operation(tablet, "Cleanup", [this, tablet] (locator::tablet_metadata_guard& guard) {
+        shard_id shard;
+
+        {
+            auto tm = guard.get_token_metadata();
+            auto& tmap = guard.get_tablet_map();
+            auto *trinfo = tmap.get_tablet_transition_info(tablet.tablet);
+
+            // Check if the request is still valid.
+            // If there is mismatch, it means this cleanup was canceled and the coordinator moved on.
+            if (!trinfo) {
+                throw std::runtime_error(format("No transition info for tablet {}", tablet));
+            }
+            if (trinfo->stage != locator::tablet_transition_stage::cleanup) {
+                throw std::runtime_error(format("Tablet {} stage is not at cleanup", tablet));
+            }
+
+            auto& tinfo = tmap.get_tablet_info(tablet.tablet);
+            locator::tablet_replica leaving_replica = locator::get_leaving_replica(tinfo, *trinfo);
+            if (leaving_replica.host != tm->get_my_id()) {
+                throw std::runtime_error(format("Tablet {} has leaving replica different than this one", tablet));
+            }
+            auto shard_opt = tmap.get_shard(tablet.tablet, tm->get_my_id());
+            if (!shard_opt) {
+                on_internal_error(slogger, format("Tablet {} has no shard on this node", tablet));
+            }
+            shard = *shard_opt;
+        }
+        return _db.invoke_on(shard, [tablet] (replica::database& db) {
+            auto& table = db.find_column_family(tablet.table);
+            return table.cleanup_tablet(tablet.tablet);
+        });
+    });
+}
+
+void storage_service::init_messaging_service(sharded<db::system_distributed_keyspace>& sys_dist_ks) {
     _messaging.local().register_node_ops_cmd([this] (const rpc::client_info& cinfo, node_ops_cmd_request req) {
         auto coordinator = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
         return container().invoke_on(0, [coordinator, req = std::move(req)] (auto& ss) mutable {
@@ -6159,13 +6127,11 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
             return ss.raft_topology_cmd_handler(sys_dist_ks, term, cmd_index, cmd);
         });
     });
-    ser::storage_service_rpc_verbs::register_raft_pull_topology_snapshot(&_messaging.local(), [this, &proxy] (raft_topology_pull_params params) {
-        return container().invoke_on(0, [&proxy] (auto& ss) -> future<raft_topology_snapshot> {
+    ser::storage_service_rpc_verbs::register_raft_pull_topology_snapshot(&_messaging.local(), [this] (raft_topology_pull_params params) {
+        return container().invoke_on(0, [] (auto& ss) -> future<raft_topology_snapshot> {
             if (!ss._raft_topology_change_enabled) {
                co_return raft_topology_snapshot{};
             }
-
-            auto& db = proxy.local().get_db();
 
             std::vector<canonical_mutation> topology_mutations;
             {
@@ -6173,7 +6139,7 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
                 // might be useful if multiple nodes are trying to pull concurrently.
                 auto read_apply_mutex_holder = co_await ss._group0->client().hold_read_apply_mutex();
                 auto rs = co_await db::system_keyspace::query_mutations(
-                    db, db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
+                    ss._db, db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
                 auto s = ss._db.local().find_schema(db::system_keyspace::NAME, db::system_keyspace::TOPOLOGY);
                 topology_mutations.reserve(rs->partitions().size());
                 boost::range::transform(
@@ -6195,7 +6161,7 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
                 // Alternatively, a node would wait for some time before switching to normal state.
                 auto read_apply_mutex_holder = co_await ss._group0->client().hold_read_apply_mutex();
                 auto rs = co_await db::system_keyspace::query_mutations(
-                    db, db::system_keyspace::NAME, db::system_keyspace::CDC_GENERATIONS_V3);
+                    ss._db, db::system_keyspace::NAME, db::system_keyspace::CDC_GENERATIONS_V3);
                 auto s = ss._db.local().find_schema(db::system_keyspace::NAME, db::system_keyspace::CDC_GENERATIONS_V3);
                 cdc_generation_mutations.reserve(rs->partitions().size());
                 boost::range::transform(
@@ -6211,7 +6177,12 @@ void storage_service::init_messaging_service(sharded<service::storage_proxy>& pr
         });
     });
     ser::storage_service_rpc_verbs::register_tablet_stream_data(&_messaging.local(), [this] (locator::global_tablet_id tablet) {
-        return stream_tablet(tablet);
+        return container().invoke_on(0, [tablet] (auto& ss) -> future<> {
+            return ss.stream_tablet(tablet);
+        });
+    });
+    ser::storage_service_rpc_verbs::register_tablet_cleanup(&_messaging.local(), [this] (locator::global_tablet_id tablet) {
+        return cleanup_tablet(tablet);
     });
 }
 

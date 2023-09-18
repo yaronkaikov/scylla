@@ -467,7 +467,7 @@ static future<json::json_return_type> describe_ring_as_json(sharded<service::sto
 
 void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_service>& ss, gms::gossiper& g, sharded<db::system_keyspace>& sys_ks) {
     ss::local_hostid.set(r, [&ctx](std::unique_ptr<http::request> req) {
-        auto id = ctx.db.local().get_config().host_id;
+        auto id = ctx.db.local().get_token_metadata().get_my_id();
         return make_ready_future<json::json_return_type>(id.to_sstring());
     });
 
@@ -1014,13 +1014,11 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
         return make_ready_future<json::json_return_type>(res);
     });
 
-    ss::reset_local_schema.set(r, [&ctx, &sys_ks](std::unique_ptr<http::request> req) {
+    ss::reset_local_schema.set(r, [&ss](std::unique_ptr<http::request> req) -> future<json::json_return_type> {
         // FIXME: We should truncate schema tables if more than one node in the cluster.
-        auto& fs = ctx.sp.local().features();
         apilog.info("reset_local_schema");
-        return db::schema_tables::recalculate_schema_version(sys_ks, ctx.sp, fs).then([] {
-            return make_ready_future<json::json_return_type>(json_void());
-        });
+        co_await ss.local().reload_schema();
+        co_return json_void();
     });
 
     ss::set_trace_probability.set(r, [](std::unique_ptr<http::request> req) {

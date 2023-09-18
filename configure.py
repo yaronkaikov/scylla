@@ -1144,6 +1144,7 @@ scylla_core = (['message/messaging_service.cc',
                 'rust/wasmtime_bindings/src/lib.rs',
                 'utils/to_string.cc',
                 'service/topology_state_machine.cc',
+                'node_ops/node_ops_ctl.cc',
                 'reader_concurrency_semaphore_group.cc',
                 ] + [Antlr3Grammar('cql3/Cql.g')] + [Thrift('interface/cassandra.thrift', 'Cassandra')] \
                   + scylla_raft_core
@@ -1289,7 +1290,7 @@ scylla_tests_dependencies = scylla_core + alternator + idls + scylla_tests_gener
 
 scylla_raft_dependencies = scylla_raft_core + ['utils/uuid.cc', 'utils/error_injection.cc']
 
-scylla_tools = ['tools/scylla-types.cc', 'tools/scylla-sstable.cc', 'tools/schema_loader.cc', 'tools/utils.cc', 'tools/lua_sstable_consumer.cc']
+scylla_tools = ['tools/scylla-types.cc', 'tools/scylla-sstable.cc', 'tools/scylla-nodetool.cc', 'tools/schema_loader.cc', 'tools/utils.cc', 'tools/lua_sstable_consumer.cc']
 scylla_perfs = ['test/perf/perf_fast_forward.cc',
                 'test/perf/perf_row_cache_update.cc',
                 'test/perf/perf_simple_query.cc',
@@ -2064,17 +2065,17 @@ with open(buildfile, 'w') as f:
         rule strip
             command = scripts/strip.sh $in
         rule package
-            command = scripts/create-relocatable-package.py --mode $mode $out
+            command = scripts/create-relocatable-package.py --build-dir build/$mode $out
         rule stripped_package
-            command = scripts/create-relocatable-package.py --stripped --mode $mode $out
+            command = scripts/create-relocatable-package.py --stripped --build-dir build/$mode $out
         rule debuginfo_package
-            command = dist/debuginfo/scripts/create-relocatable-package.py --mode $mode $out
+            command = dist/debuginfo/scripts/create-relocatable-package.py --build-dir build/$mode $out
         rule rpmbuild
             command = reloc/build_rpm.sh --reloc-pkg $in --builddir $out
         rule debbuild
             command = reloc/build_deb.sh --reloc-pkg $in --builddir $out
         rule unified
-            command = unified/build_unified.sh --mode $mode --unified-pkg $out
+            command = unified/build_unified.sh --build-dir build/$mode --unified-pkg $out
         rule rust_header
             command = cxxbridge --include rust/cxx.h --header $in > $out
             description = RUST_HEADER $out

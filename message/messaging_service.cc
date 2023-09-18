@@ -32,6 +32,7 @@
 #include "range.hh"
 #include "frozen_schema.hh"
 #include "repair/repair.hh"
+#include "node_ops/node_ops_ctl.hh"
 #include "utils/digest_algorithm.hh"
 #include "service/paxos/proposal.hh"
 #include "service/paxos/prepare_response.hh"
@@ -602,6 +603,7 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::NODE_OPS_CMD:
     case messaging_verb::HINT_MUTATION:
     case messaging_verb::TABLET_STREAM_DATA:
+    case messaging_verb::TABLET_CLEANUP:
         return 1;
     case messaging_verb::CLIENT_ID:
     case messaging_verb::MUTATION:

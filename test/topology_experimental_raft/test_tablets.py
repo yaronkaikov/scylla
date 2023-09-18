@@ -8,6 +8,7 @@ from test.pylib.manager_client import ManagerClient
 from test.pylib.rest_client import inject_error_one_shot
 from test.pylib.rest_client import inject_error
 from test.pylib.util import wait_for_cql_and_get_hosts
+from test.topology.util import reconnect_driver
 
 import pytest
 import asyncio
@@ -79,6 +80,8 @@ async def test_tablet_metadata_propagates_with_schema_changes_in_snapshot_mode(m
     for s in servers:
         await manager.server_restart(s.server_id, wait_others=2)
 
+    cql = await reconnect_driver(manager)
+
     await wait_for_cql_and_get_hosts(cql, [servers[0]], time.time() + 60)
 
     await asyncio.gather(*[cql.run_async(f"INSERT INTO test.test (pk, c) VALUES ({k}, 3);", execution_profile='whitelist')
@@ -140,7 +143,7 @@ async def test_table_drop_with_auto_snapshot(manager: ManagerClient):
 
 
 @pytest.mark.asyncio
-async def test_bootstrap(manager: ManagerClient):
+async def test_topology_changes(manager: ManagerClient):
     logger.info("Bootstrapping cluster")
     servers = [await manager.server_add(), await manager.server_add(), await manager.server_add()]
 
@@ -173,6 +176,10 @@ async def test_bootstrap(manager: ManagerClient):
 
     await check()
     time.sleep(5) # Give load balancer some time to do work
+    await check()
+
+    await manager.decommission_node(servers[0].server_id)
+
     await check()
 
     await cql.run_async("DROP KEYSPACE test;")
