@@ -139,7 +139,7 @@ private:
     sharded<locator::snitch_ptr>& _snitch;
     sharded<qos::service_level_controller>& _sl_controller;
 
-    // Engaged on shard 0 after `join_cluster`.
+    // Engaged on shard 0 before `join_cluster`.
     service::raft_group0* _group0;
 
     sstring _operation_in_progress;

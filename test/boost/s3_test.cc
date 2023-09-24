@@ -33,6 +33,7 @@
 //   export S3_BUCKET_FOR_TEST=xemul
 //   export AWS_ACCESS_KEY_ID=${aws_key}
 //   export AWS_SECRET_ACCESS_KEY=${aws_secret}
+//   export AWS_SESSION_TOKEN=${aws_token}
 //   export AWS_DEFAULT_REGION="us-east-2"
 
 s3::endpoint_config_ptr make_minio_config() {
@@ -42,6 +43,7 @@ s3::endpoint_config_ptr make_minio_config() {
         .aws = {{
             .key = tests::getenv_safe("AWS_ACCESS_KEY_ID"),
             .secret = tests::getenv_safe("AWS_SECRET_ACCESS_KEY"),
+            .token = ::getenv("AWS_SESSION_TOKEN") ? : "",
             .region = ::getenv("AWS_DEFAULT_REGION") ? : "local",
         }},
     };
@@ -58,7 +60,8 @@ SEASTAR_THREAD_TEST_CASE(test_client_put_get_object) {
     const sstring name(fmt::format("/{}/testobject-{}", tests::getenv_safe("S3_BUCKET_FOR_TEST"), ::getpid()));
 
     testlog.info("Make client\n");
-    auto cln = s3::client::make(tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"), make_minio_config());
+    semaphore mem(16<<20);
+    auto cln = s3::client::make(tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"), make_minio_config(), mem);
     auto close_client = deferred_close(*cln);
 
     testlog.info("Put object {}\n", name);
@@ -103,7 +106,8 @@ void do_test_client_multipart_upload(bool with_copy_upload) {
     const sstring name(fmt::format("/{}/test{}object-{}", tests::getenv_safe("S3_BUCKET_FOR_TEST"), with_copy_upload ? "jumbo" : "large", ::getpid()));
 
     testlog.info("Make client\n");
-    auto cln = s3::client::make(tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"), make_minio_config());
+    semaphore mem(16<<20);
+    auto cln = s3::client::make(tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"), make_minio_config(), mem);
     auto close_client = deferred_close(*cln);
 
     testlog.info("Upload object (with copy = {})\n", with_copy_upload);
@@ -162,7 +166,8 @@ SEASTAR_THREAD_TEST_CASE(test_client_readable_file) {
     const sstring name(fmt::format("/{}/testroobject-{}", tests::getenv_safe("S3_BUCKET_FOR_TEST"), ::getpid()));
 
     testlog.info("Make client\n");
-    auto cln = s3::client::make(tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"), make_minio_config());
+    semaphore mem(16<<20);
+    auto cln = s3::client::make(tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"), make_minio_config(), mem);
     auto close_client = deferred_close(*cln);
 
     testlog.info("Put object {}\n", name);
@@ -202,7 +207,8 @@ SEASTAR_THREAD_TEST_CASE(test_client_readable_file) {
 SEASTAR_THREAD_TEST_CASE(test_client_put_get_tagging) {
     const sstring name(fmt::format("/{}/testobject-{}",
                                    tests::getenv_safe("S3_BUCKET_FOR_TEST"), ::getpid()));
-    auto client = s3::client::make(tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"), make_minio_config());
+    semaphore mem(16<<20);
+    auto client = s3::client::make(tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"), make_minio_config(), mem);
     auto close_client = deferred_close(*client);
     auto data = sstring("1234567890ABCDEF").release();
     client->put_object(name, std::move(data)).get();

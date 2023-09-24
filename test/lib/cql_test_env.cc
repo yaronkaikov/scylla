@@ -553,7 +553,7 @@ private:
             _cm.start(std::move(get_cm_cfg), std::ref(abort_sources), std::ref(_task_manager)).get();
             auto stop_cm = deferred_stop(_cm);
 
-            _sstm.start(std::ref(*cfg)).get();
+            _sstm.start(std::ref(*cfg), sstables::storage_manager::config{}).get();
             auto stop_sstm = deferred_stop(_sstm);
 
             _sl_controller.start(std::ref(_auth_service), qos::service_level_options{.shares = 1000}, scheduling_groups.statement_scheduling_group).get();
@@ -784,7 +784,7 @@ private:
                 _group0_registry.invoke_on_all(&service::raft_group_registry::drain_on_shutdown).get();
             });
 
-            _view_update_generator.start(std::ref(_db), std::ref(_proxy)).get();
+            _view_update_generator.start(std::ref(_db), std::ref(_proxy), std::ref(abort_sources)).get();
             _view_update_generator.invoke_on_all(&db::view::view_update_generator::start).get();
             auto stop_view_update_generator = defer([this] {
                 _view_update_generator.stop().get();

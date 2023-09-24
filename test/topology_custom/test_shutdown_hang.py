@@ -1,3 +1,9 @@
+#
+# Copyright (C) 2023-present ScyllaDB
+#
+# SPDX-License-Identifier: ScyllaDB-Proprietary
+#
+
 import asyncio
 import logging
 import time

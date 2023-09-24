@@ -309,6 +309,76 @@ def generate_compdb(compdb, buildfile, modes):
             return
 
 
+def check_for_minimal_compiler_version(cxx):
+    compiler_test_src = '''
+
+// clang pretends to be gcc (defined __GNUC__), so we
+// must check it first
+#ifdef __clang__
+
+#if __clang_major__ < 10
+    #error "MAJOR"
+#endif
+
+#elif defined(__GNUC__)
+
+#if __GNUC__ < 10
+    #error "MAJOR"
+#elif __GNUC__ == 10
+    #if __GNUC_MINOR__ < 1
+        #error "MINOR"
+    #elif __GNUC_MINOR__ == 1
+        #if __GNUC_PATCHLEVEL__ < 1
+            #error "PATCHLEVEL"
+        #endif
+    #endif
+#endif
+
+#else
+
+#error "Unrecognized compiler"
+
+#endif
+
+int main() { return 0; }
+'''
+    if try_compile_and_link(compiler=cxx, source=compiler_test_src):
+        return
+    try_compile_and_link(compiler=cxx, source=compiler_test_src, verbose=True)
+    print('Wrong compiler version or incorrect flags. '
+          'Scylla needs GCC >= 10.1.1 with coroutines (-fcoroutines) or '
+          'clang >= 10.0.0 to compile.')
+    sys.exit(1)
+
+
+def check_for_boost(cxx):
+    pkg_name = pkgname("boost-devel")
+    if not try_compile(compiler=cxx, source='#include <boost/version.hpp>'):
+        print(f'Boost not installed.  Please install {pkg_name}.')
+        sys.exit(1)
+
+    if not try_compile(compiler=cxx, source='''\
+            #include <boost/version.hpp>
+            #if BOOST_VERSION < 105500
+            #error Boost version too low
+            #endif
+            '''):
+        print(f'Installed boost version too old.  Please update {pkg_name}.')
+        sys.exit(1)
+
+
+def check_for_lz4(cxx, cflags):
+    if not try_compile(cxx, source=textwrap.dedent('''\
+        #include <lz4.h>
+
+        void m() {
+            LZ4_compress_default(static_cast<const char*>(0), static_cast<char*>(0), 0, 0);
+        }
+        '''), flags=cflags.split()):
+        print('Installed lz4-devel is too old. Please upgrade it to r129 / v1.73 and up')
+        sys.exit(1)
+
+
 modes = {
     'debug': {
         'cxxflags': '-DDEBUG -DSANITIZE -DDEBUG_LSA_SANITIZER -DSCYLLA_ENABLE_ERROR_INJECTION',
@@ -694,7 +764,7 @@ arg_parser.add_argument('--enable-alloc-failure-injector', dest='alloc_failure_i
                         help='enable allocation failure injection')
 arg_parser.add_argument('--enable-seastar-debug-allocations', dest='seastar_debug_allocations', action='store_true', default=False,
                         help='enable seastar debug allocations')
-arg_parser.add_argument('--with-antlr3', dest='antlr3_exec', action='store', default=None,
+arg_parser.add_argument('--with-antlr3', dest='antlr3_exec', action='store', default="antlr3",
                         help='path to antlr3 executable')
 arg_parser.add_argument('--with-ragel', dest='ragel_exec', action='store', default='ragel',
         help='path to ragel executable')
@@ -962,6 +1032,9 @@ scylla_core = (['message/messaging_service.cc',
                 'db/commitlog/commitlog_entry.cc',
                 'db/data_listeners.cc',
                 'db/functions/function.cc',
+                'db/hints/internal/hint_endpoint_manager.cc',
+                'db/hints/internal/hint_sender.cc',
+                'db/hints/internal/hint_storage.cc',
                 'db/hints/manager.cc',
                 'db/hints/resource_manager.cc',
                 'db/hints/host_filter.cc',
@@ -1471,23 +1544,14 @@ warnings = [
     '-Werror',
     '-Wimplicit-fallthrough',
     '-Wno-mismatched-tags',  # clang-only
-    '-Wno-tautological-compare',
     '-Wno-c++11-narrowing',
-    '-Wno-ignored-attributes',
     '-Wno-overloaded-virtual',
     '-Wno-unused-command-line-argument',
     '-Wno-unsupported-friend',
-    '-Wno-delete-non-abstract-non-virtual-dtor',
-    '-Wno-braced-scalar-init',
     '-Wno-implicit-int-float-conversion',
-    '-Wno-delete-abstract-non-virtual-dtor',
     # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=77728
     '-Wno-psabi',
     '-Wno-narrowing',
-    '-Wno-nonnull',
-    '-Wno-stringop-overread', # false positives with gcc 12
-    '-Wno-uninitialized',  # false positives with gcc 12,
-    '-Wno-dangling-pointer', # false positives with gcc 12
 ]
 
 warnings = [w
@@ -1553,67 +1617,6 @@ pkgs.append('lua53' if have_pkg('lua53') else 'lua')
 
 pkgs.append('libsystemd')
 
-
-compiler_test_src = '''
-
-// clang pretends to be gcc (defined __GNUC__), so we
-// must check it first
-#ifdef __clang__
-
-#if __clang_major__ < 10
-    #error "MAJOR"
-#endif
-
-#elif defined(__GNUC__)
-
-#if __GNUC__ < 10
-    #error "MAJOR"
-#elif __GNUC__ == 10
-    #if __GNUC_MINOR__ < 1
-        #error "MINOR"
-    #elif __GNUC_MINOR__ == 1
-        #if __GNUC_PATCHLEVEL__ < 1
-            #error "PATCHLEVEL"
-        #endif
-    #endif
-#endif
-
-#else
-
-#error "Unrecognized compiler"
-
-#endif
-
-int main() { return 0; }
-'''
-if not try_compile_and_link(compiler=args.cxx, source=compiler_test_src):
-    try_compile_and_link(compiler=args.cxx, source=compiler_test_src, verbose=True)
-    print('Wrong compiler version or incorrect flags. Scylla needs GCC >= 10.1.1 with coroutines (-fcoroutines) or clang >= 10.0.0 to compile.')
-    sys.exit(1)
-
-if not try_compile(compiler=args.cxx, source='#include <boost/version.hpp>'):
-    print('Boost not installed.  Please install {}.'.format(pkgname("boost-devel")))
-    sys.exit(1)
-
-if not try_compile(compiler=args.cxx, source='''\
-        #include <boost/version.hpp>
-        #if BOOST_VERSION < 105500
-        #error Boost version too low
-        #endif
-        '''):
-    print('Installed boost version too old.  Please update {}.'.format(pkgname("boost-devel")))
-    sys.exit(1)
-
-if not try_compile(args.cxx, source=textwrap.dedent('''\
-        #include <lz4.h>
-
-        void m() {
-            LZ4_compress_default(static_cast<const char*>(0), static_cast<char*>(0), 0, 0);
-        }
-        '''), flags=args.user_cflags.split()):
-    print('Installed lz4-devel is too old. Please upgrade it to r129 / v1.73 and up')
-    sys.exit(1)
-
 has_sanitize_address_use_after_scope = try_compile(compiler=args.cxx, flags=['-fsanitize-address-use-after-scope'], source='int f() {}')
 
 defines = ' '.join(['-D' + d for d in defines])
@@ -1652,8 +1655,6 @@ file = open(f'{outdir}/SCYLLA-RELEASE-FILE', 'r')
 scylla_release = file.read().strip()
 file = open(f'{outdir}/SCYLLA-PRODUCT-FILE', 'r')
 scylla_product = file.read().strip()
-
-arch = platform.machine()
 
 for m, mode_config in modes.items():
     mode_config['cxxflags'] += f" -DSCYLLA_BUILD_MODE={m}"
@@ -1748,7 +1749,7 @@ for mode in modes:
             # which extracts the default profile from an archive in pgo/profiles,
             # (stored in git LFS) to build/
 
-            default_profile_archive_path = f"pgo/profiles/{arch}/profile.profdata.xz"
+            default_profile_archive_path = f"pgo/profiles/{platform.machine()}/profile.profdata.xz"
             default_profile_filename = pathlib.Path(default_profile_archive_path).stem
 
             # We are checking whether the profile archive is compressed,
@@ -1867,7 +1868,7 @@ def configure_seastar(build_dir, mode, mode_config):
     if dpdk is None:
         dpdk = platform.machine() == 'x86_64' and mode == 'release'
     if dpdk:
-        seastar_cmake_args += ['-DSeastar_DPDK=ON', '-DSeastar_DPDK_MACHINE=wsm']
+        seastar_cmake_args += ['-DSeastar_DPDK=ON', '-DSeastar_DPDK_MACHINE=westmere']
     if args.split_dwarf:
         seastar_cmake_args += ['-DSeastar_SPLIT_DWARF=ON']
     if args.alloc_failure_injector:
@@ -2015,17 +2016,14 @@ user_cflags += f' -I{kmipc_dir}/include -DHAVE_KMIP'
 
 os.makedirs(outdir, exist_ok=True)
 
-if args.antlr3_exec:
-    antlr3_exec = args.antlr3_exec
-else:
-    antlr3_exec = "antlr3"
+ragel_exec = args.ragel_exec
 
-if args.ragel_exec:
-    ragel_exec = args.ragel_exec
-else:
-    ragel_exec = "ragel"
 
-with open(buildfile, 'w') as f:
+def write_build_file(f,
+                     arch,
+                     scylla_product,
+                     scylla_version,
+                     scylla_release):
     f.write(textwrap.dedent('''\
         configure_args = {configure_args}
         builddir = {outdir}
@@ -2182,7 +2180,7 @@ with open(buildfile, 'w') as f:
               command = CARGO_BUILD_DEP_INFO_BASEDIR='.' cargo build --locked --manifest-path=rust/Cargo.toml --target-dir=$builddir/{mode} --profile=rust-{mode} $
                         && touch $out
               description = RUST_LIB $out
-            ''').format(mode=mode, antlr3_exec=antlr3_exec, fmt_lib=fmt_lib, test_repeat=test_repeat, test_timeout=test_timeout, **modeval))
+            ''').format(mode=mode, antlr3_exec=args.antlr3_exec, fmt_lib=fmt_lib, test_repeat=test_repeat, test_timeout=test_timeout, **modeval))
         f.write(
             'build {mode}-build: phony {artifacts} {wasms}\n'.format(
                 mode=mode,
@@ -2636,4 +2634,15 @@ with open(buildfile, 'w') as f:
         build help: print_help | always
         ''').format(**globals()))
 
+
+check_for_minimal_compiler_version(args.cxx)
+check_for_boost(args.cxx)
+check_for_lz4(args.cxx, args.user_cflags)
+with open(buildfile, 'w') as f:
+    arch = platform.machine()
+    write_build_file(f,
+                     arch,
+                     scylla_product,
+                     scylla_version,
+                     scylla_release)
 generate_compdb('compile_commands.json', buildfile, selected_modes)

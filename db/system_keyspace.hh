@@ -275,7 +275,6 @@ public:
     future<> set_scylla_local_param(const sstring& key, const sstring& value, bool visible_before_cl_replay);
     future<std::optional<sstring>> get_scylla_local_param(const sstring& key);
 
-private:
     // Saves the key-value pair into system.scylla_local table.
     // Pass visible_before_cl_replay = true iff the data should be available before
     // schema commitlog replay. We do table.flush in this case, so it's rather slow and heavyweight.
@@ -284,7 +283,6 @@ private:
     template <typename T>
     future<std::optional<T>> get_scylla_local_param_as(const sstring& key);
 
-public:
     static std::vector<schema_ptr> all_tables(const db::config& cfg);
     future<> make(
             locator::effective_replication_map_factory&,
@@ -484,6 +482,13 @@ public:
     // Precondition: the data is known to be present in the table (because it was committed earlier through group 0).
     future<cdc::topology_description> read_cdc_generation(utils::UUID id);
 
+    // Loads the current clean-up candidate for the CDC generation data. If there is no candidate, returns std::nullopt.
+    future<std::optional<cdc::generation_id_v2>> get_cdc_generations_cleanup_candidate();
+
+    // Returns a mutation that sets the current clean-up candidate for the CDC generation data. If given std::nullopt,
+    // the returned mutation sets the candidate to null, indicating there is no candidate.
+    mutation make_cleanup_candidate_mutation(std::optional<cdc::generation_id_v2> value, api::timestamp_type ts);
+
     // The mutation appends the given state ID to the group 0 history table, with the given description if non-empty.
     //
     // If `gc_older_than` is provided, the mutation will also contain a tombstone that clears all entries whose
@@ -495,8 +500,12 @@ public:
             utils::UUID state_id, std::optional<gc_clock::duration> gc_older_than, std::string_view description);
 
     // Obtain the contents of the group 0 history table in mutation form.
-    // Assumes that the history table exists, i.e. Raft experimental feature is enabled.
+    // Assumes that the history table exists, i.e. Raft feature is enabled.
     static future<mutation> get_group0_history(distributed<replica::database>&);
+
+    // If the `group0_schema_version` key in `system.scylla_local` is present (either live or tombstone),
+    // returns the corresponding mutation. Otherwise returns an empty mutation for that key.
+    future<mutation> get_group0_schema_version();
 
     future<> sstables_registry_create_entry(sstring location, utils::UUID uuid, sstring status, sstables::entry_descriptor desc);
     future<utils::UUID> sstables_registry_lookup_entry(sstring location, sstables::generation_type gen);
@@ -535,5 +544,7 @@ public:
     friend future<bool> db::schema_tables::column_mapping_exists(db::system_keyspace& sys_ks, table_id table_id, table_schema_version version);
     friend future<> db::schema_tables::drop_column_mapping(db::system_keyspace& sys_ks, table_id table_id, table_schema_version version);
 }; // class system_keyspace
+
+extern template future<std::optional<utils::UUID>> system_keyspace::get_scylla_local_param_as<utils::UUID>(const sstring& key);
 
 } // namespace db

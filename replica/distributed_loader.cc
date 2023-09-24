@@ -298,7 +298,7 @@ class table_populator {
     sstring _cf;
     global_table_ptr _global_table;
     fs::path _base_path;
-    std::unordered_map<sstring, lw_shared_ptr<sharded<sstables::sstable_directory>>> _sstable_directories;
+    std::unordered_map<sstables::sstable_state, lw_shared_ptr<sharded<sstables::sstable_directory>>> _sstable_directories;
     sstables::sstable_version_types _highest_version = sstables::oldest_writable_sstable_format;
     sstables::generation_type _highest_generation;
     sharded<locator::effective_replication_map_ptr> _erms;
@@ -335,7 +335,7 @@ public:
         });
 
         co_await populate_subdir(sstables::sstable_state::staging, allow_offstrategy_compaction::no);
-        co_await populate_subdir(sstables::sstable_state::quarantine, allow_offstrategy_compaction::no, must_exist::no);
+        co_await populate_subdir(sstables::sstable_state::quarantine, allow_offstrategy_compaction::no);
         co_await populate_subdir(sstables::sstable_state::normal, allow_offstrategy_compaction::yes);
 
         // system tables are made writable through sys_ks::mark_writable
@@ -355,21 +355,23 @@ public:
     }
 
 private:
-    fs::path get_path(std::string_view subdir) {
+    fs::path get_path(sstables::sstable_state state) {
+        auto subdir = state_to_dir(state);
         return subdir.empty() ? _base_path : _base_path / subdir;
     }
 
     using allow_offstrategy_compaction = bool_class<struct allow_offstrategy_compaction_tag>;
-    using must_exist = bool_class<struct must_exist_tag>;
-    future<> populate_subdir(sstables::sstable_state state, allow_offstrategy_compaction, must_exist = must_exist::yes);
+    future<> populate_subdir(sstables::sstable_state state, allow_offstrategy_compaction);
 
     future<> start_subdir(sstables::sstable_state state);
 };
 
 future<> table_populator::start_subdir(sstables::sstable_state state) {
-    auto subdir = sstables::state_to_dir(state);
-    sstring sstdir = get_path(subdir).native();
+    sstring sstdir = get_path(state).native();
     if (!co_await file_exists(sstdir)) {
+        if (state != sstables::sstable_state::quarantine) {
+            throw std::runtime_error(format("Populating {}/{} failed: {} does not exist", _ks, _cf, sstdir));
+        }
         co_return;
     }
 
@@ -387,7 +389,7 @@ future<> table_populator::start_subdir(sstables::sstable_state state) {
     );
 
     // directory must be stopped using table_populator::stop below
-    _sstable_directories[subdir] = dptr;
+    _sstable_directories[state] = dptr;
 
     co_await distributed_loader::lock_table(directory, _db, _ks, _cf);
 
@@ -416,19 +418,14 @@ sstables::shared_sstable make_sstable(replica::table& table, sstables::sstable_s
     return table.get_sstables_manager().make_sstable(table.schema(), table.dir(), table.get_storage_options(), generation, state, v, sstables::sstable_format_types::big);
 }
 
-future<> table_populator::populate_subdir(sstables::sstable_state state, allow_offstrategy_compaction do_allow_offstrategy_compaction, must_exist dir_must_exist) {
-    auto subdir = state_to_dir(state);
-    auto sstdir = get_path(subdir);
-    dblog.debug("Populating {}/{}/{} allow_offstrategy_compaction={} must_exist={}", _ks, _cf, sstdir, do_allow_offstrategy_compaction, dir_must_exist);
+future<> table_populator::populate_subdir(sstables::sstable_state state, allow_offstrategy_compaction do_allow_offstrategy_compaction) {
+    dblog.debug("Populating {}/{}/{} state={} allow_offstrategy_compaction={}", _ks, _cf, _base_path, state, do_allow_offstrategy_compaction);
 
-    if (!_sstable_directories.contains(subdir)) {
-        if (dir_must_exist) {
-            throw std::runtime_error(format("Populating {}/{} failed: {} does not exist", _ks, _cf, sstdir));
-        }
+    if (!_sstable_directories.contains(state)) {
         co_return;
     }
 
-    auto& directory = *_sstable_directories.at(subdir);
+    auto& directory = *_sstable_directories.at(state);
 
     co_await distributed_loader::reshard(directory, _db, _ks, _cf, [this, state] (shard_id shard) mutable {
         auto gen = smp::submit_to(shard, [this] () {
@@ -466,17 +463,23 @@ future<> table_populator::populate_subdir(sstables::sstable_state state, allow_o
     });
 }
 
-future<> distributed_loader::populate_keyspace(distributed<replica::database>& db, sstring datadir, sstring ks_name) {
+future<> distributed_loader::populate_keyspace(distributed<replica::database>& db, keyspace& ks, sstring ks_name) {
+    // might have more than one dir for a keyspace iff data_file_directories is > 1 and
+    // somehow someone placed sstables in more than one of them for a given ks. (import?)
+    co_await coroutine::parallel_for_each(db.local().get_config().data_file_directories(), [&db, &ks, ks_name] (const sstring& data_dir) {
+        return populate_keyspace(db, ks, data_dir, ks_name);
+    });
+
+    co_await db.invoke_on_all([ks_name] (replica::database& db) {
+        auto& ks = db.find_keyspace(ks_name);
+        ks.mark_as_populated();
+    });
+}
+
+future<> distributed_loader::populate_keyspace(distributed<replica::database>& db, keyspace& ks, sstring datadir, sstring ks_name) {
     auto ksdir = datadir + "/" + ks_name;
-    auto& keyspaces = db.local().get_keyspaces();
-    auto i = keyspaces.find(ks_name);
-    if (i == keyspaces.end()) {
-        dblog.warn("Skipping undefined keyspace: {}", ks_name);
-        co_return;
-    }
 
     dblog.info("Populating Keyspace {}", ks_name);
-    auto& ks = i->second;
     auto& tables_metadata = db.local().get_tables_metadata();
 
     co_await coroutine::parallel_for_each(ks.metadata()->cf_meta_data() | boost::adaptors::map_values, [&] (schema_ptr s) -> future<> {
@@ -525,20 +528,11 @@ future<> distributed_loader::init_system_keyspace(sharded<db::system_keyspace>& 
             return sys_ks.make(erm_factory.local(), db.local());
         }).get();
 
-        const auto& cfg = db.local().get_config();
-        for (auto& data_dir : cfg.data_file_directories()) {
-            for (auto ksname : system_keyspaces) {
-                distributed_loader::populate_keyspace(db, data_dir, sstring(ksname)).get();
-
-                db.invoke_on_all([&] (replica::database& db) {
-                    auto& ks = db.find_keyspace(ksname);
-        
-                    // for system keyspaces, we only do this post all population, and
-                    // only as a consistency measure.
-                    // change this if it is ever needed to sync system keyspace
-                    // population
-                    ks.mark_as_populated();
-                }).get();
+        for (auto ksname : system_keyspaces) {
+            auto& ks = db.local().get_keyspaces();
+            auto i = ks.find(ksname);
+            if (i != ks.end()) {
+                distributed_loader::populate_keyspace(db, i->second, sstring(ksname)).get();
             }
         }
     });
@@ -552,39 +546,16 @@ future<> distributed_loader::init_non_system_keyspaces(distributed<replica::data
         }).get();
 
         const auto& cfg = db.local().get_config();
-        using ks_dirs = std::unordered_multimap<sstring, sstring>;
-
-        ks_dirs dirs;
-
-        parallel_for_each(cfg.data_file_directories(), [&dirs] (sstring directory) {
-            // we want to collect the directories first, so we can get a full set of potential dirs
-            return lister::scan_dir(fs::path{directory}, lister::dir_entry_types::of<directory_entry_type::directory>(),
-                    [&dirs] (fs::path datadir, directory_entry de) {
-                if (!is_system_keyspace(de.name)) {
-                    dirs.emplace(de.name, datadir.native());
-                }
-                return make_ready_future<>();
-            });
-        }).get();
-
-        db.invoke_on_all([&dirs] (replica::database& db) {
-            for (auto& [name, ks] : db.get_keyspaces()) {
-                // mark all user keyspaces that are _not_ on disk as already
-                // populated.
-                if (!dirs.contains(ks.metadata()->name())) {
-                    ks.mark_as_populated();
-                }
-            }
-        }).get();
 
         for (bool prio_only : { true, false}) {
             std::vector<future<>> futures;
 
-            // treat "dirs" as immutable to avoid modifying it while still in
-            // a range-iteration. Also to simplify the "finally"
-            for (auto i = dirs.begin(); i != dirs.end();) {
-                auto& ks_name = i->first;
-                auto j = i++;
+            for (auto& ks : db.local().get_keyspaces()) {
+                auto& ks_name = ks.first;
+
+                if (is_system_keyspace(ks_name)) {
+                    continue;
+                }
 
                 /**
                  * Must process in two phases: Prio and non-prio.
@@ -596,23 +567,7 @@ future<> distributed_loader::init_non_system_keyspaces(distributed<replica::data
                     continue;
                 }
 
-                auto e = dirs.equal_range(ks_name).second;
-                // might have more than one dir for a keyspace iff data_file_directories is > 1 and
-                // somehow someone placed sstables in more than one of them for a given ks. (import?)
-                futures.emplace_back(parallel_for_each(j, e, [&](const std::pair<sstring, sstring>& p) {
-                    auto& datadir = p.second;
-                    return distributed_loader::populate_keyspace(db, datadir, ks_name);
-                }).finally([&] {
-                    return db.invoke_on_all([ks_name] (replica::database& db) {
-                        // can be false if running test environment
-                        // or ks_name was just a borked directory not representing
-                        // a keyspace in schema tables.
-                        if (db.has_keyspace(ks_name)) {
-                            db.find_keyspace(ks_name).mark_as_populated();
-                        }
-                        return make_ready_future<>();
-                    });
-                }));
+                futures.emplace_back(distributed_loader::populate_keyspace(db, ks.second, ks_name));
             }
 
             when_all_succeed(futures.begin(), futures.end()).discard_result().get();

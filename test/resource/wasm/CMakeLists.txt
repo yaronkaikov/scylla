@@ -1,7 +1,5 @@
-find_program(WASM2WAT wasm2wat)
-if(NOT WASM2WAT)
-  message(FATAL_ERROR "wasm2wat is required")
-endif()
+find_program(WASM2WAT wasm2wat
+  REQUIRED)
 
 function(wasm2wat input)
   cmake_parse_arguments(parsed_args "" "WAT;OUT_DIR" "" ${ARGN})
@@ -17,5 +15,6 @@ function(wasm2wat input)
 endfunction()
 
 add_custom_target(wasm)
+add_dependencies(tests wasm)
 add_subdirectory(c)
 add_subdirectory(rust)

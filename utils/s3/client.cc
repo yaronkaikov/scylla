@@ -57,10 +57,11 @@ future<> ignore_reply(const http::reply& rep, input_stream<char>&& in_) {
     co_await util::skip_entire_stream(in);
 }
 
-client::client(std::string host, endpoint_config_ptr cfg, global_factory gf, private_tag)
+client::client(std::string host, endpoint_config_ptr cfg, semaphore& mem, global_factory gf, private_tag)
         : _host(std::move(host))
         , _cfg(std::move(cfg))
         , _gf(std::move(gf))
+        , _memory(mem)
 {
 }
 
@@ -71,8 +72,8 @@ void client::update_config(endpoint_config_ptr cfg) {
     _cfg = std::move(cfg);
 }
 
-shared_ptr<client> client::make(std::string endpoint, endpoint_config_ptr cfg, global_factory gf) {
-    return seastar::make_shared<client>(std::move(endpoint), std::move(cfg), std::move(gf), private_tag{});
+shared_ptr<client> client::make(std::string endpoint, endpoint_config_ptr cfg, semaphore& mem, global_factory gf) {
+    return seastar::make_shared<client>(std::move(endpoint), std::move(cfg), mem, std::move(gf), private_tag{});
 }
 
 void client::authorize(http::request& req) {
@@ -84,13 +85,16 @@ void client::authorize(http::request& req) {
     auto time_point_st = time_point_str.substr(0, 8);
     req._headers["x-amz-date"] = time_point_str;
     req._headers["x-amz-content-sha256"] = "UNSIGNED-PAYLOAD";
+    if (!_cfg->aws->token.empty()) {
+        req._headers["x-amz-security-token"] = _cfg->aws->token;
+    }
     std::map<std::string_view, std::string_view> signed_headers;
     sstring signed_headers_list = "";
     // AWS requires all x-... and Host: headers to be signed
     signed_headers["host"] = req._headers["Host"];
-    for (const auto& h : req._headers) {
-        if (h.first[0] == 'x' && h.first[1] == '-') {
-            signed_headers[h.first] = h.second;
+    for (const auto& [name, value] : req._headers) {
+        if (name.starts_with("x-")) {
+            signed_headers[name] = value;
         }
     }
     unsigned header_nr = signed_headers.size();
@@ -114,6 +118,10 @@ void client::authorize(http::request& req) {
         utils::aws::unsigned_content,
         _cfg->aws->region, "s3", query_string);
     req._headers["Authorization"] = format("AWS4-HMAC-SHA256 Credential={}/{}/{}/s3/aws4_request,SignedHeaders={},Signature={}", _cfg->aws->key, time_point_st, _cfg->aws->region, signed_headers_list, sig);
+}
+
+future<semaphore_units<>> client::claim_memory(size_t size) {
+    return get_units(_memory, size);
 }
 
 client::group_client::group_client(std::unique_ptr<http::experimental::connection_factory> f, unsigned max_conn)
@@ -453,16 +461,16 @@ sstring parse_multipart_upload_id(sstring& body) {
 }
 
 sstring parse_multipart_copy_upload_etag(sstring& body) {
-    rapidxml::xml_document<> doc;
+    auto doc = std::make_unique<rapidxml::xml_document<>>();
     try {
-        doc.parse<0>(body.data());
+        doc->parse<0>(body.data());
     } catch (const rapidxml::parse_error& e) {
         s3l.warn("cannot parse multipart copy upload response: {}", e.what());
         // The caller is supposed to check the etag to be empty
         // and handle the error the way it prefers
         return "";
     }
-    auto root_node = doc.first_node("CopyPartResult");
+    auto root_node = doc->first_node("CopyPartResult");
     auto etag_node = root_node->first_node("ETag");
     return etag_node->value();
 }
@@ -537,6 +545,8 @@ future<> client::upload_sink_base::upload_part(memory_data_sink_buffers bufs) {
         co_await start_upload();
     }
 
+    auto claim = co_await _client->claim_memory(bufs.size());
+
     unsigned part_number = _part_etags.size();
     _part_etags.emplace_back();
     s3l.trace("PUT part {} {} bytes in {} buffers (upload id {})", part_number, bufs.size(), bufs.buffers().size(), _upload_id);
@@ -545,7 +555,7 @@ future<> client::upload_sink_base::upload_part(memory_data_sink_buffers bufs) {
     req._headers["Content-Length"] = format("{}", size);
     req.query_parameters["partNumber"] = format("{}", part_number + 1);
     req.query_parameters["uploadId"] = _upload_id;
-    req.write_body("bin", size, [this, part_number, bufs = std::move(bufs)] (output_stream<char>&& out_) mutable -> future<> {
+    req.write_body("bin", size, [this, part_number, bufs = std::move(bufs), p = std::move(claim)] (output_stream<char>&& out_) mutable -> future<> {
         auto out = std::move(out_);
         std::exception_ptr ex;
         s3l.trace("upload {} part data (upload id {})", part_number, _upload_id);
@@ -561,6 +571,8 @@ future<> client::upload_sink_base::upload_part(memory_data_sink_buffers bufs) {
         if (ex) {
             co_await coroutine::return_exception_ptr(std::move(ex));
         }
+        // note: At this point the buffers are sent, but the responce is not yet
+        // received. However, claim is released and next part may start uploading
     });
 
     // Do upload in the background so that several parts could go in parallel.
@@ -707,7 +719,10 @@ future<> client::upload_sink_base::upload_part(std::unique_ptr<upload_sink> piec
             // ... the exact exception only remains in logs
             s3l.warn("couldn't copy-upload part {}: {} (upload id {})", part_number, ex, _upload_id);
         });
-    }).finally([this, &piece] {
+    }).then_wrapped([this, &piece] (auto f) {
+        if (f.failed()) {
+            s3l.warn("couldn't flush piece {}: {} (upload id {})", piece._object_name, f.get_exception(), _upload_id);
+        }
         return _client->delete_object(piece._object_name).handle_exception([&piece] (auto ex) {
             s3l.warn("failed to remove copy-upload piece {}", piece._object_name);
         });

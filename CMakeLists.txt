@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.27)
 
 project(scylla)
 
@@ -143,6 +143,7 @@ add_subdirectory(lang)
 add_subdirectory(locator)
 add_subdirectory(mutation)
 add_subdirectory(mutation_writer)
+add_subdirectory(node_ops)
 add_subdirectory(readers)
 add_subdirectory(redis)
 add_subdirectory(replica)

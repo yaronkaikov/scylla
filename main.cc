@@ -11,6 +11,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include <seastar/util/closeable.hh>
+#include <seastar/core/abort_source.hh>
 #include "tasks/task_manager.hh"
 #include "utils/build_id.hh"
 #include "supervisor.hh"
@@ -170,12 +171,13 @@ struct convert<::object_storage_endpoint_param> {
     static bool decode(const Node& node, ::object_storage_endpoint_param& ep) {
         ep.endpoint = node["name"].as<std::string>();
         ep.config.port = node["port"].as<unsigned>();
-        ep.config.use_https = node["https"] && node["https"].as<bool>();
+        ep.config.use_https = node["https"].as<bool>(false);
         if (node["aws_region"]) {
             ep.config.aws.emplace();
             ep.config.aws->region = node["aws_region"].as<std::string>();
             ep.config.aws->key = node["aws_key"].as<std::string>();
             ep.config.aws->secret = node["aws_secret"].as<std::string>();
+            ep.config.aws->token = node["aws_token"].as<std::string>("");
         }
         return true;
     }
@@ -1012,7 +1014,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                cm.stop().get();
             });
 
-            sstm.start(std::ref(*cfg)).get();
+            sstables::storage_manager::config stm_cfg;
+            stm_cfg.s3_clients_memory = std::clamp<size_t>(memory::stats().total_memory() * 0.01, 10 << 20, 100 << 20);
+            sstm.start(std::ref(*cfg), stm_cfg).get();
             auto stop_sstm = defer_verbose_shutdown("sstables storage manager", [&sstm] {
                 sstm.stop().get();
             });
@@ -1466,7 +1470,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             replica::distributed_loader::init_non_system_keyspaces(db, proxy, sys_ks).get();
 
             supervisor::notify("starting view update generator");
-            view_update_generator.start(std::ref(db), std::ref(proxy)).get();
+            view_update_generator.start(std::ref(db), std::ref(proxy), std::ref(stop_signal.as_sharded_abort_source())).get();
+            auto stop_view_update_generator = defer_verbose_shutdown("view update generator", [] {
+                view_update_generator.stop().get();
+            });
 
             supervisor::notify("starting commit log");
             auto cl = db.local().commitlog();
@@ -1916,19 +1923,11 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             supervisor::notify("serving");
             // Register at_exit last, so that storage_service::drain_on_shutdown will be called first
 
-            auto stop_repair = defer_verbose_shutdown("repair", [&repair] {
-                repair.invoke_on_all(&repair_service::shutdown).get();
-            });
-
             auto drain_sl_controller = defer_verbose_shutdown("service level controller update loop", [&lifecycle_notifier] {
                 sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {
                     return lifecycle_notifier.local().unregister_subscriber(&controller);
                 }).get();
                 sl_controller.invoke_on_all(&qos::service_level_controller::drain).get();
-            });
-
-            auto stop_view_update_generator = defer_verbose_shutdown("view update generator", [] {
-                view_update_generator.stop().get();
             });
 
             auto do_drain = defer_verbose_shutdown("local storage", [&ss] {
@@ -1951,6 +1950,12 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             startlog.info("Signal received; shutting down");
 	    // At this point, all objects destructors and all shutdown hooks registered with defer() are executed
           } catch (const sleep_aborted&) {
+            startlog.info("Startup interrupted");
+            // This happens when scylla gets SIGINT in the middle of join_cluster(), so
+            // just ignore it and exit normally
+            _exit(0);
+            return 0;
+          } catch (const abort_requested_exception&) {
             startlog.info("Startup interrupted");
             // This happens when scylla gets SIGINT in the middle of join_cluster(), so
             // just ignore it and exit normally
