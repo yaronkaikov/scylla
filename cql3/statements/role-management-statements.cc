@@ -127,11 +127,22 @@ static sstring escape_for_regex(const sstring& text) {
     return std::regex_replace(text.c_str(), escape_re, R"(\$&)");
 }
 
+static bool is_password_empty(const sstring& password) {
+    // Empty passwords are stored as single char(-1) (&nbsp), NOT as empty strings.
+    //
+    // see cql3/cql.g, and search "ugly hack". we use an ugly hack to return
+    // empty string literals using string with a single char(-1)
+    //
+    // please note, we can NOT compare password[0] with -1, as on aarch64
+    // platforms, `char` is unsigned by default. so, if password is "empty",
+    // the value of password[0] would be 255.
+    return password.size() == 1 && password[0] == static_cast<char>(-1);
+}
+
 /// Removes single-quoted plaintext passwords.
 static void sanitize_audit_info_password(audit::audit_info* ai, const sstring& raw_password) {
     sstring password;
-    // Empty passwords are stored as single char(-1) (&nbsp), NOT as empty strings.
-    if ((raw_password.size() == 1 && raw_password[0] != -1) || raw_password.size() > 1) {
+    if (!is_password_empty(raw_password)) {
         // Password needs escaping to be searchable literally:
         password = escape_for_regex(raw_password);
     }
@@ -149,8 +160,7 @@ static void sanitize_audit_info_options(audit::audit_info* ai, const std::map<ss
             continue;
         }
         sstring password;
-        // Empty passwords may be stored as single char(-1) (&nbsp), NOT as empty strings.
-        if ((v.size() == 1 && v[0] != -1) || v.size() > 1) {
+        if (!is_password_empty(v)) {
             // Password needs escaping to be searchable literally:
             password = escape_for_regex(v);
         }
