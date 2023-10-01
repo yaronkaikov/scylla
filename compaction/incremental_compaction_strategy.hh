@@ -53,13 +53,13 @@ public:
     friend class incremental_compaction_strategy;
 };
 
-using sstable_run_and_length = std::pair<sstables::sstable_run, uint64_t>;
-using sstable_run_bucket_and_length = std::pair<std::vector<sstables::sstable_run>, uint64_t>;
+using sstable_run_and_length = std::pair<sstables::frozen_sstable_run, uint64_t>;
+using sstable_run_bucket_and_length = std::pair<std::vector<sstables::frozen_sstable_run>, uint64_t>;
 
 class incremental_compaction_strategy : public compaction_strategy_impl {
     incremental_compaction_strategy_options _options;
 
-    using size_bucket_t = std::vector<sstables::sstable_run>;
+    using size_bucket_t = std::vector<sstables::frozen_sstable_run>;
 
     static constexpr int32_t DEFAULT_MAX_FRAGMENT_SIZE_IN_MB = 1000;
     const sstring FRAGMENT_SIZE_OPTION = "sstable_size_in_mb";
@@ -68,34 +68,34 @@ class incremental_compaction_strategy : public compaction_strategy_impl {
     const sstring SPACE_AMPLIFICATION_GOAL_OPTION = "space_amplification_goal";
     std::optional<double> _space_amplification_goal;
 
-    static std::vector<sstable_run_and_length> create_run_and_length_pairs(const std::vector<sstables::sstable_run>& runs);
+    static std::vector<sstable_run_and_length> create_run_and_length_pairs(const std::vector<sstables::frozen_sstable_run>& runs);
 
-    static std::vector<std::vector<sstables::sstable_run>> get_buckets(const std::vector<sstables::sstable_run>& runs, const incremental_compaction_strategy_options& options);
+    static std::vector<std::vector<sstables::frozen_sstable_run>> get_buckets(const std::vector<sstables::frozen_sstable_run>& runs, const incremental_compaction_strategy_options& options);
 
-    std::vector<std::vector<sstables::sstable_run>> get_buckets(const std::vector<sstables::sstable_run>& runs) const {
+    std::vector<std::vector<sstables::frozen_sstable_run>> get_buckets(const std::vector<sstables::frozen_sstable_run>& runs) const {
         return get_buckets(runs, _options);
     }
 
-    std::vector<sstables::sstable_run>
-    most_interesting_bucket(std::vector<std::vector<sstables::sstable_run>> buckets, size_t min_threshold, size_t max_threshold);
+    std::vector<sstables::frozen_sstable_run>
+    most_interesting_bucket(std::vector<std::vector<sstables::frozen_sstable_run>> buckets, size_t min_threshold, size_t max_threshold);
 
-    uint64_t avg_size(std::vector<sstables::sstable_run>& runs) const;
+    uint64_t avg_size(std::vector<sstables::frozen_sstable_run>& runs) const;
 
-    static bool is_bucket_interesting(const std::vector<sstables::sstable_run>& bucket, size_t min_threshold);
+    static bool is_bucket_interesting(const std::vector<sstables::frozen_sstable_run>& bucket, size_t min_threshold);
 
-    bool is_any_bucket_interesting(const std::vector<std::vector<sstables::sstable_run>>& buckets, size_t min_threshold) const;
+    bool is_any_bucket_interesting(const std::vector<std::vector<sstables::frozen_sstable_run>>& buckets, size_t min_threshold) const;
 
     compaction_descriptor find_garbage_collection_job(const table_state& t, std::vector<size_bucket_t>& buckets);
 
-    static std::vector<shared_sstable> runs_to_sstables(std::vector<sstable_run> runs);
-    static std::vector<sstable_run> sstables_to_runs(std::vector<shared_sstable> sstables);
+    static std::vector<shared_sstable> runs_to_sstables(std::vector<frozen_sstable_run> runs);
+    static std::vector<frozen_sstable_run> sstables_to_runs(std::vector<shared_sstable> sstables);
     static void sort_run_bucket_by_first_key(size_bucket_t& bucket, size_t max_elements, const schema_ptr& schema);
 public:
     incremental_compaction_strategy() = default;
 
     incremental_compaction_strategy(const std::map<sstring, sstring>& options);
 
-    virtual compaction_descriptor get_sstables_for_compaction(table_state& t, strategy_control& control, std::vector<sstables::shared_sstable> candidates) override;
+    virtual compaction_descriptor get_sstables_for_compaction(table_state& t, strategy_control& control) override;
 
     virtual std::vector<compaction_descriptor> get_cleanup_compaction_jobs(table_state& t, std::vector<shared_sstable> candidates) const override;
 

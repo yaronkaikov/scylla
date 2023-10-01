@@ -29,11 +29,13 @@ incremental_backlog_tracker::calculate_sstables_backlog_contribution(const std::
     std::unordered_set<sstables::run_id> sstable_runs_contributing_backlog = {};
 
     if (!all.empty()) {
-      for (auto& bucket : incremental_compaction_strategy::get_buckets(boost::copy_range<std::vector<sstable_run>>(all | boost::adaptors::map_values), options)) {
+      auto freeze = [] (const sstable_run& run) { return make_lw_shared<const sstable_run>(run); };
+      for (auto& bucket : incremental_compaction_strategy::get_buckets(boost::copy_range<std::vector<frozen_sstable_run>>(all | boost::adaptors::map_values | boost::adaptors::transformed(freeze)), options)) {
         if (!incremental_compaction_strategy::is_bucket_interesting(bucket, threshold)) {
             continue;
         }
-        for (const sstable_run& run : bucket) {
+        for (const frozen_sstable_run& run_ptr : bucket) {
+            auto& run = *run_ptr;
             auto data_size = run.data_size();
             if (data_size > 0) {
                 total_backlog_bytes += data_size;
@@ -84,7 +86,8 @@ void incremental_backlog_tracker::replace_sstables(const std::vector<sstables::s
     auto backlog_calculation_result = incremental_backlog_tracker::backlog_calculation_result{};
     for (auto&& sst : new_ssts) {
     if (sst->data_size() > 0) {
-        all[sst->run_identifier()].insert(sst);
+        // note: we don't expect failed insertions since each sstable will be inserted once
+        (void)all[sst->run_identifier()].insert(sst);
         total_bytes += sst->data_size();
         // Deduce threshold from the last SSTable added to the set
         threshold = sst->get_schema()->min_compaction_threshold();

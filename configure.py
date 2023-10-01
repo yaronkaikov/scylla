@@ -19,30 +19,11 @@ tempfile.tempdir = f"{outdir}/tmp"
 
 configure_args = str.join(' ', [shlex.quote(x) for x in sys.argv[1:] if not x.startswith('--out=')])
 
-if os.path.exists('/etc/os-release'):
-    for line in open('/etc/os-release'):
-        key, _, value = line.partition('=')
-        value = value.strip().strip('"')
-        if key == 'ID':
-            os_ids = [value]
-        if key == 'ID_LIKE':
-            os_ids += value.split(' ')
-        if key == 'VERSION_ID':
-            os_version = value
-    if not os_ids:
-        os_ids = ['linux']  # default ID per os-release(5)
-else:
-    os_ids = ['unknown']
-
-distro_extra_cflags = ''
-distro_extra_ldflags = ''
-distro_extra_cmake_args = []
 employ_ld_trickery = True
 
 # distro-specific setup
 def distro_setup_nix():
-    global os_ids, employ_ld_trickery
-    os_ids = ['linux']
+    global employ_ld_trickery
     employ_ld_trickery = False
 
 if os.environ.get('NIX_CC'):
@@ -64,10 +45,30 @@ node_exporter_filename = subprocess.run('./install-dependencies.sh --print-node-
 node_exporter_dirname = os.path.basename(node_exporter_filename).rstrip('.tar.gz')
 
 
+def get_os_ids():
+    if os.environ.get('NIX_CC'):
+        return ['linux']
+
+    if not os.path.exists('/etc/os-release'):
+        return ['unknown']
+
+    os_ids = []
+    for line in open('/etc/os-release'):
+        key, _, value = line.partition('=')
+        value = value.strip().strip('"')
+        if key == 'ID':
+            os_ids = [value]
+        if key == 'ID_LIKE':
+            os_ids += value.split(' ')
+    if os_ids:
+        return os_ids
+    return ['linux']  # default ID per os-release(5)
+
+
 def pkgname(name):
     if name in i18n_xlat:
         dict = i18n_xlat[name]
-        for id in os_ids:
+        for id in get_os_ids():
             if id in dict:
                 return dict[id]
     return name
@@ -124,13 +125,8 @@ def try_compile(compiler, source='', flags=[]):
     return try_compile_and_link(compiler, source, flags=flags + ['-c'])
 
 
-def ensure_tmp_dir_exists():
-    if not os.path.exists(tempfile.tempdir):
-        os.makedirs(tempfile.tempdir)
-
-
 def try_compile_and_link(compiler, source='', flags=[], verbose=False):
-    ensure_tmp_dir_exists()
+    os.makedirs(tempfile.tempdir, exist_ok=True)
     with tempfile.NamedTemporaryFile() as sfile:
         ofd, ofile = tempfile.mkstemp()
         os.close(ofd)
@@ -274,7 +270,7 @@ def find_headers(repodir, excluded_dirs):
     return sorted(headers)
 
 
-def generate_compdb(compdb, buildfile, modes):
+def generate_compdb(compdb, ninja, buildfile, modes):
     # per-mode compdbs are built by taking the relevant entries from the
     # output of "ninja -t compdb" and combining them with the CMake-made
     # compdbs for Seastar in the relevant mode.
@@ -284,7 +280,7 @@ def generate_compdb(compdb, buildfile, modes):
     #   the same source file usually confuse indexers
     # - it contains lots of irrelevant entries (for linker invocations,
     #   header-only compilations, etc.)
-    ensure_tmp_dir_exists()
+    os.makedirs(tempfile.tempdir, exist_ok=True)
     with tempfile.NamedTemporaryFile() as ninja_compdb:
         subprocess.run([ninja, '-f', buildfile, '-t', 'compdb'], stdout=ninja_compdb.file.fileno())
         ninja_compdb.file.flush()
@@ -377,6 +373,26 @@ def check_for_lz4(cxx, cflags):
         '''), flags=cflags.split()):
         print('Installed lz4-devel is too old. Please upgrade it to r129 / v1.73 and up')
         sys.exit(1)
+
+
+def thrift_uses_boost_share_ptr():
+    # thrift version detection, see #4538
+    proc_res = subprocess.run(["thrift", "-version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc_res_output = proc_res.stdout.decode("utf-8")
+    if proc_res.returncode != 0 and not re.search(r'^Thrift version', proc_res_output):
+        raise Exception("Thrift compiler must be missing: {}".format(proc_res_output))
+
+    thrift_version = proc_res_output.split(" ")[-1]
+    thrift_boost_versions = ["0.{}.".format(n) for n in range(1, 11)]
+    return any(filter(thrift_version.startswith, thrift_boost_versions))
+
+
+def find_ninja():
+    ninja = find_executable('ninja') or find_executable('ninja-build')
+    if ninja:
+        return ninja
+    print('Ninja executable (ninja or ninja-build) not found on PATH\n')
+    sys.exit(1)
 
 
 modes = {
@@ -1336,6 +1352,7 @@ idls = ['idl/gossip_digest.idl.hh',
         'idl/position_in_partition.idl.hh',
         'idl/experimental/broadcast_tables_lang.idl.hh',
         'idl/storage_service.idl.hh',
+        'idl/join_node.idl.hh',
         'idl/utils.idl.hh',
         ]
 
@@ -1695,19 +1712,19 @@ forced_ldflags += '--build-id=sha1,'
 
 forced_ldflags += f'--dynamic-linker={dynamic_linker}'
 
-args.user_ldflags = forced_ldflags + ' ' + args.user_ldflags
+user_ldflags = forced_ldflags + ' ' + args.user_ldflags
 
-args.user_cflags += f" -ffile-prefix-map={curdir}=."
+user_cflags = args.user_cflags + f" -ffile-prefix-map={curdir}=."
 
 if args.target != '':
-    args.user_cflags += ' -march=' + args.target
+    user_cflags += ' -march=' + args.target
 
 profile_modes = {}
 for mode in modes:
     # Those flags are passed not only to Scylla objects, but also to libraries
     # that we compile ourselves.
-    modes[mode]['lib_cflags'] = args.user_cflags
-    modes[mode]['lib_ldflags'] = args.user_ldflags + linker_flags
+    modes[mode]['lib_cflags'] = user_cflags
+    modes[mode]['lib_ldflags'] = user_ldflags + linker_flags
     modes[mode]['lib_ldflags'] += " " + modes[mode]['cxx_ld_flags'] # HACK
     modes[mode]['has_lto'] = False
 
@@ -1858,7 +1875,7 @@ def configure_seastar(build_dir, mode, mode_config):
         '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON',
         '-DSeastar_SCHEDULING_GROUPS_COUNT=18',
         '-DSeastar_IO_URING=OFF', # io_uring backend is not stable enough
-    ] + distro_extra_cmake_args
+    ]
 
     if args.stack_guards is not None:
         stack_guards = 'ON' if args.stack_guards else 'OFF'
@@ -1907,11 +1924,6 @@ if not args.dist_only:
     for mode, mode_config in build_modes.items():
         configure_seastar(outdir, mode, mode_config)
 
-ninja = find_executable('ninja') or find_executable('ninja-build')
-if not ninja:
-    print('Ninja executable (ninja or ninja-build) not found on PATH\n')
-    sys.exit(1)
-
 def query_seastar_flags(pc_file, link_static_cxx=False):
     use_shared_libs = modes[mode]['build_seastar_shared_libs']
     if use_shared_libs:
@@ -1952,7 +1964,7 @@ abseil_pkgs = [
 
 pkgs += abseil_pkgs
 
-args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
+user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
                  ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lldap -llber',
                  # Must link with static version of libzstd, since
@@ -1966,24 +1978,16 @@ libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-l
 args.user_cflags += " " + pkg_config('p11-kit-1', '--cflags')
 
 if not args.staticboost:
-    args.user_cflags += ' -DBOOST_TEST_DYN_LINK'
+    user_cflags += ' -DBOOST_TEST_DYN_LINK'
 
-# thrift version detection, see #4538
-proc_res = subprocess.run(["thrift", "-version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-proc_res_output = proc_res.stdout.decode("utf-8")
-if proc_res.returncode != 0 and not re.search(r'^Thrift version', proc_res_output):
-    raise Exception("Thrift compiler must be missing: {}".format(proc_res_output))
-
-thrift_version = proc_res_output.split(" ")[-1]
-thrift_boost_versions = ["0.{}.".format(n) for n in range(1, 11)]
-if any(filter(thrift_version.startswith, thrift_boost_versions)):
-    args.user_cflags += ' -DTHRIFT_USES_BOOST'
+if thrift_uses_boost_share_ptr():
+    user_cflags += ' -DTHRIFT_USES_BOOST'
 
 for pkg in pkgs:
-    args.user_cflags += ' ' + pkg_config(pkg, '--cflags')
+    user_cflags += ' ' + pkg_config(pkg, '--cflags')
     libs += ' ' + pkg_config(pkg, '--libs')
-user_cflags = args.user_cflags + ' -fvisibility=hidden'
-user_ldflags = args.user_ldflags + ' -fvisibility=hidden'
+user_cflags += ' -fvisibility=hidden'
+user_ldflags += ' -fvisibility=hidden'
 if args.staticcxx:
     user_ldflags += " -static-libstdc++"
 if args.staticthrift:
@@ -1994,6 +1998,7 @@ else:
 kmip_lib_ver = '1.9.2a';
 
 def kmiplib():
+    os_ids = get_os_ids()
     for id in os_ids:
         if id in { 'centos', 'fedora', 'rhel' }:
             return 'rhel84'
@@ -2016,21 +2021,20 @@ user_cflags += f' -I{kmipc_dir}/include -DHAVE_KMIP'
 
 os.makedirs(outdir, exist_ok=True)
 
-ragel_exec = args.ragel_exec
-
-
 def write_build_file(f,
                      arch,
+                     ninja,
                      scylla_product,
                      scylla_version,
-                     scylla_release):
+                     scylla_release,
+                     args):
     f.write(textwrap.dedent('''\
         configure_args = {configure_args}
         builddir = {outdir}
         cxx = {cxx}
-        cxxflags = --std=gnu++20 {user_cflags} {distro_extra_cflags} {warnings} {defines}
-        ldflags = {linker_flags} {user_ldflags} {distro_extra_ldflags}
-        ldflags_build = {linker_flags} {distro_extra_ldflags}
+        cxxflags = --std=gnu++20 {user_cflags} {warnings} {defines}
+        ldflags = {linker_flags} {user_ldflags}
+        ldflags_build = {linker_flags}
         libs = {libs}
         pool link_pool
             depth = {link_pool_depth}
@@ -2040,7 +2044,7 @@ def write_build_file(f,
             command = echo -e $text > $out
             description = GEN $out
         rule swagger
-            command = {args.seastar_path}/scripts/seastar-json2code.py --create-cc -f $in -o $out
+            command = {seastar_path}/scripts/seastar-json2code.py --create-cc -f $in -o $out
             description = SWAGGER $out
         rule serializer
             command = {python} ./idl-compiler.py --ns ser -f $in -o $out
@@ -2100,7 +2104,21 @@ def write_build_file(f,
           pool = console
         rule merge_profdata
           command = llvm-profdata merge $in -output=$out
-        ''').format(**globals()))
+        ''').format(configure_args=configure_args,
+                    outdir=outdir,
+                    cxx=args.cxx,
+                    user_cflags=user_cflags,
+                    warnings=warnings,
+                    defines=defines,
+                    linker_flags=linker_flags,
+                    user_ldflags=user_ldflags,
+                    libs=libs,
+                    link_pool_depth=link_pool_depth,
+                    python=args.python,
+                    seastar_path=args.seastar_path,
+                    ninja=ninja,
+                    ragel_exec=args.ragel_exec))
+
     for binary in sorted(wasms):
         src = wasm_deps[binary]
         wasm = binary[:-4] + '.wasm'
@@ -2638,11 +2656,14 @@ def write_build_file(f,
 check_for_minimal_compiler_version(args.cxx)
 check_for_boost(args.cxx)
 check_for_lz4(args.cxx, args.user_cflags)
+ninja = find_ninja()
 with open(buildfile, 'w') as f:
     arch = platform.machine()
     write_build_file(f,
                      arch,
+                     ninja,
                      scylla_product,
                      scylla_version,
-                     scylla_release)
-generate_compdb('compile_commands.json', buildfile, selected_modes)
+                     scylla_release,
+                     args)
+generate_compdb('compile_commands.json', ninja, buildfile, selected_modes)

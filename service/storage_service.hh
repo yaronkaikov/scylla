@@ -93,6 +93,12 @@ class storage_service;
 class storage_proxy;
 class migration_manager;
 class raft_group0;
+class group0_info;
+
+struct join_node_request_params;
+struct join_node_request_result;
+struct join_node_response_params;
+struct join_node_response_result;
 
 enum class disk_error { regular, commit };
 
@@ -188,7 +194,7 @@ public:
 
     // Needed by distributed<>
     future<> stop();
-    void init_messaging_service(sharded<db::system_distributed_keyspace>& sys_dist_ks);
+    void init_messaging_service(sharded<db::system_distributed_keyspace>& sys_dist_ks, bool raft_topology_change_enabled);
     future<> uninit_messaging_service();
 
     future<> load_tablet_metadata();
@@ -236,6 +242,9 @@ private:
         return _batchlog_manager;
     }
 
+    friend struct ::node_ops_ctl;
+public:
+
     const gms::gossiper& gossiper() const noexcept {
         return _gossiper;
     };
@@ -243,9 +252,6 @@ private:
     gms::gossiper& gossiper() noexcept {
         return _gossiper;
     };
-
-    friend struct ::node_ops_ctl;
-public:
 
     locator::effective_replication_map_factory& get_erm_factory() noexcept {
         return _erm_factory;
@@ -337,7 +343,7 @@ public:
      * API.
      * \see init_server_without_the_messaging_service_part
      */
-    future<> init_messaging_service_part(sharded<db::system_distributed_keyspace>& sys_dist_ks);
+    future<> init_messaging_service_part(sharded<db::system_distributed_keyspace>& sys_dist_ks, bool raft_topology_change_enabled);
     /*!
      * \brief Uninit the messaging service part of the service.
      */
@@ -806,24 +812,37 @@ private:
 
     future<raft_topology_cmd_result> raft_topology_cmd_handler(sharded<db::system_distributed_keyspace>& sys_dist_ks, raft::term_t term, uint64_t cmd_index, const raft_topology_cmd& cmd);
 
-    future<> raft_bootstrap(raft::server&);
+    future<> raft_initialize_discovery_leader(raft::server&, const join_node_request_params& params);
     future<> raft_decomission();
     future<> raft_removenode(locator::host_id host_id, std::list<locator::host_id_or_endpoint> ignore_nodes_params);
-    future<> raft_replace(raft::server&, raft::server_id, gms::inet_address);
     future<> raft_rebuild(sstring source_dc);
     future<> raft_check_and_repair_cdc_streams();
     future<> update_topology_with_local_metadata(raft::server&);
 
+public:
     // This is called on all nodes for each new command received through raft
     // raft_group0_client::_read_apply_mutex must be held
     // Precondition: the topology mutations were already written to disk; the function only transitions the in-memory state machine.
+    // Public for `reload_raft_topology_state` REST API.
     future<> topology_transition();
+private:
     // load topology state machine snapshot into memory
     // raft_group0_client::_read_apply_mutex must be held
     future<> topology_state_load();
     // Applies received raft snapshot to local state machine persistent storage
     // raft_group0_client::_read_apply_mutex must be held
     future<> merge_topology_snapshot(raft_topology_snapshot snp);
+
+    canonical_mutation build_mutation_from_join_params(const join_node_request_params& params, service::group0_guard& guard);
+
+    future<join_node_request_result> join_node_request_handler(join_node_request_params params);
+    future<join_node_response_result> join_node_response_handler(join_node_response_params params);
+    shared_promise<> _join_node_request_done;
+    shared_promise<> _join_node_group0_started;
+    shared_promise<> _join_node_response_done;
+    semaphore _join_node_response_handler_mutex{1};
+
+    friend class join_node_rpc_handshaker;
 };
 
 }

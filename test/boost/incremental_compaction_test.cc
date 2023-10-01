@@ -50,6 +50,12 @@ public:
     bool has_ongoing_compaction(table_state& table_s) const noexcept override {
         return _has_ongoing_compaction;
     }
+    virtual std::vector<sstables::shared_sstable> candidates(table_state& t) const override {
+        return boost::copy_range<std::vector<sstables::shared_sstable>>(*t.main_sstable_set().all());
+    }
+    virtual std::vector<sstables::frozen_sstable_run> candidates_as_runs(table_state& t) const override {
+        return t.main_sstable_set().all_sstable_runs();
+    }
 };
 
 static std::unique_ptr<strategy_control> make_strategy_control_for_test(bool has_ongoing_compaction) {
@@ -132,9 +138,8 @@ SEASTAR_TEST_CASE(incremental_compaction_test) {
         };
 
         auto do_compaction = [&] (size_t expected_input, size_t expected_output) -> std::vector<shared_sstable> {
-            auto input_ssts = std::vector<shared_sstable>(sstables.begin(), sstables.end());
             auto control = make_strategy_control_for_test(false);
-            auto desc = cs.get_sstables_for_compaction(cf.as_table_state(), *control, std::move(input_ssts));
+            auto desc = cs.get_sstables_for_compaction(cf.as_table_state(), *control);
 
             // nothing to compact, move on.
             if (desc.sstables.empty()) {
@@ -252,7 +257,7 @@ SEASTAR_THREAD_TEST_CASE(incremental_compaction_sag_test) {
             auto& table_s = _cf.as_table_state();
             auto control = make_strategy_control_for_test(false);
             for (;;) {
-                auto desc = _ics.get_sstables_for_compaction(table_s, *control, in_strategy_sstables(table_s));
+                auto desc = _ics.get_sstables_for_compaction(table_s, *control);
                 // no more jobs, bailing out...
                 if (desc.sstables.empty()) {
                     break;
@@ -339,7 +344,8 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
         auto gc_before = gc_clock::now() - s->gc_grace_seconds();
         // Asserts that two keys are equal to within a positive delta
         sstable_run run;
-        run.insert(sst);
+        // FIXME: can we ignore return value of insert()?
+        (void)run.insert(sst);
         BOOST_REQUIRE(std::fabs(run.estimate_droppable_tombstone_ratio(gc_before) - expired) <= 0.1);
 
         auto cd = sstables::compaction_descriptor({ sst });
@@ -359,7 +365,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             options.emplace("tombstone_compaction_interval", "1");
             sleep(2s).get();
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
-            auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *control, {sst});
+            auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *control);
             BOOST_REQUIRE(descriptor.sstables.size() == 1);
             BOOST_REQUIRE(descriptor.sstables.front() == sst);
         }
@@ -369,7 +375,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             std::map<sstring, sstring> options;
             options.emplace("tombstone_threshold", "0.5f");
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
-            auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *control, { sst });
+            auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *control);
             BOOST_REQUIRE(descriptor.sstables.size() == 0);
         }
         // sstable which was recently created won't be included due to min interval
@@ -378,7 +384,7 @@ SEASTAR_TEST_CASE(basic_garbage_collection_test) {
             options.emplace("tombstone_compaction_interval", "3600");
             auto cs = sstables::make_compaction_strategy(sstables::compaction_strategy_type::incremental, options);
             sstables::test(sst).set_data_file_write_time(db_clock::now());
-            auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *control, { sst });
+            auto descriptor = cs.get_sstables_for_compaction(cf.as_table_state(), *control);
             BOOST_REQUIRE(descriptor.sstables.size() == 0);
         }
     });

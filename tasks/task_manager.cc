@@ -87,7 +87,7 @@ is_abortable task_manager::task::impl::is_abortable() const noexcept {
 }
 
 is_internal task_manager::task::impl::is_internal() const noexcept {
-    return is_internal::no;
+    return tasks::is_internal(bool(_parent_id));
 }
 
 future<> task_manager::task::impl::abort() noexcept {
@@ -248,6 +248,10 @@ const task_manager::foreign_task_vector& task_manager::task::get_children() cons
 
 bool task_manager::task::is_complete() const noexcept {
     return _impl->is_complete();
+}
+
+void task_manager::task::release_resources() noexcept {
+    return _impl->release_resources();
 }
 
 task_manager::module::module(task_manager& tm, std::string name) noexcept : _tm(tm), _name(std::move(name)) {

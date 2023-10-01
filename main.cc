@@ -175,9 +175,9 @@ struct convert<::object_storage_endpoint_param> {
         if (node["aws_region"]) {
             ep.config.aws.emplace();
             ep.config.aws->region = node["aws_region"].as<std::string>();
-            ep.config.aws->key = node["aws_key"].as<std::string>();
-            ep.config.aws->secret = node["aws_secret"].as<std::string>();
-            ep.config.aws->token = node["aws_token"].as<std::string>("");
+            ep.config.aws->access_key_id = node["aws_access_key_id"].as<std::string>();
+            ep.config.aws->secret_access_key = node["aws_secret_access_key"].as<std::string>();
+            ep.config.aws->session_token = node["aws_session_token"].as<std::string>("");
         }
         return true;
     }
@@ -1391,13 +1391,19 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             auto stop_storage_service = defer_verbose_shutdown("storage_service", [&] {
                 ss.stop().get();
             });
+
+            api::set_server_storage_service(ctx, ss, group0_client).get();
+            auto stop_ss_api = defer_verbose_shutdown("storage service API", [&ctx] {
+                api::unset_server_storage_service(ctx).get();
+            });
+
             supervisor::notify("initializing virtual tables");
             smp::invoke_on_all([&] {
                 return db::initialize_virtual_tables(db, ss, gossiper, raft_gr, sys_ks, *cfg);
             }).get();
 
             supervisor::notify("starting forward service");
-            forward_service.start(std::ref(messaging), std::ref(proxy), std::ref(db), std::ref(token_metadata)).get();
+            forward_service.start(std::ref(messaging), std::ref(proxy), std::ref(db), std::ref(token_metadata), std::ref(stop_signal.as_sharded_abort_source())).get();
             auto stop_forward_service_handlers = defer_verbose_shutdown("forward service", [&forward_service] {
                 forward_service.stop().get();
             });
@@ -1615,7 +1621,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             supervisor::notify("starting storage service", true);
-            ss.local().init_messaging_service_part(sys_dist_ks).get();
+            ss.local().init_messaging_service_part(sys_dist_ks, raft_topology_change_enabled).get();
             auto stop_ss_msg = defer_verbose_shutdown("storage service messaging", [&ss] {
                 ss.local().uninit_messaging_service_part().get();
             });
@@ -1624,7 +1630,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             auto stop_messaging_api = defer_verbose_shutdown("messaging service API", [&ctx] {
                 api::unset_server_messaging_service(ctx).get();
             });
-            api::set_server_storage_service(ctx, ss, gossiper, sys_ks).get();
             api::set_server_repair(ctx, repair).get();
             auto stop_repair_api = defer_verbose_shutdown("repair API", [&ctx] {
                 api::unset_server_repair(ctx).get();
@@ -1932,11 +1937,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             auto do_drain = defer_verbose_shutdown("local storage", [&ss] {
                 ss.local().drain_on_shutdown().get();
-            });
-
-            // Signal shutdown to the forward service before draining the messaging service.
-            auto shutdown_forward_service = defer_verbose_shutdown("forward service", [&forward_service] {
-                forward_service.invoke_on_all(&service::forward_service::shutdown).get();
             });
 
             auto drain_view_builder = defer_verbose_shutdown("view builder ops", [cfg] {
