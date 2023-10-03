@@ -68,6 +68,11 @@ Table keys are used for encrypting SSTables. Depending on your key provider, thi
 
 .. _ear-key-providers:
 
+.. note::
+
+   Encrypted SStables undergo a regular backup procedure. Ensure you keep your 
+   encryption key available in case you need to restore from backup.
+
 Key Providers
 ----------------------
 
