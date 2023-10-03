@@ -270,11 +270,21 @@ public:
         , _per_thread_kms_host_cache(smp::count)
         , _per_thread_global_user_extension(smp::count)
         , _cfg(cfg)
-        , _qp(&services.find<cql3::query_processor>())
-        , _mm(&services.find<service::migration_manager>())
-        , _db(&services.find<replica::database>())
-        , _ss(&services.find<service::storage_service>())
+        , _qp(find_or_null<cql3::query_processor>(services))
+        , _mm(find_or_null<service::migration_manager>(services))
+        , _db(find_or_null<replica::database>(services))
+        , _ss(find_or_null<service::storage_service>(services))
     {}
+
+    template<typename T>
+    static sharded<T>* find_or_null(const service_set& services) {
+        try {
+            return std::addressof(services.find<T>());
+        } catch (std::out_of_range&) {
+            // TODO: would be great if we could verify we are in tool mode here.
+            return nullptr;
+        }
+    }
 
     shared_ptr<key_provider> get_provider(const options& map) override {
         opt_wrapper opts(map);
@@ -384,21 +394,35 @@ public:
             _cfg_encryption_key = std::move(k);
         });
     }
+    /**
+     * This looks like checking too late, but since these are only used by 
+     * replicated provider, they will be checked very early anyway, unless
+     * running tool mode, in which case they don't exist.
+     */
+    template<typename T>
+    T& check_service_object(T* t) const {
+        if (t == nullptr) {
+            throw std::runtime_error(fmt::format("Service {} not registered", typeid(T).name()));
+        }
+        return *t;
+    }
     distributed<cql3::query_processor>& get_query_processor() const override {
-        return *_qp;
+        return check_service_object(_qp);
     }
     distributed<service::storage_service>& get_storage_service() const override {
-        return *_ss;
+        return check_service_object(_ss);
     }
     distributed<replica::database>& get_database() const override {
-        return *_db;
+        return check_service_object(_db);
     }
     distributed<service::migration_manager>& get_migration_manager() const override {
-        return *_mm;
+        return check_service_object(_mm);
     }
 
     future<> start() override {
-        return replicated_key_provider_factory::on_started(get_database().local(), get_migration_manager().local());
+        if (_qp && _ss && _db && _mm) {
+            co_await replicated_key_provider_factory::on_started(get_database().local(), get_migration_manager().local());
+        }
     }
     future<> stop() override {
         return smp::invoke_on_all([this]() -> future<> {
