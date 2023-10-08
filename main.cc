@@ -664,7 +664,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     sharded<service::storage_service> ss;
     sharded<service::migration_manager> mm;
     sharded<tasks::task_manager> task_manager;
-    api::http_context ctx(db, proxy, load_meter, token_metadata, task_manager);
+    api::http_context ctx(db, load_meter, token_metadata, task_manager);
     httpd::http_server_control prometheus_server;
     std::optional<utils::directories> dirs = {};
     sharded<gms::feature_service> feature_service;
@@ -858,6 +858,14 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 ctx.api_doc.append("/", 1);
             }
             const auto hinted_handoff_enabled = cfg->hinted_handoff_enabled();
+
+            auto api_addr = utils::resolve(cfg->api_address || cfg->rpc_address, family, preferred).get0();
+            supervisor::notify("starting API server");
+            ctx.http_server.start("API").get();
+            auto stop_http_server = defer_verbose_shutdown("API server", [&ctx] {
+                ctx.http_server.stop().get();
+            });
+            api::set_server_init(ctx).get();
 
             supervisor::notify("starting prometheus API server");
             std::any stop_prometheus;
@@ -1100,6 +1108,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             // #293 - do not stop anything
             // engine().at_exit([&proxy] { return proxy.stop(); });
+            api::set_server_storage_proxy(ctx, proxy).get();
+            auto stop_sp_api = defer_verbose_shutdown("storage proxy API", [&ctx] {
+                api::unset_server_storage_proxy(ctx).get();
+            });
 
             static sharded<cql3::cql_config> cql_config;
             cql_config.start(std::ref(*cfg)).get();
@@ -1125,21 +1137,15 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // });
 
             supervisor::notify("creating tracing");
-            tracing::tracing::create_tracing("trace_keyspace_helper").get();
-            auto destroy_tracing = defer_verbose_shutdown("tracing instance", [] {
-                tracing::tracing::tracing_instance().stop().get();
+            sharded<tracing::tracing>& tracing = tracing::tracing::tracing_instance();
+            tracing.start(sstring("trace_keyspace_helper")).get();
+            auto destroy_tracing = defer_verbose_shutdown("tracing instance", [&tracing] {
+                tracing.stop().get();
             });
             audit::audit::create_audit(*cfg).handle_exception([&] (auto&& e) {
                 startlog.error("audit creation failed: {}", e);
             }).get();
 
-            auto api_addr = utils::resolve(cfg->api_address || cfg->rpc_address, family, preferred).get0();
-            supervisor::notify("starting API server");
-            ctx.http_server.start("API").get();
-            auto stop_http_server = defer_verbose_shutdown("API server", [&ctx] {
-                ctx.http_server.stop().get();
-            });
-            api::set_server_init(ctx).get();
             with_scheduling_group(maintenance_scheduling_group, [&] {
                 return ctx.http_server.listen(socket_address{api_addr, cfg->api_port()});
             }).get();
@@ -1504,31 +1510,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 });
             }).get();
 
-            // If the same sstable is shared by several shards, it cannot be
-            // deleted until all shards decide to compact it. So we want to
-            // start these compactions now. Note we start compacting only after
-            // all sstables in this CF were loaded on all shards - otherwise
-            // we will have races between the compaction and loading processes
-            // We also want to trigger regular compaction on boot.
-
-            // FIXME: temporary as this code is being replaced. I am keeping the scheduling
-            // group that was effectively used in the bulk of it (compaction). Soon it will become
-            // streaming
-
-            db.invoke_on_all([] (replica::database& db) {
-                db.get_tables_metadata().for_each_table([] (table_id, lw_shared_ptr<replica::table> table) {
-                    replica::column_family& cf = *table;
-                    cf.trigger_compaction();
-                });
-            }).get();
             api::set_server_gossip(ctx, gossiper).get();
             api::set_server_snitch(ctx, snitch).get();
             auto stop_snitch_api = defer_verbose_shutdown("snitch API", [&ctx] {
                 api::unset_server_snitch(ctx).get();
-            });
-            api::set_server_storage_proxy(ctx, ss).get();
-            auto stop_sp_api = defer_verbose_shutdown("storage proxy API", [&ctx] {
-                api::unset_server_storage_proxy(ctx).get();
             });
             api::set_server_load_sstable(ctx, sys_ks).get();
             auto stop_cf_api = defer_verbose_shutdown("column family API", [&ctx] {
@@ -1721,9 +1706,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }).get();
 
             supervisor::notify("starting tracing");
-            tracing::tracing::start_tracing(qp, mm).get();
-            auto stop_tracing = defer_verbose_shutdown("tracing", [] {
-                tracing::tracing::stop_tracing().get();
+            tracing.invoke_on_all(&tracing::tracing::start, std::ref(qp), std::ref(mm)).get();
+            auto stop_tracing = defer_verbose_shutdown("tracing", [&tracing] {
+                tracing.invoke_on_all(&tracing::tracing::shutdown).get();
             });
 
             startlog.info("SSTable data integrity checker is {}.",
@@ -1810,7 +1795,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             supervisor::notify("allow replaying hints");
             proxy.invoke_on_all(&service::storage_proxy::allow_replaying_hints).get();
 
-            api::set_hinted_handoff(ctx, gossiper).get();
+            api::set_hinted_handoff(ctx, proxy).get();
             auto stop_hinted_handoff_api = defer_verbose_shutdown("hinted handoff API", [&ctx] {
                 api::unset_hinted_handoff(ctx).get();
             });

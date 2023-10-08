@@ -2514,8 +2514,14 @@ SEASTAR_TEST_CASE(test_exception_safety_of_update_from_memtable) {
         orig.push_back(muts[3]);
         orig.push_back(muts[4]);
 
+        bool succeeded = false;
+
         memtable_snapshot_source underlying(s.schema());
         memory::with_allocation_failures([&] {
+            if (succeeded) {
+                return;
+            }
+
             for (auto&& m : orig) {
                 memory::scoped_critical_alloc_section dfg;
                 underlying.apply(m);
@@ -2573,6 +2579,9 @@ SEASTAR_TEST_CASE(test_exception_safety_of_update_from_memtable) {
             }), *mt).get();
 
             d.cancel();
+
+            memory::scoped_critical_alloc_section dfg;
+            succeeded = true;
 
             assert_that(cache.make_reader(cache.schema(), semaphore.make_permit()))
                 .produces(muts2)
@@ -4687,4 +4696,44 @@ SEASTAR_TEST_CASE(test_compact_range_tombstones_on_read) {
         BOOST_REQUIRE(tracker_stats.rows_compacted == 2);
         BOOST_REQUIRE(tracker_stats.rows_compacted_away == 2);
     });
+}
+
+// Reproduces #15278
+// Check that the semaphore's OOM kill doesn't send LSA allocating sections
+// into a tailspin, retrying the failing code, with increase reserves, which
+// of course doesn't necessarily help release pressure on the semaphore.
+SEASTAR_THREAD_TEST_CASE(test_cache_reader_semaphore_oom_kill) {
+    simple_schema s;
+    reader_concurrency_semaphore semaphore(100, 1, get_name(), std::numeric_limits<size_t>::max(), utils::updateable_value<uint32_t>(1),
+            utils::updateable_value<uint32_t>(1));
+    auto stop_semaphore = deferred_stop(semaphore);
+
+    cache_tracker tracker;
+    auto cache_mt = make_lw_shared<replica::memtable>(s.schema());
+    row_cache cache(s.schema(), snapshot_source_from_snapshot(cache_mt->as_data_source()), tracker);
+
+    auto pk = s.make_pkey(0);
+
+    mutation m(s.schema(), pk);
+    s.add_row(m, s.make_ckey(0), sstring(1024, '0'));
+    cache.populate(m);
+
+    auto pr = dht::partition_range::make_singular(pk);
+    tombstone_gc_state gc_state(nullptr);
+
+    BOOST_REQUIRE_EQUAL(semaphore.get_stats().total_reads_killed_due_to_kill_limit, 0);
+    auto kill_limit_before = 0;
+
+    // Check different amounts of memory consumed before the read, so the OOM kill is triggered in different places.
+    for (unsigned memory = 1; memory <= 512; memory *= 2) {
+        semaphore.set_resources({1, memory});
+        auto permit = semaphore.obtain_permit(s.schema().get(), "read", 0, db::no_timeout, {}).get();
+        auto create_reader_and_read_all = [&] {
+            auto rd = cache.make_reader(s.schema(), permit, pr, &gc_state);
+            auto close_rd = deferred_close(rd);
+            while (rd().get());
+        };
+        BOOST_REQUIRE_THROW(create_reader_and_read_all(), utils::memory_limit_reached);
+        BOOST_REQUIRE_EQUAL(semaphore.get_stats().total_reads_killed_due_to_kill_limit, ++kill_limit_before);
+    }
 }

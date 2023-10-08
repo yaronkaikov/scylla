@@ -94,11 +94,11 @@ class RESTClient(metaclass=ABCMeta):
 
     async def post(self, resource_uri: str, host: Optional[str] = None,
                    port: Optional[int] = None, params: Optional[Mapping[str, str]] = None,
-                   json: Mapping = None, timeout: Optional[float] = None) -> None:
+                   json: Optional[Mapping] = None, timeout: Optional[float] = None) -> None:
         await self._fetch("POST", resource_uri, host = host, port = port, params = params,
                           json = json, timeout = timeout)
 
-    async def put_json(self, resource_uri: str, data: Mapping, host: Optional[str] = None,
+    async def put_json(self, resource_uri: str, data: Optional[Mapping] = None, host: Optional[str] = None,
                        port: Optional[int] = None, params: Optional[dict[str, str]] = None,
                        response_type: Optional[str] = None, timeout: Optional[float] = None) -> Any:
         ret = await self._fetch("PUT", resource_uri, response_type = response_type, host = host,
@@ -107,7 +107,7 @@ class RESTClient(metaclass=ABCMeta):
 
     async def delete(self, resource_uri: str, host: Optional[str] = None,
                      port: Optional[int] = None, params: Optional[dict[str, str]] = None,
-                     json: Mapping = None) -> None:
+                     json: Optional[Mapping] = None) -> None:
         await self._fetch("DELETE", resource_uri, host = host, port = port, params = params,
                           json = json)
 
@@ -229,6 +229,28 @@ class ScyllaRESTAPIClient():
         """Set logger level"""
         assert level in ["debug", "info", "warning", "trace"]
         await self.client.post(f"/system/logger/{logger}?level={level}", host=node_ip)
+
+    async def flush_keyspace(self, node_ip: str, ks: str) -> None:
+        """Flush keyspace"""
+        await self.client.post(f"/storage_service/keyspace_flush/{ks}", host=node_ip)
+
+    async def load_new_sstables(self, node_ip: str, keyspace: str, table: str) -> None:
+        """Load sstables from upload directory"""
+        await self.client.post(f"/storage_service/sstables/{keyspace}?cf={table}", host=node_ip)
+
+    async def keyspace_flush(self, node_ip: str, keyspace: str, table: Optional[str] = None) -> None:
+        """Flush the specified or all tables in the keyspace"""
+        url = f"/storage_service/keyspace_flush/{keyspace}"
+        if table is not None:
+            url += "?cf={table}"
+        await self.client.post(url, host=node_ip)
+
+    async def keyspace_compaction(self, node_ip: str, keyspace: str, table: Optional[str] = None) -> None:
+        """Compact the specified or all tables in the keyspace"""
+        url = f"/storage_service/keyspace_compaction/{keyspace}"
+        if table is not None:
+            url += "?cf={table}"
+        await self.client.post(url, host=node_ip)
 
 
 class ScyllaMetrics:

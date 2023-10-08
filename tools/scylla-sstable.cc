@@ -215,18 +215,18 @@ std::optional<schema_with_source> try_load_schema_autodetect(const bpo::variable
     if (app_config.count("sstables")) {
         try {
             auto sst_path = std::filesystem::path(app_config["sstables"].as<std::vector<sstring>>().front());
-            auto ed = sstables::entry_descriptor::make_descriptor(sst_path);
+            auto [ed, ks, cf] = sstables::parse_path(sst_path);
             const auto sst_dir_path = std::filesystem::path(sst_path).remove_filename();
             std::filesystem::path data_dir_path;
             // Detect whether sstable is in root table directory, or in a sub-directory
             // The last component is "" due to the trailing "/" left by "remove_filename()" above.
             // So we need to go back 2 more, to find the supposed keyspace component.
-            if (ed.ks == std::prev(sst_dir_path.end(), 3)->native()) {
+            if (ks == std::prev(sst_dir_path.end(), 3)->native()) {
                 data_dir_path = sst_dir_path / ".." / "..";
             } else {
                 data_dir_path = sst_dir_path / ".." / ".." / "..";
             }
-            return schema_with_source{.schema = tools::load_schema_from_schema_tables(data_dir_path, ed.ks, ed.cf).get(),
+            return schema_with_source{.schema = tools::load_schema_from_schema_tables(data_dir_path, ks, cf).get(),
                 .source = "schema-tables",
                 .path = data_dir_path,
                 .obtained_from = format("sstable path ({})", sst_path)};
@@ -291,7 +291,7 @@ const std::vector<sstables::shared_sstable> load_sstables(schema_ptr schema, sst
         }
 
 
-        auto ed = sstables::entry_descriptor::make_descriptor(sst_path, schema->ks_name(), schema->cf_name());
+        auto ed = sstables::parse_path(sst_path, schema->ks_name(), schema->cf_name());
         const auto dir_path = sst_path.parent_path();
         data_dictionary::storage_options local;
         auto sst = sst_man.make_sstable(schema, dir_path.c_str(), local, ed.generation, sstables::sstable_state::normal, ed.version, ed.format);
@@ -2395,6 +2395,7 @@ class json_mutation_stream_parser {
     };
 
 private:
+    struct parsing_aborted : public std::exception { };
     class impl {
         queue<mutation_fragment_v2_opt> _queue;
         stream _stream;
@@ -2410,7 +2411,12 @@ private:
             , _thread([this] { _reader.Parse(_stream, _handler); })
         { }
         ~impl() {
-            _thread.join().get();
+            _queue.abort(std::make_exception_ptr(parsing_aborted{}));
+            try {
+                _thread.join().get();
+            } catch (...) {
+                sst_log.warn("json_mutation_stream_parser: parser thread exited with exception: {}", std::current_exception());
+            }
         }
         future<mutation_fragment_v2_opt> operator()() {
             return _queue.pop_eventually().handle_exception([this] (std::exception_ptr e) -> mutation_fragment_v2_opt {
@@ -2529,12 +2535,9 @@ const std::vector<operation_option> global_options {
     typed_option<sstring>("scylla-data-dir", "path to the scylla data dir (usually /var/lib/scylla/data), to read the schema tables from"),
 };
 
-static auto get_global_positional_options() {
-    static const std::vector<app_template::positional_option> options = {
-        {"sstables", bpo::value<std::vector<sstring>>(), "sstable(s) to process for operations that have sstable inputs, can also be provided as positional arguments", -1},
-    };
-    return &options;
-}
+const std::vector<operation_option> global_positional_options{
+    typed_option<std::vector<sstring>>("sstables", "sstable(s) to process for operations that have sstable inputs, can also be provided as positional arguments", -1),
+};
 
 const std::map<operation, operation_func> operations_with_func{
 /* dump-data */
@@ -2891,7 +2894,7 @@ $ scylla sstable validate /path/to/md-123456-big-Data.db /path/to/md-123457-big-
             .lsa_segment_pool_backend_size_mb = 100,
             .operations = std::move(operations),
             .global_options = &global_options,
-            .global_positional_options = get_global_positional_options()};
+            .global_positional_options = &global_positional_options};
     tool_app_template app(std::move(app_cfg));
 
     return app.run_async(argc, argv, [] (const operation& operation, const bpo::variables_map& app_config) {

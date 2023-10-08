@@ -2828,10 +2828,10 @@ storage_proxy::storage_proxy(distributed<replica::database>& db, storage_proxy::
     , _hints_write_smp_service_group(cfg.hints_write_smp_service_group)
     , _write_ack_smp_service_group(cfg.write_ack_smp_service_group)
     , _next_response_id(std::chrono::system_clock::now().time_since_epoch()/1ms)
-    , _hints_resource_manager(cfg.available_memory / 10, _db.local().get_config().max_hinted_handoff_concurrency)
-    , _hints_manager(_db.local().get_config().hints_directory(), cfg.hinted_handoff_enabled, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
+    , _hints_resource_manager(*this, cfg.available_memory / 10, _db.local().get_config().max_hinted_handoff_concurrency)
+    , _hints_manager(*this, _db.local().get_config().hints_directory(), cfg.hinted_handoff_enabled, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
     , _hints_directory_initializer(std::move(cfg.hints_directory_initializer))
-    , _hints_for_views_manager(_db.local().get_config().view_hints_directory(), {}, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
+    , _hints_for_views_manager(*this, _db.local().get_config().view_hints_directory(), {}, _db.local().get_config().max_hint_window_in_ms(), _hints_resource_manager, _db)
     , _stats_key(stats_key)
     , _features(feat)
     , _background_write_throttle_threahsold(cfg.available_memory / 10)
@@ -4980,6 +4980,8 @@ protected:
         data_resolver_ptr data_resolver = ::make_shared<data_read_resolver>(_schema, cl, _targets.size(), timeout);
         auto exec = shared_from_this();
 
+        cmd->slice.options.set<query::partition_slice::option::allow_mutation_read_page_without_live_row>();
+
         // Waited on indirectly.
         make_mutation_data_requests(cmd, data_resolver, _targets.begin(), _targets.end(), timeout);
 
@@ -5003,13 +5005,18 @@ protected:
 
                 // We generate a retry if at least one node reply with count live columns but after merge we have less
                 // than the total number of column we are interested in (which may be < count on a retry).
-                // So in particular, if no host returned count live columns, we know it's not a short read.
-                bool can_send_short_read = rr_opt && rr_opt->is_short_read() && rr_opt->row_count() > 0;
-                if (rr_opt && (can_send_short_read || data_resolver->all_reached_end() || rr_opt->row_count() >= original_row_limit()
+                // So in particular, if no host returned count live columns, we know it's not a short read due to
+                // row or partition limits being exhausted and retry is not needed.
+                if (rr_opt && (rr_opt->is_short_read()
+                               || data_resolver->all_reached_end()
+                               || rr_opt->row_count() >= original_row_limit()
                                || data_resolver->live_partition_count() >= original_partition_limit())
                         && !data_resolver->any_partition_short_read()) {
+                    tracing::trace(_trace_state, "Read stage is done for read-repair");
+                    mlogger.trace("reconciled: {}", rr_opt->pretty_printer(_schema));
                     auto result = ::make_foreign(::make_lw_shared<query::result>(
                             co_await to_data_query_result(std::move(*rr_opt), _schema, _cmd->slice, _cmd->get_row_limit(), cmd->partition_limit)));
+                    qlogger.trace("reconciled: {}", result->pretty_printer(_schema, _cmd->slice));
                     // wait for write to complete before returning result to prevent multiple concurrent read requests to
                     // trigger repair multiple times and to prevent quorum read to return an old value, even after a quorum
                     // another read had returned a newer value (but the newer value had not yet been sent to the other replicas)
@@ -5032,6 +5039,7 @@ protected:
                         on_read_resolved();
                     });
                 } else {
+                    tracing::trace(_trace_state, "Not enough data, need a retry for read-repair");
                     _proxy->get_stats().read_retries++;
                     _retry_cmd = make_lw_shared<query::read_command>(*cmd);
                     // We asked t (= cmd->get_row_limit()) live columns and got l (=data_resolver->total_live_count) ones.
@@ -5138,6 +5146,7 @@ public:
                             exec->_targets.erase(i, exec->_targets.end());
                         }
                     }
+                    tracing::trace(exec->_trace_state, "digest mismatch, starting read repair");
                     exec->reconcile(exec->_cl, timeout);
                     exec->_proxy->get_stats().read_repair_repaired_blocking++;
                 }
@@ -5343,6 +5352,7 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
     // Speculative retry is disabled *OR* there are simply no extra replicas to speculate.
     if (retry_type == speculative_retry::type::NONE || block_for == all_replicas.size()
             || (repair_decision == db::read_repair_decision::DC_LOCAL && is_datacenter_local(cl) && block_for == target_replicas.size())) {
+        tracing::trace(trace_state, "Creating never_speculating_read_executor - speculative retry is disabled or there are no extra replicas to speculate with");
         return ::make_shared<never_speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
     }
 
@@ -5350,6 +5360,7 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
         // CL.ALL, RRD.GLOBAL or RRD.DC_LOCAL and a single-DC.
         // We are going to contact every node anyway, so ask for 2 full data requests instead of 1, for redundancy
         // (same amount of requests in total, but we turn 1 digest request into a full blown data request).
+        tracing::trace(trace_state, "always_speculating_read_executor (all targets)");
         return ::make_shared<always_speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, block_for, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
     }
 
@@ -5358,16 +5369,20 @@ result<::shared_ptr<abstract_read_executor>> storage_proxy::get_read_executor(lw
         auto local_dc_filter = erm->get_topology().get_local_dc_filter();
         if (!extra_replica || (is_datacenter_local(cl) && !local_dc_filter(*extra_replica))) {
             slogger.trace("read executor no extra target to speculate");
+            tracing::trace(trace_state, "Creating never_speculating_read_executor - there are no extra replicas to speculate with");
             return ::make_shared<never_speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
         } else {
             target_replicas.push_back(*extra_replica);
             slogger.trace("creating read executor with extra target {}", *extra_replica);
+            tracing::trace(trace_state, "Added extra target {} for speculative read", *extra_replica);
         }
     }
 
     if (retry_type == speculative_retry::type::ALWAYS) {
+        tracing::trace(trace_state, "Creating always_speculating_read_executor");
         return ::make_shared<always_speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, block_for, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
     } else {// PERCENTILE or CUSTOM.
+        tracing::trace(trace_state, "Creating speculating_read_executor");
         return ::make_shared<speculating_read_executor>(schema, cf, p, std::move(erm), cmd, std::move(pr), cl, block_for, std::move(target_replicas), std::move(trace_state), std::move(permit), rate_limit_info);
     }
 }
@@ -6347,15 +6362,11 @@ storage_proxy::query_nonsingular_data_locally(schema_ptr s, lw_shared_ptr<query:
 }
 
 future<> storage_proxy::start_hints_manager(shared_ptr<gms::gossiper> g) {
-    future<> f = make_ready_future<>();
     if (!_hints_manager.is_disabled_for_all()) {
-        f = _hints_resource_manager.register_manager(_hints_manager);
+        co_await _hints_resource_manager.register_manager(_hints_manager);
     }
-    return f.then([this] {
-        return _hints_resource_manager.register_manager(_hints_for_views_manager);
-    }).then([this, g = std::move(g)] () mutable {
-        return _hints_resource_manager.start(shared_from_this(), std::move(g));
-    });
+    co_await _hints_resource_manager.register_manager(_hints_for_views_manager);
+    co_await _hints_resource_manager.start(std::move(g));
 }
 
 void storage_proxy::allow_replaying_hints() noexcept {
@@ -6378,11 +6389,16 @@ const db::hints::host_filter& storage_proxy::get_hints_host_filter() const {
     return _hints_manager.get_host_filter();
 }
 
-future<db::hints::sync_point> storage_proxy::create_hint_sync_point(const std::vector<gms::inet_address> target_hosts) const {
+future<db::hints::sync_point> storage_proxy::create_hint_sync_point(std::vector<gms::inet_address> target_hosts) const {
     db::hints::sync_point spoint;
     spoint.regular_per_shard_rps.resize(smp::count);
     spoint.mv_per_shard_rps.resize(smp::count);
     spoint.host_id = get_token_metadata_ptr()->get_my_id();
+    if (target_hosts.empty()) {
+        // No target_hosts specified means that we should wait for hints for all nodes to be sent
+        const auto members_set = remote().gossiper().get_live_members();
+        std::copy(members_set.begin(), members_set.end(), std::back_inserter(target_hosts));
+    }
     co_await coroutine::parallel_for_each(boost::irange<unsigned>(0, smp::count), [this, &target_hosts, &spoint] (unsigned shard) -> future<> {
         const auto& sharded_sp = container();
         // sharded::invoke_on does not have a const-method version, so we cannot use it here
@@ -6472,8 +6488,9 @@ future<> storage_proxy::wait_for_hint_sync_point(const db::hints::sync_point spo
 void storage_proxy::on_join_cluster(const gms::inet_address& endpoint) {};
 
 void storage_proxy::on_leave_cluster(const gms::inet_address& endpoint) {
-    _hints_manager.drain_for(endpoint);
-    _hints_for_views_manager.drain_for(endpoint);
+    // Discarding these futures is safe. They're awaited by db::hints::manager::stop().
+    (void) _hints_manager.drain_for(endpoint);
+    (void) _hints_for_views_manager.drain_for(endpoint);
 }
 
 void storage_proxy::on_up(const gms::inet_address& endpoint) {};
