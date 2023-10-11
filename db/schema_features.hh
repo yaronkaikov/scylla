@@ -42,7 +42,6 @@ using schema_features = enum_set<super_enum<schema_feature,
     schema_feature::SCYLLA_KEYSPACES,
     schema_feature::SCYLLA_AGGREGATES,
     schema_feature::TABLE_DIGEST_INSENSITIVE_TO_EXPIRY,
-    schema_feature::GROUP0_SCHEMA_VERSIONING,
     schema_feature::IN_MEMORY_TABLES
     >>;
 

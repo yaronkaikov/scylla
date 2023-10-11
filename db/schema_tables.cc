@@ -330,55 +330,54 @@ schema_ptr tables() {
 
 // Holds Scylla-specific table metadata.
 schema_ptr scylla_tables(schema_features features) {
-    static thread_local schema_ptr schemas[2][2][2][2]{};
-
-    bool has_cdc_options = features.contains(schema_feature::CDC_OPTIONS);
-    bool has_per_table_partitioners = features.contains(schema_feature::PER_TABLE_PARTITIONERS);
-    bool has_group0_schema_versioning = features.contains(schema_feature::GROUP0_SCHEMA_VERSIONING);
-    bool has_in_memory = features.contains(schema_feature::IN_MEMORY_TABLES);
-
-    schema_ptr& s = schemas[has_cdc_options][has_per_table_partitioners][has_group0_schema_versioning][has_in_memory];
-    if (!s) {
+    static auto make = [] (bool has_cdc_options, bool has_per_table_partitioners, bool has_in_memory) -> schema_ptr {
         auto id = generate_legacy_id(NAME, SCYLLA_TABLES);
         auto sb = schema_builder(NAME, SCYLLA_TABLES, std::make_optional(id))
             .with_column("keyspace_name", utf8_type, column_kind::partition_key)
             .with_column("table_name", utf8_type, column_kind::clustering_key)
             .with_column("version", uuid_type)
             .set_gc_grace_seconds(schema_gc_grace);
-        // Each bit in `offset` denotes a different schema feature,
-        // so different values of `offset` are used for different combinations of features.
-        uint16_t offset = 0;
+        // TODO: think of a more automated and less error prone
+        // way of doing this
+        //   in_memory  ,partitioner , cdc
+        //0:  0           0            0
+        //1:  0           0            1
+        //2:  0           1            0
+        //3:  0           1            1
+        //4:  1           0            0
+        //5:  1           0            1
+        //6:  1           1            0
+        //7:  1           1            1
+
+        int offset = 0;
         if (has_cdc_options) {
             sb.with_column("cdc", map_type_impl::get_instance(utf8_type, utf8_type, false));
-            offset |= 0b1;
+            ++offset;
         }
         if (has_per_table_partitioners) {
             sb.with_column("partitioner", utf8_type);
-            offset |= 0b10;
-        }
-        if (has_group0_schema_versioning) {
-            // If true, this table's latest schema was committed by group 0.
-            // In this case `version` column is non-null and will be used for `schema::version()` instead of calculating a hash.
-            //
-            // If false, this table's latest schema was committed outside group 0 (e.g. during RECOVERY mode).
-            // In this case `version` is null and `schema::version()` will be a hash.
-            //
-            // If null, this is either a system table, or the latest schema was committed
-            // before the GROUP0_SCHEMA_VERSIONING feature was enabled (either inside or outside group 0).
-            // In this case, for non-system tables, `version` is null and `schema::version()` will be a hash.
-            sb.with_column("committed_by_group0", boolean_type);
-            offset |= 0b100;
+            offset += 2;
         }
         if (has_in_memory) {
             sb.with_column("in_memory", boolean_type);
-            offset |= 0b1000;
+            offset += 4;
         }
 
         sb.with_version(system_keyspace::generate_schema_version(id, offset));
-        s = sb.build();
-    }
-
-    return s;
+        return sb.build();
+    };
+    static thread_local std::array<std::array<std::array<schema_ptr, 2>, 2>, 2> schemas = [] {
+        std::array<std::array<std::array<schema_ptr, 2>, 2>, 2> schemas;
+        for (int cdc = 0; cdc < 2; ++cdc) {
+            for (int part = 0; part < 2; ++part) {
+                for (int in_memory = 0; in_memory < 2; ++in_memory) {
+                    schemas[cdc][part][in_memory] = make(cdc, part, in_memory);
+                }
+            }
+        }
+        return schemas;
+    } ();
+    return schemas[features.contains(schema_feature::CDC_OPTIONS)][features.contains(schema_feature::PER_TABLE_PARTITIONERS)][features.contains(schema_feature::IN_MEMORY_TABLES)];
 }
 
 // The "columns" table lists the definitions of all columns in all tables
@@ -974,21 +973,13 @@ static future<> with_merge_lock(noncopyable_function<future<> ()> func) {
 }
 
 static
-future<> update_schema_version_and_announce(sharded<db::system_keyspace>& sys_ks, distributed<service::storage_proxy>& proxy, schema_features features, std::optional<table_schema_version> version_from_group0) {
-    auto uuid = version_from_group0 ? *version_from_group0 : co_await calculate_schema_digest(proxy, features);
+future<> update_schema_version_and_announce(sharded<db::system_keyspace>& sys_ks, distributed<service::storage_proxy>& proxy, schema_features features) {
+    auto uuid = co_await calculate_schema_digest(proxy, features);
     co_await sys_ks.local().update_schema_version(uuid);
     co_await proxy.local().get_db().invoke_on_all([uuid] (replica::database& db) {
         db.update_version(uuid);
     });
     slogger.info("Schema version changed to {}", uuid);
-}
-
-static future<std::optional<table_schema_version>> get_group0_schema_version(db::system_keyspace& sys_ks) {
-    auto version = co_await sys_ks.get_scylla_local_param_as<utils::UUID>("group0_schema_version");
-    if (!version) {
-        co_return std::nullopt;
-    }
-    co_return table_schema_version{*version};
 }
 
 /**
@@ -1005,22 +996,20 @@ future<> merge_schema(sharded<db::system_keyspace>& sys_ks, distributed<service:
     if (this_shard_id() != 0) {
         // mutations must be applied on the owning shard (0).
         co_await smp::submit_to(0, [&, fmuts = freeze(mutations)] () mutable -> future<> {
-            return merge_schema(sys_ks, proxy, feat, unfreeze(fmuts), reload);
+            return merge_schema(sys_ks, proxy, feat, unfreeze(fmuts));
         });
         co_return;
     }
     co_await with_merge_lock([&] () mutable -> future<> {
         bool flush_schema = proxy.local().get_db().local().get_config().flush_schema_tables_after_modification();
         co_await do_merge_schema(proxy, sys_ks, std::move(mutations), flush_schema, reload);
-        auto version_from_group0 = co_await get_group0_schema_version(sys_ks.local());
-        co_await update_schema_version_and_announce(sys_ks, proxy, feat.cluster_schema_features(), version_from_group0);
+        co_await update_schema_version_and_announce(sys_ks, proxy, feat.cluster_schema_features());
     });
 }
 
 future<> recalculate_schema_version(sharded<db::system_keyspace>& sys_ks, distributed<service::storage_proxy>& proxy, gms::feature_service& feat) {
     co_await with_merge_lock([&] () -> future<> {
-        auto version_from_group0 = co_await get_group0_schema_version(sys_ks.local());
-        co_await update_schema_version_and_announce(sys_ks, proxy, feat.cluster_schema_features(), version_from_group0);
+        co_await update_schema_version_and_announce(sys_ks, proxy, feat.cluster_schema_features());
     });
 }
 
@@ -1132,27 +1121,14 @@ void feed_hash_for_schema_digest(hasher& h, const mutation& m, schema_features f
     }
 }
 
-// Applies deletion of the "version" column to system_schema.scylla_tables mutation rows
-// which weren't committed by group 0.
-static void maybe_delete_schema_version(mutation& m) {
+// Applies deletion of the "version" column to a system_schema.scylla_tables mutation.
+static void delete_schema_version(mutation& m) {
     if (m.column_family_id() != scylla_tables()->id()) {
         return;
     }
-    const column_definition& origin_col = *m.schema()->get_column_definition(to_bytes("committed_by_group0"));
     const column_definition& version_col = *m.schema()->get_column_definition(to_bytes("version"));
     for (auto&& row : m.partition().clustered_rows()) {
         auto&& cells = row.row().cells();
-        if (auto&& origin_cell = cells.find_cell(origin_col.id); origin_cell) {
-            auto&& ac = origin_cell->as_atomic_cell(origin_col);
-            if (ac.is_live()) {
-                auto dv = origin_col.type->deserialize(managed_bytes_view(ac.value()));
-                auto committed_by_group0 = value_cast<bool>(dv);
-                if (committed_by_group0) {
-                    // Don't delete "version" for this entry.
-                    continue;
-                }
-            }
-        }
         auto&& cell = cells.find_cell(version_col.id);
         api::timestamp_type t = api::new_timestamp();
         if (cell) {
@@ -1291,9 +1267,8 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, shar
         keyspaces.emplace(std::move(keyspace_name));
         column_families.emplace(mutation.column_family_id());
         // We must force recalculation of schema version after the merge, since the resulting
-        // schema may be a mix of the old and new schemas, with the exception of entries
-        // that originate from group 0.
-        maybe_delete_schema_version(mutation);
+        // schema may be a mix of the old and new schemas.
+        delete_schema_version(mutation);
     }
 
     if (reload) {
