@@ -41,6 +41,7 @@ extensions = [
     "recommonmark",  # optional
     "sphinxcontrib.datatemplates",
     "scylladb_cc_properties",
+    "scylladb_aws_images"
 ]
 
 templates_path = ['_templates', '../_templates']
@@ -98,6 +99,12 @@ smv_remote_whitelist = r"^origin$"
 smv_released_pattern = r"^tags/.*$"
 # Format for versioned output directories inside the build directory
 smv_outputdir_format = "{ref.name}"
+
+# -- Options for scylladb_aws_images -----------------------------
+scylladb_aws_images_base_url = "https://s3.amazonaws.com/downloads.scylladb.com"
+scylladb_aws_images_ami_bucket_directory = "downloads/scylla-enterprise/aws/ami/"
+scylladb_aws_images_ami_download_directory = "_data/enterprise/aws/ami"
+scylladb_aws_images_cloudformation_bucket_directory = "downloads/scylla-enterprise/aws/cloudformation/"
 
 # -- Options for HTML output ----------------------------------------------
 

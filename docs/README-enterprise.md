@@ -17,7 +17,7 @@ To build the documentation, execute the following command:
 
 
 ```console
-make FLAG=enterprise preview.
+make FLAG=enterprise preview
 ```
 
 **IMPORTANT:** Remember to include the `FLAG=enterprise` argument for building the enterprise version of the documentation.
