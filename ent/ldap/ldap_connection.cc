@@ -153,6 +153,13 @@ future<> ldap_connection::close() {
 
 future<ldap_msg_ptr> ldap_connection::await_result(int msgid) {
     mylog.trace("await_result({})", msgid);
+
+    if (_status != status::up) {
+        mylog.error("await_result({}) error: connection is not up", msgid);
+        ldap_abandon_ext(get_ldap(), msgid, /*sctrls=*/nullptr, /*cctrls=*/nullptr);
+        return make_exception_future<ldap_msg_ptr>(std::runtime_error("ldap_connection status set to error"));
+    }
+
     try {
         return _msgid_to_promise[msgid].get_future();
     } catch (...) {
