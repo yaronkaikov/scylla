@@ -146,7 +146,11 @@ incremental_compaction_strategy::find_garbage_collection_job(const compaction::t
 
         return run.estimate_droppable_tombstone_ratio(gc_before) >= actual_threshold;
     };
-    auto gc_before = gc_clock::now() - t.schema()->gc_grace_seconds();
+    // FIXME: Use a more fine-grained GC before, by adapting sstable_run procedure to
+    // query gc before for each fragment, when estimating the droppable ratio.
+    const auto full_range = dht::token_range::make_open_ended_both_sides();
+    auto r = t.get_tombstone_gc_state().get_gc_before_for_range(t.schema(), full_range, gc_clock::now());
+    auto gc_before = r.knows_entire_range ? r.min_gc_before : gc_clock::time_point::min();
     auto can_garbage_collect = [&] (const size_bucket_t& bucket) {
         return boost::algorithm::any_of(bucket, [&] (const frozen_sstable_run& r) {
             return worth_dropping_tombstones(*r, gc_before);
