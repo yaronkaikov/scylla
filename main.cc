@@ -721,7 +721,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // disable reactor stall detection during startup
             auto blocked_reactor_notify_ms = engine().get_blocked_reactor_notify_ms();
             smp::invoke_on_all([] {
-                engine().update_blocked_reactor_notify_ms(std::chrono::milliseconds(1000000));
+                engine().update_blocked_reactor_notify_ms(10000h);
             }).get();
 
             ::stop_signal stop_signal; // we can move this earlier to support SIGINT during initialization
@@ -1072,10 +1072,17 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             db.local().init_commitlog().get();
             db.invoke_on_all(&replica::database::start, std::ref(sl_controller)).get();
 
+// FIXME: The stall detector uses glibc backtrace function to
+// collect backtraces, this causes ASAN failures on ARM.
+// For now we just disable the stall detector in this configuration,
+// the ticket about migrating to libunwind: scylladb/seastar#1878
+#if !defined(SEASTAR_DEBUG) || !defined(__aarch64__)
             smp::invoke_on_all([blocked_reactor_notify_ms] {
                 engine().update_blocked_reactor_notify_ms(blocked_reactor_notify_ms);
             }).get();
-
+#else
+            (void)blocked_reactor_notify_ms;
+#endif
             debug::the_storage_proxy = &proxy;
             supervisor::notify("starting storage proxy");
             service::storage_proxy::config spcfg {
@@ -1195,26 +1202,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             sys_ks.invoke_on_all(&db::system_keyspace::mark_writable).get();
 
             supervisor::notify("starting schema commit log");
-            sys_ks.local().cache_truncation_record().get();
-
-            // Check there is no truncation record for schema tables.
-            // Needs to happen before replaying the schema commitlog, which interprets
-            // replay position in the truncation record.
-            db.local().get_tables_metadata().for_each_table([] (table_id, lw_shared_ptr<replica::table> table_ptr) {
-              if (table_ptr->schema()->ks_name() == db::schema_tables::NAME) {
-                  if (table_ptr->get_truncation_record() != db_clock::time_point::min()) {
-                      // replay_position stored in the truncation record may belong to
-                      // the old (default) commitlog domain. It's not safe to interpret
-                      // that replay position in the schema commitlog domain.
-                      // Refuse to boot in this case. We assume no one truncated schema tables.
-                      // We will hit this during rolling upgrade, in which case the user will
-                      // roll back and let us know.
-                      throw std::runtime_error(format("Schema table {}.{} has a truncation record. Booting is not safe.",
-                          table_ptr->schema()->ks_name(), table_ptr->schema()->cf_name()));
-                  }
-              }
-            });
-
             auto sch_cl = db.local().schema_commitlog();
             if (sch_cl != nullptr) {
               auto paths = sch_cl->get_segments_to_replay().get();
@@ -1475,6 +1462,24 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // making compaction manager api available, after system keyspace has already been established.
             api::set_server_compaction_manager(ctx).get();
 
+            cm.invoke_on_all([&](compaction_manager& cm) {
+                auto cl = db.local().commitlog();
+                auto scl = db.local().schema_commitlog();
+                if (cl && scl) {
+                    cm.get_tombstone_gc_state().set_gc_time_min_source([cl, scl](const table_id& id) {
+                        return std::min(cl->min_gc_time(id), scl->min_gc_time(id));
+                    });
+                } else if (cl) {
+                    cm.get_tombstone_gc_state().set_gc_time_min_source([cl](const table_id& id) {
+                        return cl->min_gc_time(id);
+                    });
+                } else if (scl) {
+                    cm.get_tombstone_gc_state().set_gc_time_min_source([scl](const table_id& id) {
+                        return scl->min_gc_time(id);
+                    });
+                }
+            }).get();
+
             supervisor::notify("loading tablet metadata");
             ss.local().load_tablet_metadata().get();
 
@@ -1680,7 +1685,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // Need to do it before allowing incomming messaging service connections since
             // storage proxy's and migration manager's verbs may access group0.
             // This will also disable migration manager schema pulls if needed.
-            group0_service.setup_group0_if_exist(sys_ks.local(), ss.local(), qp.local(), mm.local()).get();
+            group0_service.setup_group0_if_exist(sys_ks.local(), ss.local(), qp.local(), mm.local(), raft_topology_change_enabled).get();
 
             // It's essential to load fencing_version prior to starting the messaging service,
             // since incoming messages may require fencing.

@@ -9,7 +9,7 @@ Upgrade ScyllaDB
    ScyllaDB Versioning <scylladb-versioning>
    ScyllaDB Enterprise <upgrade-enterprise/index>
    ScyllaDB Open Source to ScyllaDB Enterprise <upgrade-to-enterprise/index>
-   ScyllaDB AMI <ami-upgrade>
+   ScyllaDB Image <ami-upgrade>
 
 Overview
 ---------
@@ -33,7 +33,7 @@ The following example shows the upgrade path for a 3-node cluster from version 4
 #. Upgrade all three nodes to version 4.6.
 
 
-Upgrading to each patch version by following the `Scylla Maintenance Release Upgrade Guide <https://docs.scylladb.com/master/upgrade/upgrade-opensource/upgrade-guide-from-4.x.y-to-4.x.z/index.html>`_. 
+Upgrading to each patch version by following the Maintenance Release Upgrade Guide 
 is optional. However, we recommend upgrading to the latest patch release for your version before upgrading to a new version. 
 For example, upgrade to patch 4.4.8 before upgrading to version 4.5.
 
@@ -46,7 +46,7 @@ Procedures for Upgrading ScyllaDB
 
 * :doc:`Upgrade from ScyllaDB Open Source to Scylla Enterprise <upgrade-to-enterprise/index>`
 
-* :doc:`Upgrade ScyllaDB AMI <ami-upgrade>`
+* :doc:`Upgrade ScyllaDB Image <ami-upgrade>`
 
 
 

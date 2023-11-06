@@ -439,6 +439,14 @@ sstables::shared_sstable table::make_sstable() {
     return make_sstable(sstables::sstable_state::normal);
 }
 
+db_clock::time_point table::get_truncation_time() const {
+    if (!_truncated_at) [[unlikely]] {
+        on_internal_error(dblog, ::format("truncation time is not set, table {}.{}",
+            _schema->ks_name(), _schema->cf_name()));
+    }
+    return *_truncated_at;
+}
+
 void table::notify_bootstrap_or_replace_start() {
     _is_bootstrap_or_replace = true;
 }
@@ -1364,6 +1372,9 @@ compaction_group::update_main_sstable_list_on_compaction_completion(sstables::co
 future<>
 table::compact_all_sstables(std::optional<tasks::task_info> info) {
     co_await flush();
+    // Forces off-strategy before major, so sstables previously sitting on maintenance set will be included
+    // in the compaction's input set, to provide same semantics as before maintenance set came into existence.
+    co_await perform_offstrategy_compaction(info);
     co_await parallel_foreach_compaction_group([this, info] (compaction_group& cg) {
         return _compaction_manager.perform_major_compaction(cg.as_table_state(), info);
     });
