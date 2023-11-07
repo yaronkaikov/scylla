@@ -13,6 +13,7 @@
 #include <boost/range/numeric.hpp>
 #include <boost/range/algorithm.hpp>
 #include <boost/range/adaptors.hpp>
+#include <ranges>
 
 namespace sstables {
 
@@ -132,13 +133,20 @@ incremental_compaction_strategy::most_interesting_bucket(std::vector<std::vector
 
 compaction_descriptor
 incremental_compaction_strategy::find_garbage_collection_job(const compaction::table_state& t, std::vector<size_bucket_t>& buckets) {
-    auto worth_dropping_tombstones = [this, now = db_clock::now()] (const sstable_run& run, gc_clock::time_point gc_before) {
+    auto worth_dropping_tombstones = [this, &t, now = db_clock::now()] (const sstable_run& run, gc_clock::time_point gc_before) {
         if (run.all().empty()) {
             return false;
         }
+        auto run_max_timestamp = std::ranges::max(run.all() | std::views::transform([] (const shared_sstable& sstable) {
+            return sstable->get_stats_metadata().max_timestamp;
+        }));
         // for the purpose of checking if a run is stale, picking any fragment *composing the same run*
         // will be enough as the difference in write time is acceptable.
         bool satisfy_staleness = (now - _tombstone_compaction_interval) > (*run.all().begin())->data_file_write_time();
+        // Staleness condition becomes mandatory if memtable's data is possibly shadowed by tombstones.
+        if (run_max_timestamp >= t.min_memtable_timestamp() && !satisfy_staleness) {
+            return false;
+        }
         // If interval is not satisfied, we still consider tombstone GC if the gain outweighs the increased frequency.
         // By increasing threshold to a minimum of 0.5, we're only adding a maximum of 1 to write amp as we'll be halving
         // the SSTable, containing garbage, on every GC round.
