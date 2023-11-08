@@ -137,12 +137,19 @@ incremental_compaction_strategy::find_garbage_collection_job(const compaction::t
         if (run.all().empty()) {
             return false;
         }
+        // for the purpose of checking if a run is stale, picking any fragment *composing the same run*
+        // will be enough as the difference in write time is acceptable.
+        auto run_write_time = (*run.all().begin())->data_file_write_time();
+        // FIXME: hack to avoid infinite loop, get rid of it once the root cause is fixed.
+        // Refs #3571.
+        auto min_gc_compaction_interval = std::min(db_clock::duration(std::chrono::seconds(3600)), _tombstone_compaction_interval);
+        if ((now - min_gc_compaction_interval) < run_write_time) {
+            return false;
+        }
         auto run_max_timestamp = std::ranges::max(run.all() | std::views::transform([] (const shared_sstable& sstable) {
             return sstable->get_stats_metadata().max_timestamp;
         }));
-        // for the purpose of checking if a run is stale, picking any fragment *composing the same run*
-        // will be enough as the difference in write time is acceptable.
-        bool satisfy_staleness = (now - _tombstone_compaction_interval) > (*run.all().begin())->data_file_write_time();
+        bool satisfy_staleness = (now - _tombstone_compaction_interval) > run_write_time;
         // Staleness condition becomes mandatory if memtable's data is possibly shadowed by tombstones.
         if (run_max_timestamp >= t.min_memtable_timestamp() && !satisfy_staleness) {
             return false;
