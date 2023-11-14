@@ -638,19 +638,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     auto parsed_opts = bpo::command_line_parser(ac, av).options(app.get_options_description()).allow_unregistered().run();
     print_starting_message(ac, av, parsed_opts);
 
-    // We have to override p11-kit config path before p11-kit initialization.
-    // And the initialization will invoke on seastar initalization, so it has to
-    // be before app.run()
-    auto scylla_path = fs::read_symlink(fs::path("/proc/self/exe"));
-    auto p11_modules = scylla_path.parent_path().parent_path().append("share/p11-kit/modules");
-    // Note: must be in scope for application lifetime. p11_kit_override_system_files does _not_
-    // copy input strings.
-    auto p11_modules_str = p11_modules.string<char>();
-    // #3392 only do this if we are actually packaged and the path exists.
-    if (fs::exists(p11_modules)) {
-        ::p11_kit_override_system_files(NULL, NULL, p11_modules_str.c_str(), NULL, NULL);
-    }
-
     sharded<locator::shared_token_metadata> token_metadata;
     sharded<locator::effective_replication_map_factory> erm_factory;
     sharded<service::migration_notifier> mm_notifier;
@@ -2054,6 +2041,21 @@ int main(int ac, char** av) {
             fmt::print("{} - {}\n", tool.name, tool.desc);
         }
         return 0;
+    }
+
+    // We have to override p11-kit config path before p11-kit initialization.
+    // And the initialization will invoke on seastar initalization, so it has to
+    // be before app.run()
+    // #3583 - need to potentially ensure this for tools as well, since at least
+    // sstable* might need crypto libraries.
+    auto scylla_path = fs::read_symlink(fs::path("/proc/self/exe")); // could just be argv[0] I guess...
+    auto p11_modules = scylla_path.parent_path().parent_path().append("share/p11-kit/modules");
+    // Note: must be in scope for application lifetime. p11_kit_override_system_files does _not_
+    // copy input strings.
+    auto p11_modules_str = p11_modules.string<char>();
+    // #3392 only do this if we are actually packaged and the path exists.
+    if (fs::exists(p11_modules)) {
+        ::p11_kit_override_system_files(NULL, NULL, p11_modules_str.c_str(), NULL, NULL);
     }
 
     return main_func(ac, av);
