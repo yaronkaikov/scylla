@@ -229,7 +229,7 @@ check_usermode_support() {
 is_redhat_variant() {
     is_redhat=0
     for i in $ID $ID_LIKE; do
-        if [ "$i" = "rhel" -o "$i" = "fedora" -o "$i" = "centos" ]; then
+        if [ "$i" = "rhel" -o "$i" = "fedora" -o "$i" = "centos" -o "$i" = "ol" ]; then
             is_redhat=1
             break
         fi
