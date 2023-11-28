@@ -2825,6 +2825,7 @@ storage_proxy::storage_proxy(distributed<replica::database>& db, storage_proxy::
     , _erm_factory(erm_factory)
     , _read_smp_service_group(cfg.read_smp_service_group)
     , _write_smp_service_group(cfg.write_smp_service_group)
+    , _write_mv_smp_service_group(cfg.write_mv_smp_service_group)
     , _hints_write_smp_service_group(cfg.hints_write_smp_service_group)
     , _write_ack_smp_service_group(cfg.write_ack_smp_service_group)
     , _next_response_id(std::chrono::system_clock::now().time_since_epoch()/1ms)
@@ -4980,7 +4981,9 @@ protected:
         data_resolver_ptr data_resolver = ::make_shared<data_read_resolver>(_schema, cl, _targets.size(), timeout);
         auto exec = shared_from_this();
 
-        cmd->slice.options.set<query::partition_slice::option::allow_mutation_read_page_without_live_row>();
+        if (_proxy->features().empty_replica_mutation_pages) {
+            cmd->slice.options.set<query::partition_slice::option::allow_mutation_read_page_without_live_row>();
+        }
 
         // Waited on indirectly.
         make_mutation_data_requests(cmd, data_resolver, _targets.begin(), _targets.end(), timeout);
