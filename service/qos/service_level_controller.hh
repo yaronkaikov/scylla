@@ -147,8 +147,9 @@ public:
      * (if it returns a future). or a ready future containing the returned value
      * from the function/
      */
-    template <typename Ret>
-    futurize_t<Ret> with_user_service_level(const std::optional<auth::authenticated_user>& usr, noncopyable_function<Ret()> func) {
+    template <typename Func, typename Ret = std::invoke_result_t<Func>>
+    requires std::invocable<Func>
+    futurize_t<Ret> with_user_service_level(const std::optional<auth::authenticated_user>& usr, Func&& func) {
         if (usr) {
             auth::service& ser = _auth_service.local();
             return auth::get_roles(ser, *usr).then([this] (auth::role_set roles) {
@@ -172,8 +173,9 @@ public:
      * (if it returns a future). or a ready future containing the returned value
      * from the function/
      */
-    template <typename Ret>
-    futurize_t<Ret> with_service_level(sstring service_level_name, noncopyable_function<Ret()> func) {
+    template <typename Func, typename Ret = std::invoke_result_t<Func>>
+    requires std::invocable<Func>
+    futurize_t<Ret> with_service_level(sstring service_level_name, Func&& func) {
         service_level& sl = get_service_level(service_level_name);
         return with_scheduling_group(sl.sg, std::move(func));
     }

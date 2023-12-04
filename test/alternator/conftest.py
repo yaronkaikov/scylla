@@ -82,7 +82,7 @@ def dynamodb(request):
             region_name='us-east-1', aws_access_key_id='alternator', aws_secret_access_key='secret_pass',
             config=boto_config.merge(botocore.client.Config(retries={"max_attempts": 0}, read_timeout=300)))
 
-def new_dynamodb_session(request, dynamodb):
+def new_dynamodb_session(request, dynamodb, user='alternator', password='secret_pass'):
     ses = boto3.Session()
     host = urlparse(dynamodb.meta.client._endpoint.host)
     conf = botocore.client.Config(parameter_validation=False)
@@ -91,7 +91,7 @@ def new_dynamodb_session(request, dynamodb):
     if host.hostname == 'localhost':
         conf = conf.merge(botocore.client.Config(retries={"max_attempts": 0}, read_timeout=300))
     return ses.resource('dynamodb', endpoint_url=dynamodb.meta.client._endpoint.host, verify=host.scheme != 'http',
-        region_name='us-east-1', aws_access_key_id='alternator', aws_secret_access_key='secret_pass',
+        region_name='us-east-1', aws_access_key_id=user, aws_secret_access_key=password,
         config=conf)
 
 @pytest.fixture(scope="session")
