@@ -102,6 +102,7 @@ fedora_packages=(
     xxhash-devel
     makeself
     libzstd-static libzstd-devel
+    lz4-static lz4-devel
     rpm-build
     devscripts
     debhelper
