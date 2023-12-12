@@ -782,16 +782,16 @@ public:
                     auto provider = _ctxt->get_provider(opts);
 
                     logg.debug("Open commitlog segment {} using {} (id: {})", filename, *provider, id);
-
-                    return provider->key(get_key_info(opts), id).then([f](std::tuple<shared_ptr<symmetric_key>, opt_bytes> k) {
+                    auto info = make_shared<key_info>(get_key_info(opts));
+                    return provider->key(*info, id).then([f, info](std::tuple<shared_ptr<symmetric_key>, opt_bytes> k) {
                         return make_ready_future<file>(make_encrypted_file(f, std::get<0>(k)));
                     });
                 });
             });
         } else {
             auto provider = _ctxt->get_provider(_opts);
-
-            return provider->key(get_key_info(_opts)).then([f, this, cfg_file, filename, &provider = *provider](std::tuple<shared_ptr<symmetric_key>, opt_bytes> k_id) {
+            auto info = make_shared<key_info>(get_key_info(_opts));
+            return provider->key(*info).then([f, this, info, cfg_file, filename, &provider = *provider](std::tuple<shared_ptr<symmetric_key>, opt_bytes> k_id) {
                 auto&& k = std::get<0>(k_id);
                 auto&& id = std::get<1>(k_id);
                 std::ostringstream ss;

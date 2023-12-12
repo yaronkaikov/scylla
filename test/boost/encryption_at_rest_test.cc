@@ -30,6 +30,8 @@
 #include "test/lib/cql_assertions.hh"
 #include "db/config.hh"
 #include "db/extensions.hh"
+#include "db/commitlog/commitlog.hh"
+#include "db/commitlog/commitlog_replayer.hh"
 #include "init.hh"
 #include "sstables/sstables.hh"
 
@@ -406,4 +408,151 @@ SEASTAR_TEST_CASE(test_user_info_encryption) {
     , keyfile.string());
 
     co_await test_provider({}, tmp, yaml, 4, 1, "LocalFileSystemKeyProviderFactory" /* verify encrypted even though no kp in options*/);
+}
+
+SEASTAR_TEST_CASE(test_kms_provider_with_broken_algo) {
+    co_await kms_test_helper([](const tmpdir& tmp, std::string_view kms_key_alias, std::string_view kms_aws_region, std::string_view kms_aws_profile) -> future<> {
+        /**
+         * Note: NOT including any auth stuff here. The provider will pick up AWS credentials
+         * from ~/.aws/credentials
+         */
+        auto yaml = fmt::format(R"foo(
+            kms_hosts:
+                kms_test:
+                    master_key: {0}
+                    aws_region: {1}
+                    aws_profile: {2}
+                    )foo"
+            , kms_key_alias, kms_aws_region, kms_aws_profile
+        );
+
+        try {
+            co_await test_provider("'key_provider': 'KmsKeyProviderFactory', 'kms_host': 'kms_test', 'cipher_algorithm':'', 'secret_key_strength': 128", tmp, yaml);
+            BOOST_FAIL("should not reach");
+        } catch (exceptions::configuration_exception&) {
+            // ok
+        }
+    });
+}
+
+static future<> test_encrypted_commitlog(const tmpdir& tmp, std::unordered_map<std::string, std::string> scopts = {}, const std::string& extra_yaml = {}, unsigned n_tables = 1) {
+    fs::path clback = tmp.path() / "commitlog_back";
+
+    auto make_config = [&] {
+        auto ext = std::make_shared<db::extensions>();
+        auto cfg = seastar::make_shared<db::config>(ext);
+        cfg->data_file_directories({tmp.path().string()});
+        cfg->commitlog_sync("batch"); // just to make sure files are written
+
+        // Currently the test fails with consistent_cluster_management = true. See #2995.
+        cfg->consistent_cluster_management(false);
+
+        boost::program_options::options_description desc;
+        boost::program_options::options_description_easy_init init(&desc);
+        configurable::append_all(*cfg, init);
+
+        std::ostringstream ss;
+        ss  << "system_info_encryption:" << std::endl
+            << "    enabled: true" << std::endl
+            << "    cipher_algorithm: AES/CBC/PKCS5Padding" << std::endl
+            << "    secret_key_strength: 128" << std::endl
+            ;
+
+        for (auto& [k, v] : scopts) {
+            ss << "    " << k << ": " << v << std::endl;
+        }
+        auto str = ss.str();
+        cfg->read_from_yaml(str);
+
+        if (!extra_yaml.empty()) {
+            cfg->read_from_yaml(extra_yaml);
+        }
+
+        return std::make_tuple(cfg, ext);
+    };
+
+    std::string pk = "apa";
+    std::string v = "ko";
+
+    {
+        auto [cfg, ext] = make_config();
+
+        co_await do_with_cql_env_thread([&] (cql_test_env& env) {
+            for (auto i = 0u; i < n_tables; ++i) {
+                env.execute_cql(fmt::format("create table t{} (pk text primary key, v text)", i)).get();
+                env.execute_cql(fmt::format("insert into ks.t{} (pk, v) values ('{}', '{}')", i, pk, v)).get();
+            }
+
+            fs::copy(fs::path(cfg->commitlog_directory()), clback);
+        }, cfg, {}, cql_test_init_configurables{ *ext });
+
+    }
+
+    {
+        auto [cfg, ext] = make_config();
+
+        co_await do_with_cql_env_thread([&] (cql_test_env& env) {
+            // Fake commitlog replay using the files copied.
+            std::vector<sstring> paths;
+            for (auto const& dir_entry : fs::directory_iterator{clback})  {
+                auto p = dir_entry.path();
+                try {
+                    db::commitlog::descriptor d(p);
+                    paths.emplace_back(std::move(p));
+                } catch (...) {
+                }
+            }
+
+            BOOST_REQUIRE(!paths.empty()); 
+
+            auto rp = db::commitlog_replayer::create_replayer(env.db(), env.get_system_keyspace()).get0();
+            rp.recover(paths, db::commitlog::descriptor::FILENAME_PREFIX).get();
+
+            // not really checking anything, but make sure we did not break anything.
+            for (auto i = 0u; i < n_tables; ++i) {
+                require_rows(env, fmt::format("select * from ks.t{}", i), {{utf8_type->decompose(pk), utf8_type->decompose(v)}});
+            }
+        }, cfg, {}, cql_test_init_configurables{ *ext });
+    }
+}
+
+
+SEASTAR_TEST_CASE(test_commitlog_kms_encryption_with_slow_key_resolve) {
+    co_await kms_test_helper([](const tmpdir& tmp, std::string_view kms_key_alias, std::string_view kms_aws_region, std::string_view kms_aws_profile) -> future<> {
+        /**
+         * Note: NOT including any auth stuff here. The provider will pick up AWS credentials
+         * from ~/.aws/credentials
+         */
+        auto yaml = fmt::format(R"foo(
+            kms_hosts:
+                kms_test:
+                    master_key: {0}
+                    aws_region: {1}
+                    aws_profile: {2}
+                    )foo"
+            , kms_key_alias, kms_aws_region, kms_aws_profile
+        );
+
+        co_await test_encrypted_commitlog(tmp, { { "key_provider", "KmsKeyProviderFactory" }, { "kms_host", "kms_test" } }, yaml);
+    });
+}
+
+SEASTAR_TEST_CASE(test_commitlog_kmip_encryption_with_slow_key_resolve) {
+    co_await kmip_test_helper([](std::string_view resourcedir, const tmpdir& tmp) -> future<> {
+        // QA test server. Same as used in dtests.
+        auto host = "52.21.171.245";
+        auto yaml = fmt::format(R"foo(
+            kmip_hosts:
+                kmip_test:
+                    hosts: {0}
+                    certificate: {1}/scylla.pem
+                    keyfile: {1}/scylla.pem
+                    truststore: {1}/cacert.pem
+                    priority_string: SECURE128:+RSA:-VERS-TLS1.0:-ECDHE-ECDSA
+                    )foo"
+            , host, resourcedir
+        );
+
+        co_await test_encrypted_commitlog(tmp, { { "key_provider", "KmipKeyProviderFactory" }, { "kmip_host", "kmip_test" } }, yaml);
+    });
 }
