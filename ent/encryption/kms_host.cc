@@ -541,7 +541,7 @@ future<rjson::value> encryption::kms_host::impl::post(std::string_view target, s
         _options.host = make_aws_host(_options.aws_region, "kms");
     }
 
-    static auto should_resolve_options_credentials = [this] {
+    auto should_resolve_options_credentials = [this] {
         if (_options.aws_use_ec2_credentials) {
             return false;
         }
