@@ -40,7 +40,7 @@ class reader_concurrency_semaphore_group {
                 utils::updateable_value<uint32_t> cpu_concurrency)
                 : weight(shares)
                 , memory_share(0)
-                , sem(utils::updateable_value(count), 0, name, max_queue_length, std::move(serialize_limit_multiplier), std::move(kill_limit_multiplier), std::move(cpu_concurrency)) {}
+                , sem(utils::updateable_value(count), 0, name, max_queue_length, std::move(serialize_limit_multiplier), std::move(kill_limit_multiplier), std::move(cpu_concurrency), reader_concurrency_semaphore::register_metrics::yes) {}
     };
 
     std::unordered_map<scheduling_group, weighted_reader_concurrency_semaphore> _semaphores;
