@@ -1628,17 +1628,11 @@ future<std::unordered_map<gms::inet_address, gms::inet_address>> system_keyspace
 }
 
 template <typename Value>
-future<> system_keyspace::update_cached_values(gms::inet_address ep, sstring column_name, Value value) {
-    return make_ready_future<>();
-}
-
-template <typename Value>
 future<> system_keyspace::update_peer_info(gms::inet_address ep, sstring column_name, Value value) {
     if (ep == utils::fb_utilities::get_broadcast_address()) {
         on_internal_error(slogger, format("update_peer_info called for this node: {}", ep));
     }
 
-    co_await update_cached_values(ep, column_name, value);
     sstring req = format("INSERT INTO system.{} (peer, {}) VALUES (?, ?)", PEERS, column_name);
     slogger.debug("INSERT INTO system.{} (peer, {}) VALUES ({}, {})", PEERS, column_name, ep, value);
     co_await execute_cql(req, ep.addr(), value).discard_result();
