@@ -3614,7 +3614,7 @@ future<> storage_service::handle_state_normal(inet_address endpoint, gms::permit
         co_await remove_endpoint(ep, ep == endpoint ? pid : gms::null_permit_id);
     }
     slogger.debug("handle_state_normal: endpoint={} is_normal_token_owner={} endpoint_to_remove={} owned_tokens={}", endpoint, is_normal_token_owner, endpoints_to_remove.contains(endpoint), owned_tokens);
-    if (!owned_tokens.empty() && !endpoints_to_remove.count(endpoint)) {
+    if (endpoint != get_broadcast_address() && !owned_tokens.empty() && !endpoints_to_remove.count(endpoint)) {
         co_await update_peer_info(endpoint);
         try {
             co_await _sys_ks.local().update_tokens(endpoint, owned_tokens);
@@ -3792,8 +3792,10 @@ future<> storage_service::on_change(inet_address endpoint, application_state sta
             co_return;
         }
         if (get_token_metadata().is_normal_token_owner(endpoint)) {
-            slogger.debug("endpoint={} on_change:     updating system.peers table", endpoint);
-            co_await do_update_system_peers_table(endpoint, state, value);
+            if (endpoint != get_broadcast_address()) {
+                slogger.debug("endpoint={} on_change:     updating system.peers table", endpoint);
+                co_await do_update_system_peers_table(endpoint, state, value);
+            }
             if (state == application_state::RPC_READY) {
                 slogger.debug("Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
                 co_await notify_cql_change(endpoint, ep_state->is_cql_ready());
