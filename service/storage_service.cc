@@ -3784,25 +3784,24 @@ future<> storage_service::on_change(gms::inet_address endpoint, const gms::appli
             co_return; // did nothing.
         }
     });
-    // FIXME: indentation
-        auto ep_state = _gossiper.get_endpoint_state_ptr(endpoint);
-        if (!ep_state || _gossiper.is_dead_state(*ep_state)) {
-            slogger.debug("Ignoring state change for dead or unknown endpoint: {}", endpoint);
-            co_return;
+    auto ep_state = _gossiper.get_endpoint_state_ptr(endpoint);
+    if (!ep_state || _gossiper.is_dead_state(*ep_state)) {
+        slogger.debug("Ignoring state change for dead or unknown endpoint: {}", endpoint);
+        co_return;
+    }
+    if (get_token_metadata().is_normal_token_owner(endpoint)) {
+        if (endpoint != get_broadcast_address()) {
+            slogger.debug("endpoint={} on_change:     updating system.peers table", endpoint);
+            co_await _sys_ks.local().update_peer_info(endpoint, get_peer_info_for_update(endpoint, states));
         }
-        if (get_token_metadata().is_normal_token_owner(endpoint)) {
-            if (endpoint != get_broadcast_address()) {
-                slogger.debug("endpoint={} on_change:     updating system.peers table", endpoint);
-                co_await _sys_ks.local().update_peer_info(endpoint, get_peer_info_for_update(endpoint, states));
-            }
-            if (states.contains(application_state::RPC_READY)) {
-                slogger.debug("Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
-                co_await notify_cql_change(endpoint, ep_state->is_cql_ready());
-            }
-            if (auto it = states.find(application_state::INTERNAL_IP); it != states.end()) {
-                co_await maybe_reconnect_to_preferred_ip(endpoint, inet_address(it->second.value()));
-            }
+        if (states.contains(application_state::RPC_READY)) {
+            slogger.debug("Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
+            co_await notify_cql_change(endpoint, ep_state->is_cql_ready());
         }
+        if (auto it = states.find(application_state::INTERNAL_IP); it != states.end()) {
+            co_await maybe_reconnect_to_preferred_ip(endpoint, inet_address(it->second.value()));
+        }
+    }
 }
 
 future<> storage_service::maybe_reconnect_to_preferred_ip(inet_address ep, inet_address local_ip) {
