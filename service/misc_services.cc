@@ -268,8 +268,8 @@ future<> view_update_backlog_broker::stop() {
     });
 }
 
-future<> view_update_backlog_broker::on_change(gms::inet_address endpoint, gms::application_state state, const gms::versioned_value& value, gms::permit_id) {
-    if (state == gms::application_state::VIEW_BACKLOG) {
+future<> view_update_backlog_broker::on_change(gms::inet_address endpoint, const gms::application_state_map& states, gms::permit_id pid) {
+    return on_application_state_change(endpoint, states, gms::application_state::VIEW_BACKLOG, pid, [this] (gms::inet_address endpoint, const gms::versioned_value& value, gms::permit_id) {
         size_t current;
         size_t max;
         api::timestamp_type ticks;
@@ -299,8 +299,7 @@ future<> view_update_backlog_broker::on_change(gms::inet_address endpoint, gms::
             }
             return make_ready_future();
         });
-    }
-    return make_ready_future();
+    });
 }
 
 future<> view_update_backlog_broker::on_remove(gms::inet_address endpoint, gms::permit_id) {
