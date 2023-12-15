@@ -93,7 +93,7 @@ int main(int ac, char ** av) {
 
             std::cout << "Start gossiper service ...\n";
 
-            std::map<gms::application_state, gms::versioned_value> app_states = {
+            gms::application_state_map app_states = {
                 { gms::application_state::LOAD, gms::versioned_value::load(0.5) },
             };
 
