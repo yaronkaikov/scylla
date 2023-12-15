@@ -24,6 +24,7 @@
 #include "cdc/generation_id.hh"
 #include "locator/host_id.hh"
 #include "mutation/canonical_mutation.hh"
+#include "types/types.hh"
 
 namespace sstables {
     struct entry_descriptor;
@@ -518,7 +519,7 @@ public:
     future<> shutdown();
 
 private:
-    future<::shared_ptr<cql3::untyped_result_set>> execute_cql(const sstring& query_string, const std::initializer_list<data_value>& values);
+    future<::shared_ptr<cql3::untyped_result_set>> execute_cql(const sstring& query_string, const data_value_list& values);
     template <typename... Args>
     future<::shared_ptr<cql3::untyped_result_set>> execute_cql_with_timeout(sstring req, db::timeout_clock::time_point timeout, Args&&... args);
 
