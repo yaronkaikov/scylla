@@ -1,7 +1,7 @@
 .. |SCYLLA_NAME| replace:: ScyllaDB Enterprise
 
-.. |SRC_VERSION| replace:: 2022.x
-.. |NEW_VERSION| replace:: 2023.1
+.. |SRC_VERSION| replace:: 2023.1
+.. |NEW_VERSION| replace:: 2024.1
 
 .. |DEBIAN_SRC_REPO| replace:: Debian
 .. _DEBIAN_SRC_REPO: https://www.scylladb.com/customer-portal/#downloads
@@ -16,49 +16,77 @@
 .. _SCYLLA_RPM_SRC_REPO: https://www.scylladb.com/customer-portal/#downloads
 
 .. |DEBIAN_NEW_REPO| replace:: Debian
-.. _DEBIAN_NEW_REPO: https://www.scylladb.com/customer-portal/?product=ent&platform=debian-9&version=stable-release-2023.1
+.. _DEBIAN_NEW_REPO: https://www.scylladb.com/customer-portal/?product=ent&platform=debian-9&version=stable-release-2024.1
 
 .. |UBUNTU_NEW_REPO| replace:: Ubuntu
-.. _UBUNTU_NEW_REPO: https://www.scylladb.com/customer-portal/?product=ent&platform=ubuntu-20.04&version=stable-release-2023.1
+.. _UBUNTU_NEW_REPO: https://www.scylladb.com/customer-portal/?product=ent&platform=ubuntu-20.04&version=stable-release-2024.1
 
 .. |SCYLLA_DEB_NEW_REPO| replace:: ScyllaDB deb repo (|DEBIAN_NEW_REPO|_, |UBUNTU_NEW_REPO|_)
 
 .. |SCYLLA_RPM_NEW_REPO| replace:: ScyllaDB rpm repo
-.. _SCYLLA_RPM_NEW_REPO: https://www.scylladb.com/customer-portal/?product=ent&platform=centos7&version=stable-release-2023.1
+.. _SCYLLA_RPM_NEW_REPO: https://www.scylladb.com/customer-portal/?product=ent&platform=centos7&version=stable-release-2024.1
 
 .. |ROLLBACK| replace:: rollback
 .. _ROLLBACK: ./#rollback-procedure
 
-.. |SCYLLA_METRICS| replace:: ScyllaDB Enterprise Metrics Update - ScyllaDB Enterprise 2022.x to 2023.1
-.. _SCYLLA_METRICS: ../metric-update-2022.x-to-2023.1
+.. |SCYLLA_METRICS| replace:: ScyllaDB Enterprise Metrics Update - ScyllaDB Enterprise 2023.1 to 2024.1
+.. _SCYLLA_METRICS: ../metric-update-2023.1-to-2024.1
 
 =============================================================================
 Upgrade Guide - |SCYLLA_NAME| |SRC_VERSION| to |NEW_VERSION|
 =============================================================================
 
-This document is a step by step procedure for upgrading from |SCYLLA_NAME| |SRC_VERSION| to |SCYLLA_NAME| |NEW_VERSION|, and rollback to version |SRC_VERSION| if required.
+This document is a step by step procedure for upgrading from |SCYLLA_NAME| 
+|SRC_VERSION| to |SCYLLA_NAME| |NEW_VERSION|, and rollback to version 
+|SRC_VERSION| if required.
 
-This guide covers upgrading ScyllaDB on Red Hat Enterprise Linux (RHEL) CentOS, Debian, and Ubuntu. See :doc:`OS Support by Platform and Version </getting-started/os-support>` for information about supported versions.
+This guide covers upgrading ScyllaDB on Red Hat Enterprise Linux (RHEL) CentOS, 
+Debian, and Ubuntu. See :doc:`OS Support by Platform and Version </getting-started/os-support>` 
+for information about supported versions.
 
-This guide also applies when you're upgrading ScyllaDB Enterprise official image on EC2, GCP, or Azure. The image is based on Ubuntu 22.04.
+This guide also applies when you're upgrading ScyllaDB Enterprise official image 
+on EC2, GCP, or Azure.
 
 Before You Upgrade ScyllaDB Enterprise
 =======================================
 
 **Upgrade Your Driver**
 
-If you're using a :doc:`ScyllaDB driver </using-scylla/drivers/cql-drivers/index>`, upgrade the driver
-before you upgrade ScyllaDB Enterprise. The latest two versions of each driver are supported.
+If you're using a :doc:`ScyllaDB driver </using-scylla/drivers/cql-drivers/index>`, 
+upgrade the driverbefore you upgrade ScyllaDB Enterprise. The latest two 
+versions of each driver are supported.
 
 **Upgrade ScyllaDB Monitoring Stack**
 
-If you're using the ScyllaDB Monitoring Stack, verify that your Monitoring Stack version supports 
-the ScyllaDB Enterprise version to which you want to upgrade. See 
+If you're using the ScyllaDB Monitoring Stack, verify that your Monitoring 
+Stack version supports  the ScyllaDB Enterprise version to which you want 
+to upgrade. See 
 `ScyllaDB Monitoring Stack Support Matrix <https://monitoring.docs.scylladb.com/stable/reference/matrix.html>`_.
-
 We recommend upgrading the Monitoring Stack to the latest version.
 
+.. note::
 
+   DateTieredCompactionStrategy is removed in 2024.1. Migrate to 
+   TimeWindowCompactionStrategy before you upgrade from 2023.1 to 2024.1.
+
+.. note::
+
+   In ScyllaDB Enterprise 2024.1, Raft-based consistent cluster management for 
+   existing deployments is enabled by default. If you want the consistent 
+   cluster management feature to be disabled in version 2024.1, you must 
+   update the configuration **before** upgrading from 2023.1 to 2024.1:
+
+    #. Set ``consistent_cluster_management: false`` in the ``scylla.yaml`` 
+       configuration file on each node in the cluster.
+    #. Start the upgrade procedure.
+
+   Consistent cluster management **cannot** be disabled in version 2024.1 if it 
+   was enabled in version 2023.1 in one of the following ways:
+
+   * Your cluster was created in version 2023.1 with the default 
+     ``consistent_cluster_management: true`` configuration in ``scylla.yaml``.
+   * You explicitly set ``consistent_cluster_management: true`` in ``scylla.yaml`` 
+     in an existing cluster in version 2023.1.
 
 Upgrade Procedure
 =================
@@ -71,7 +99,6 @@ For each of the nodes in the cluster you will:
 * Backup the configuration file
 * Stop ScyllaDB
 * Download and install new ScyllaDB packages
-* (Optional) Enable consistent cluster management in the configuration file
 * Start ScyllaDB
 * Validate that the upgrade was successful
 
@@ -86,11 +113,21 @@ For each of the nodes in the cluster you will:
 * Not to run administration functions, like repairs, refresh, rebuild or add or remove nodes. See `sctool <https://manager.docs.scylladb.com/stable/sctool/>`_ for suspending ScyllaDB Manager's scheduled or running repairs.
 * Not to apply schema changes.
 
-.. note:: Before upgrading, make sure to use the latest `ScyllaDB Monitoring <https://monitoring.docs.scylladb.com/>`_ stack.
+**After** the upgrade, you need to verify that Raft was successfully initiated 
+in your cluster. You can skip this step only in one of the following cases:
 
-If you enabled consistent cluster management in each node's configuration file, then as soon as every node has been upgraded to the new version, 
-the cluster will start a procedure that initializes the Raft algorithm for consistent cluster metadata management.
-You must then :ref:`verify <upgrade-2023.1-validate-raft-setup>` that this procedure successfully finishes.
+* The ``consistent_cluster_management`` option was enabled in a previous 
+  ScyllaDB version.
+* You you disabled the ``consistent_cluster_management`` option before 
+  upgrading to version 2024.1, as described in the note in the *Before 
+  You Upgrade ScyllaDB* section.
+
+Otherwise, as soon as every node has been upgraded to the new version, 
+the cluster will start a procedure that initializes the Raft algorithm for 
+consistent cluster metadata management. You must then 
+:ref:`verify <validate-raft-setup-enabled-default-2024.1>` that the Raft 
+initialization procedure has successfully finished.
+
 
 Upgrade Steps
 =============
@@ -120,7 +157,7 @@ Gracefully stop the node
 
    sudo service scylla-server stop
 
-.. _upgrade-debian-ubuntu-enterprise-2023.1: 
+.. _upgrade-debian-ubuntu-enterprise-2024.1: 
 
 Download and install the new release
 ------------------------------------
@@ -213,80 +250,11 @@ Download and install the new release
         #. Run ``scylla_setup`` without ``running io_setup``.
         #. Run ``sudo /opt/scylladb/scylla-machine-image/scylla_cloud_io_setup``.
 
-   .. group-tab:: EC2/GCP/Azure Ubuntu Image
+.. note::
 
-        Before upgrading, check what version you are running now using ``scylla --version``. You should use the same version as this version in case you want to |ROLLBACK|_ the upgrade. If you are not running a |SRC_VERSION|.x version, stop right here! This guide only covers |SRC_VERSION|.x to |NEW_VERSION|.y upgrades.
-
-        There are two alternative upgrade procedures: upgrading ScyllaDB and simultaneously updating 3rd party and OS packages - recommended if you 
-        are running a ScyllaDB official image (EC2 AMI, GCP, and Azure images), which is based on Ubuntu 22.04, and upgrading ScyllaDB without updating 
-        any external packages.
-
-        **To upgrade ScyllaDB and update 3rd party and OS packages (RECOMMENDED):**
-
-        Choosing this upgrade procedure allows you to upgrade your ScyllaDB version and update the 3rd party and OS packages using one command.
-
-        #. Update the |SCYLLA_DEB_NEW_REPO| to |NEW_VERSION|.
-
-        #. Load the new repo:
-
-            .. code:: sh
-
-               sudo apt-get update
-
-
-        #. Run the following command to update the manifest file:
-
-            .. code:: sh
-
-               cat scylla-enterprise-packages-<version>-<arch>.txt | sudo xargs -n1 apt-get install -y
-
-            Where:
-
-              * ``<version>`` - The ScyllaDB Enterprise version to which you are upgrading ( |NEW_VERSION| ).
-              * ``<arch>`` - Architecture type: ``x86_64`` or ``aarch64``.
-
-            The file is included in the ScyllaDB Enterprise packages downloaded in the previous step. The file location is ``http://downloads.scylladb.com/downloads/scylla/aws/manifest/scylla-packages-<version>-<arch>.txt``
-
-            Example:
-
-                .. code:: sh
-
-                   cat scylla-enterprise-packages-2023.1.0-x86_64.txt | sudo xargs -n1 apt-get install -y
-
-                .. note::
-
-                   Alternatively, you can update the manifest file with the following command:
-
-                   ``sudo apt-get install $(awk '{print $1'} scylla-packages-<version>-<arch>.txt) -y``
-
- 
-
-        To upgrade ScyllaDB without updating any external packages, follow the :ref:`download and installation instructions for Debian/Ubuntu <upgrade-debian-ubuntu-enterprise-2023.1>`.
-
- 
-.. REMOVE IN FUTURE VERSIONS - The following section will have to be updated in the following versions, and removed when 
-  Raft is enabled by default and mandatory (cannot be disabled).
-
-.. _upgrade-2023.1-enable raft:
-
-(Optional) Enable consistent cluster management in the node's configuration file
---------------------------------------------------------------------------------
-
-Optionally, you can enable Raft-based consistent cluster management on your cluster with the ``consistent_cluster_management``
-option. Setting the option to ``true`` on every node enables the Raft consensus algorithm for your cluster. Raft will be used
-to consistently manage cluster-wide metadata as soon as you finish upgrading every node to the new version. See 
-:doc:`Raft in ScyllaDB </architecture/raft/>` to learn more.
-
-In 2023.1, Raft-based consistent cluster management is disabled by default.
-To enable it, modify the ``scylla.yaml`` configuration file in ``/etc/scylla/`` **on every node** and add the following:
-
-.. code:: yaml
-
-    consistent_cluster_management: true
-
-.. note:: Once you finish upgrading every node with ``consistent_cluster_management`` enabled, it won't be possible to disable the option.
-
-The option can also be enabled after the cluster is upgraded to |NEW_VERSION| (see :ref:`Enabling Raft in existing cluster <enabling-raft-existing-cluster>`).
+   If you are running a ScyllaDB Enterprise official image (for EC2 AMI, GCP, or Azure), you need to 
+   download and install the new ScyllaDB Enterprise release for Ubuntu. 
+   See :doc:`Upgrade ScyllaDB Image </upgrade/ami-upgrade>` for more information.
 
 Start the node
 --------------
@@ -306,29 +274,47 @@ Once you are sure the node upgrade was successful, move to the next node in the 
 
 See |Scylla_METRICS|_ for more information.
 
-.. _upgrade-2023.1-validate-raft-setup:
+After Upgrading Every Node
+===============================
 
-Validate Raft Setup After Upgrading Every Node
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+This section applies to upgrades where Raft is initialized for the first time 
+in the cluster, which in 2024.1 happens by default.
 
-The following section only applies :ref:`if you enabled <upgrade-2023.1-enable raft>` the ``consistent_cluster_management`` option 
-on every node when upgrading the cluster.
+You can skip this section only in one of the following cases:
 
-When you enable ``consistent_cluster_management`` on every node during an upgrade, the ScyllaDB cluster will start an additional 
-internal procedure as soon as every node is upgraded to the new version. The goal of the procedure is to initialize data structures 
-used by the Raft algorithm to consistently manage cluster-wide metadata such as table schemas.
+* The ``consistent_cluster_management`` option was enabled in a previous 
+  ScyllaDB version (i.e., Raft was enabled in a version prior to 2024.1).
+* You disabled the ``consistent_cluster_management`` option before upgrading 
+  to 2024.1, as described in the note in the *Before You Upgrade ScyllaDB* 
+  section (i.e., you prevented Raft from being enabled in 2024.1).
 
-If you performed the rolling upgrade procedure correctly (in particular, ensuring that schema is synchronized on every step 
-and there are no problems with cluster connectivity), that internal procedure should take no longer than a few seconds to finish.
-However, the procedure requires **full cluster availability**. If one of your nodes fails before this procedure finishes (for example, 
-due to a hardware problem), the procedure may get stuck. This may cause the cluster to end up in a state where schema change operations 
-are unavailable.
+.. _validate-raft-setup-enabled-default-2024.1:
 
-For this reason, **you must verify** that the internal procedure has finished successfully by checking the logs of every ScyllaDB node.
-If the procedure gets stuck, manual intervention is required.
+Validate Raft Setup
+-------------------------
 
-Refer to :ref:`Verifying that the internal Raft upgrade procedure finished successfully <verify-raft-procedure>` for instructions on how 
-to verify that the procedure was successful and how to proceed if it gets stuck.
+Enabling Raft causes the ScyllaDB cluster to start an internal Raft 
+initialization procedure as soon as every node is upgraded to the new version. 
+The goal of that procedure is to initialize data structures used by the Raft 
+algorithm to consistently manage cluster-wide metadata, such as table schemas.
+
+Assuming you performed the rolling upgrade procedure correctly (in particular, 
+ensuring that the schema is synchronized on every step), and if there are no 
+problems with cluster connectivity, that internal procedure should take a few 
+seconds to finish. However, the procedure requires full cluster availability.
+If one of the nodes fails before the procedure finishes (for example, due to 
+a hardware problem), the process may get stuck, which may prevent schema or 
+topology changes in your cluster.
+
+Therefore, following the rolling upgrade, you must verify that the internal 
+Raft initialization procedure has finished successfully by checking the logs 
+of every ScyllaDB node. If the process gets stuck, manual intervention is 
+required.
+
+Refer to the 
+:ref:`Verifying that the internal Raft upgrade procedure finished successfully <verify-raft-procedure>` 
+section for instructions on verifying that the procedure was successful and 
+proceeding if it gets stuck.
 
 Rollback Procedure
 ==================
@@ -368,9 +354,6 @@ Drain and gracefully stop the node
 
 Download and install the old release
 ------------------------------------
-
-..
-    TODO: downgrade for 3rd party packages in EC2/GCP/Azure - like in the upgrade section?
 
 .. tabs::
 
@@ -412,24 +395,11 @@ Download and install the old release
                sudo yum downgrade scylla\* -y
                sudo yum install scylla-enterprise
 
-   .. group-tab:: EC2/GCP/Azure Ubuntu Image
+.. note::
 
-        #. Remove the old repo file.
+   If you are running a ScyllaDB Enterprise official image (for EC2 AMI, GCP, 
+   or Azure), follow the instructions for Ubuntu. 
 
-            .. code:: sh
-
-               sudo rm -rf /etc/apt/sources.list.d/scylla.list
-
-        #. Update the |SCYLLA_DEB_SRC_REPO| to |SRC_VERSION|.
-        #. Install:
-
-            .. code-block::
-
-               sudo apt-get update
-               sudo apt-get remove scylla\* -y
-               sudo apt-get install scylla-enterprise
-
-        Answer ‘y’ to the first two questions.
 
 Restore the configuration file
 ------------------------------
@@ -437,17 +407,6 @@ Restore the configuration file
 
    sudo rm -rf /etc/scylla/scylla.yaml
    sudo cp -a /etc/scylla/scylla.yaml.backup-src | /etc/scylla/scylla.yaml
-
-Restore system tables
----------------------
-
-Restore all tables of **system** and **system_schema** from the previous snapshot because |NEW_VERSION| uses a different set of system tables. See :doc:`Restore from a Backup and Incremental Backup </operating-scylla/procedures/backup-restore/restore/>` for reference.
-
-.. code:: sh
-
-    cd /var/lib/scylla/data/keyspace_name/table_name-UUID/snapshots/<snapshot_name>/
-    sudo cp -r * /var/lib/scylla/data/keyspace_name/table_name-UUID/
-    sudo chown -R scylla:scylla /var/lib/scylla/data/keyspace_name/table_name-UUID/
 
 Reload systemd configuration
 ----------------------------
