@@ -30,7 +30,7 @@ For details about ScyllaDB Cloud, see the `ScyllaDB Cloud documentation <https:/
 Documentation Highlights
 --------------------------
 
-* :doc:`Install ScyllaDB Enterprise </getting-started/install-scylla/index>`
+* :doc:`Install ScyllaDB Enterprise </getting-started/install-scylla-enterprise/index>`
 * :doc:`Configure ScyllaDB Enterprise </getting-started/system-configuration/>`
 * :doc:`Cluster Management Procedures </operating-scylla/procedures/cluster-management/index>`
 * :doc:`ScyllaDB Enterprise Upgrade </upgrade/index>`

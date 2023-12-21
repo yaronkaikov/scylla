@@ -60,7 +60,7 @@ author = u"ScyllaDB Project Contributors"
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'lib', 'lib64','**/_common/*', 'README.md', 'README-enterprise.md', 'index.md', '.git', '.github', '_utils', 'rst_include', 'venv', 'dev', 'index.rst', 'upgrade/upgrade-opensource/*']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store', 'lib', 'lib64','**/_common/*', 'README.md', 'README-enterprise.md', 'index.md', '.git', '.github', '_utils', 'rst_include', 'venv', 'dev', 'index.rst', 'upgrade/upgrade-opensource/*', 'getting-started/install-scylla/*']
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = "sphinx"

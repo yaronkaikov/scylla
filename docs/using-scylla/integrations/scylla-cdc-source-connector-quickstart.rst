@@ -19,7 +19,7 @@ Scylla installation
 
 For the purpose of this quickstart, we will configure a Scylla instance using Docker. You can skip this 
 section if you have already installed Scylla. To learn more about installing Scylla in production
-environments, please refer to the :doc:`Install Scylla page </getting-started/install-scylla/index>`.
+environments, please refer to the installation guide in the :doc:`Getting Started </getting-started/index>` section.
 
 #. Using `Docker <https://hub.docker.com/r/scylladb/scylla/>`_, follow the instructions to launch Scylla.
 #. Start the Docker container, replacing the ``--name`` and ``--host name`` parameters with your own information. For example:

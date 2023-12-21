@@ -5,7 +5,7 @@ Getting Started
    :maxdepth: 2
    :hidden:
    
-   install-scylla/index
+   install-scylla-enterprise/index
    configure
    config-commands
    requirements
