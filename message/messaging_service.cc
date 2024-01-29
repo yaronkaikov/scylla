@@ -825,7 +825,7 @@ messaging_service::scheduling_group_for_isolation_cookie(const sstring& isolatio
         qos::service_level_options slo;
         // We put here the minimal ammount of shares for this service level to be functional. When the node catches up it will
         // be either deleted or the number of shares and other configuration options will be updated.
-        slo.shares.emplace<int32_t>(1);
+        slo.shares.emplace<int32_t>(1000);
         slo.shares_name.emplace(service_level_name);
         return _sl_controller.add_service_level(service_level_name, slo).then([this, service_level_name] () {
             if (_sl_controller.has_service_level(service_level_name)) {
