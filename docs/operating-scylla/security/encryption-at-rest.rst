@@ -129,10 +129,6 @@ The following cipher_algorithims are available for use with ScyllaDB using `Open
      - 128, 192, or 256
    * - Blowfish/CBC/PKCS5Padding    
      - 32-448
-   * - DESede/CBC/PKCS5Padding
-     - 112 or 168
-   * - RC2/CBC/PKCS5Padding
-     - 40-128 
 
 .. _ear-create-encryption-key:
 
@@ -175,7 +171,7 @@ The Key Generator script generates a key in the directory of your choice.
 
    Where:
 
-   * ``-a,--alg <arg>`` - the encryption algorithm (i.e. AES, 3DES) you want to use to encrypt the key
+   * ``-a,--alg <arg>`` - the encryption algorithm (e.g., AES) you want to use to encrypt the key
    * ``-c,--append`` - appends the output to the key file (default is to overwrite)
    * ``-h,--help`` - displays the help menu
    * ``-l,--length <arg>`` - the length of the encryption key in bits (i.e. 128, 256)
@@ -637,14 +633,14 @@ To encrypt an existing table named test in keyspace ks:
    ;
 
 
-To change the cipher algorithm from AES/ECB/PKCS5Padding to DESede/CBC/PKCS5Padding and to change the key strength from 128 to 112 on an existing table:
+To change the cipher algorithm from AES/ECB/PKCS5Padding to AES/ECB/PKCS5Padding and to change the key strength from 128 to 192 on an existing table:
 
 .. code-block:: cql
   
    ALTER TABLE ks.test WITH
      scylla_encryption_options = { 
-        'cipher_algorithm' : 'DESede/CBC/PKCS5Padding', 
-        'secret_key_strength' : 112,  
+        'cipher_algorithm' : 'AES/ECB/PKCS5Padding', 
+        'secret_key_strength' : 192,  
         'key_provider': 'LocalFileSystemKeyProviderFactory',  
         'secret_key_file': '/etc/scylla/encryption_keys/data_encryption_keys'
      }
