@@ -41,7 +41,8 @@ extensions = [
     "recommonmark",  # optional
     "sphinxcontrib.datatemplates",
     "scylladb_cc_properties",
-    "scylladb_aws_images"
+    "scylladb_aws_images",
+    "scylladb_include_flag",
 ]
 
 templates_path = ['_templates', '../_templates']
