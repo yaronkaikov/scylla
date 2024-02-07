@@ -1,0 +1,37 @@
+name: Dynamic Backport PR
+
+on:
+  pull_request:
+    types: [closed]
+    branch: [master]
+
+jobs:
+  backport:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      
+      - name: Extract Target Branch from Label
+        id: extract_branch
+        uses: actions/github-script@v5
+        with:
+          script: |
+            const labels = context.payload.pull_request.labels;
+            const backportLabel = labels.find(label => label.name.startsWith('backport/'));
+            if (!backportLabel) throw new Error('No backport label found');
+            const targetBranch = backportLabel.name.replace('backport/', 'next-');
+            return targetBranch;
+          result-encoding: 'string'
+
+      - name: Log Target Branch
+        run: echo "The target branch is ${{ steps.extract_branch.outputs.result }}"
+
+      - name: Backport to Target Branch
+        if: steps.extract_branch.outputs.result
+        uses: tibdex/backport@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          backport_to: ${{ steps.extract_branch.outputs.result }}
+
