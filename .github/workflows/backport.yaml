@@ -1,0 +1,32 @@
+name: Dynamic Backport PR
+
+on:
+  pull_request:
+    types: [closed]
+    branch: [master]
+
+jobs:
+  backport:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      
+      - name: Determine Backport Branch and Perform Backport
+        uses: actions/github-script@v5
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const labels = context.payload.pull_request.labels;
+            const backportLabel = labels.find(label => label.name.startsWith('backport/'));
+            if (!backportLabel) {
+              console.log('No backport label found');
+              return;
+            }
+            const targetBranch = backportLabel.name.replace('backport/', 'next-');
+            // Here, you would include the logic to perform the backport operation
+            // Since the direct backport_to parameter isn't supported, you may need to use
+            // the GitHub API or another method to create a new branch and PR for the backport
+            console.log(`Backport to ${targetBranch} would be initiated here.`);
+
