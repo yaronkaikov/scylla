@@ -12,7 +12,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
-      
       - name: Determine Backport Branch and Perform Backport
         uses: actions/github-script@v5
         with:
