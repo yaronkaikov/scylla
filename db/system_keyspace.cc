@@ -1677,7 +1677,7 @@ static data_value_or_unset make_data_value_or_unset(const std::optional<std::uno
 };
 }
 
-future<> system_keyspace::update_peer_info(gms::inet_address ep, const peer_info& info) {
+future<> system_keyspace::update_peer_info(gms::inet_address ep, locator::host_id hid, const peer_info& info) {
     if (ep == utils::fb_utilities::get_broadcast_address()) {
         on_internal_error(slogger, format("update_peer_info called for this node: {}", ep));
     }
@@ -1685,7 +1685,7 @@ future<> system_keyspace::update_peer_info(gms::inet_address ep, const peer_info
     data_value_list values = {
         data_value_or_unset(data_value(ep.addr())),
         make_data_value_or_unset(info.data_center),
-        make_data_value_or_unset(info.host_id),
+        data_value_or_unset(hid.id),
         make_data_value_or_unset(info.preferred_ip),
         make_data_value_or_unset(info.rack),
         make_data_value_or_unset(info.release_version),

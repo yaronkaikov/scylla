@@ -414,9 +414,8 @@ future<> storage_service::topology_state_load() {
                 info.tokens = rs.ring.value().tokens;
                 info.data_center = rs.datacenter;
                 info.rack = rs.rack;
-                info.host_id = id.uuid();
                 info.release_version = rs.release_version;
-                co_await _sys_ks.local().update_peer_info(ip, info);
+                co_await _sys_ks.local().update_peer_info(ip, host_id, info);
             } else {
                 co_await _sys_ks.local().update_tokens(rs.ring.value().tokens);
                 co_await _gossiper.add_local_application_state({{ gms::application_state::STATUS, gms::versioned_value::normal(rs.ring.value().tokens) }});
@@ -464,9 +463,7 @@ future<> storage_service::topology_state_load() {
             case node_state::bootstrapping:
                 if (!utils::fb_utilities::is_me(ip)) {
                     // Save ip -> id mapping in peers table because we need it on restart, but do not save tokens until owned
-                    db::system_keyspace::peer_info info;
-                    info.host_id = id.uuid();
-                    co_await _sys_ks.local().update_peer_info(ip, info);
+                    co_await _sys_ks.local().update_peer_info(ip, host_id, {});
                 }
                 update_topology(host_id, ip, rs);
                 if (_topology_state_machine._topology.normal_nodes.empty()) {
@@ -3620,7 +3617,7 @@ future<> storage_service::handle_state_normal(inet_address endpoint, gms::permit
         try {
             auto info = get_peer_info_for_update(endpoint);
             info.tokens = std::move(owned_tokens);
-            co_await _sys_ks.local().update_peer_info(endpoint, info);
+            co_await _sys_ks.local().update_peer_info(endpoint, host_id, info);
         } catch (...) {
             slogger.error("handle_state_normal: fail to update tokens for {}: {}", endpoint, std::current_exception());
         }
@@ -3789,10 +3786,11 @@ future<> storage_service::on_change(gms::inet_address endpoint, const gms::appli
         slogger.debug("Ignoring state change for dead or unknown endpoint: {}", endpoint);
         co_return;
     }
+    const auto host_id = _gossiper.get_host_id(endpoint);
     if (get_token_metadata().is_normal_token_owner(endpoint)) {
         if (endpoint != get_broadcast_address()) {
             slogger.debug("endpoint={} on_change:     updating system.peers table", endpoint);
-            co_await _sys_ks.local().update_peer_info(endpoint, get_peer_info_for_update(endpoint, states));
+            co_await _sys_ks.local().update_peer_info(endpoint, host_id, get_peer_info_for_update(endpoint, states));
         }
         if (states.contains(application_state::RPC_READY)) {
             slogger.debug("Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
@@ -3879,9 +3877,6 @@ db::system_keyspace::peer_info storage_service::get_peer_info_for_update(inet_ad
         switch (state) {
         case application_state::DC:
             insert_string(ret.data_center, value, "data_center");
-            break;
-        case application_state::HOST_ID:
-            insert_uuid(ret.host_id, value, "host_id");
             break;
         case application_state::INTERNAL_IP:
             insert_address(ret.preferred_ip, value, "preferred_ip");
