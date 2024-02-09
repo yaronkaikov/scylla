@@ -1678,6 +1678,12 @@ static data_value_or_unset make_data_value_or_unset(const std::optional<std::uno
 }
 
 future<> system_keyspace::update_peer_info(gms::inet_address ep, locator::host_id hid, const peer_info& info) {
+    if (ep == gms::inet_address{}) {
+        on_internal_error(slogger, format("update_peer_info called with empty inet_address, host_id {}", hid));
+    }
+    if (!hid) {
+        on_internal_error(slogger, format("update_peer_info called with empty host_id, ep {}", ep));
+    }
     if (ep == utils::fb_utilities::get_broadcast_address()) {
         on_internal_error(slogger, format("update_peer_info called for this node: {}", ep));
     }
