@@ -600,7 +600,7 @@ public:
         case sstables::component_type::Scylla:
         case sstables::component_type::TemporaryTOC:
         case sstables::component_type::TOC:
-            return make_ready_future<file>();
+            co_return file{};
         default:
             break;
         }
@@ -633,13 +633,14 @@ public:
                         logg.debug("Open encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
 
                         if (esx->should_delay_read(id)) {
-                            return make_ready_future<file>(make_delayed_encrypted_file(f, esx->key_block_size(), [esx, id = std::move(id)] {
+                            logg.debug("Encrypted sstable component {} using delayed opening", sst.component_basename(type));
+
+                            co_return make_delayed_encrypted_file(f, esx->key_block_size(), [esx, id = std::move(id)] {
                                 return esx->key_for_read(id);
-                            }));
+                            });
                         }
-                        return esx->key_for_read(std::move(id)).then([esx, f](::shared_ptr<symmetric_key> k) {
-                            return make_ready_future<file>(make_encrypted_file(f, std::move(k)));
-                        });
+                        auto k = co_await esx->key_for_read(std::move(id));
+                        co_return make_encrypted_file(f, std::move(k));
                     }
                 }
             }
@@ -669,30 +670,31 @@ public:
                     id = ext.map.at(key_id_attribute_ds).value;
                 }
 
+                auto [k, k_id] = co_await esx->key_for_write(std::move(id));
+
+                id = std::move(k_id);
                 logg.debug("Write encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
 
-                return esx->key_for_write(std::move(id)).then([&ext, esx, f, type](std::tuple<::shared_ptr<symmetric_key>, opt_bytes> k_id) {
-                    auto&& [k, id] = k_id;
-                    if (!ext.map.count(encryption_attribute_ds)) {
-                        ext.map.emplace(encryption_attribute_ds, sstables::disk_string<uint32_t>{esx->serialize()});
+                if (!ext.map.count(encryption_attribute_ds)) {
+                    ext.map.emplace(encryption_attribute_ds, sstables::disk_string<uint32_t>{esx->serialize()});
+                }
+                if (id) {
+                    ext.map.emplace(key_id_attribute_ds, sstables::disk_string<uint32_t>{*id});
+                }
+                if (type != sstables::component_type::Data) {
+                    uint32_t mask = 0;
+                    if (ext.map.count(encrypted_components_attribute_ds)) {
+                        mask = ser::deserialize_from_buffer(ext.map.at(encrypted_components_attribute_ds).value, boost::type<uint32_t>{}, 0);
                     }
-                    if (id) {
-                        ext.map.emplace(key_id_attribute_ds, sstables::disk_string<uint32_t>{*id});
-                    }
-                    if (type != sstables::component_type::Data) {
-                        uint32_t mask = 0;
-                        if (ext.map.count(encrypted_components_attribute_ds)) {
-                            mask = ser::deserialize_from_buffer(ext.map.at(encrypted_components_attribute_ds).value, boost::type<uint32_t>{}, 0);
-                        }
-                        mask |= (1 << int(type));
-                        // just a marker. see above
-                        ext.map[encrypted_components_attribute_ds] = sstables::disk_string<uint32_t>{ser::serialize_to_buffer<bytes>(mask, 0)};
-                    }
-                    return make_ready_future<file>(make_encrypted_file(f, std::move(k)));
-                });
+                    mask |= (1 << int(type));
+                    // just a marker. see above
+                    ext.map[encrypted_components_attribute_ds] = sstables::disk_string<uint32_t>{ser::serialize_to_buffer<bytes>(mask, 0)};
+                }
+                co_return make_encrypted_file(f, std::move(k));
             }
         }
-        return make_ready_future<file>();
+
+        co_return file{};
     }
 };
 
