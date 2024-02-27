@@ -630,15 +630,17 @@ public:
                             id = exta->map.at(key_id_attribute_ds).value;
                         }
 
-                        logg.debug("Open encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
-
                         if (esx->should_delay_read(id)) {
-                            logg.debug("Encrypted sstable component {} using delayed opening", sst.component_basename(type));
+                            logg.debug("Encrypted sstable component {} using delayed opening {} (id: {})", sst.component_basename(type), *esx, id);
 
-                            co_return make_delayed_encrypted_file(f, esx->key_block_size(), [esx, id = std::move(id)] {
+                            co_return make_delayed_encrypted_file(f, esx->key_block_size(), [esx, comp = sst.component_basename(type), id = std::move(id)] {
+                                logg.trace("Delayed component {} using {} (id: {}) resolve", comp, *esx, id);
                                 return esx->key_for_read(id);
                             });
                         }
+
+                        logg.debug("Open encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
+
                         auto k = co_await esx->key_for_read(std::move(id));
                         co_return make_encrypted_file(f, std::move(k));
                     }
@@ -670,27 +672,43 @@ public:
                     id = ext.map.at(key_id_attribute_ds).value;
                 }
 
-                auto [k, k_id] = co_await esx->key_for_write(std::move(id));
-
-                id = std::move(k_id);
                 logg.debug("Write encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
 
-                if (!ext.map.count(encryption_attribute_ds)) {
-                    ext.map.emplace(encryption_attribute_ds, sstables::disk_string<uint32_t>{esx->serialize()});
-                }
-                if (id) {
-                    ext.map.emplace(key_id_attribute_ds, sstables::disk_string<uint32_t>{*id});
-                }
-                if (type != sstables::component_type::Data) {
-                    uint32_t mask = 0;
-                    if (ext.map.count(encrypted_components_attribute_ds)) {
-                        mask = ser::deserialize_from_buffer(ext.map.at(encrypted_components_attribute_ds).value, boost::type<uint32_t>{}, 0);
+                /**
+                 * #3954 We can be (and are) called with two components simultaneously (hello index, data).
+                 * If this case we could block on the below "key" call and iff provider has certain cache behaviour (hello replicated)
+                 * or caches expire, we could end up with different keys for respective components, leading to one
+                 * of the components ending up unreadable.
+                */
+                for (;;) {
+                    auto [k, k_id] = co_await esx->key_for_write(std::move(id));
+
+                    if (k_id && ext.map.count(key_id_attribute_ds)) {
+                        id = ext.map.at(key_id_attribute_ds).value;
+                        if (k_id != id) {
+                            continue;
+                        }
                     }
-                    mask |= (1 << int(type));
-                    // just a marker. see above
-                    ext.map[encrypted_components_attribute_ds] = sstables::disk_string<uint32_t>{ser::serialize_to_buffer<bytes>(mask, 0)};
+
+                    id = std::move(k_id);
+
+                    if (!ext.map.count(encryption_attribute_ds)) {
+                        ext.map.emplace(encryption_attribute_ds, sstables::disk_string<uint32_t>{esx->serialize()});
+                    }
+                    if (id) {
+                        ext.map.emplace(key_id_attribute_ds, sstables::disk_string<uint32_t>{*id});
+                    }
+                    if (type != sstables::component_type::Data) {
+                        uint32_t mask = 0;
+                        if (ext.map.count(encrypted_components_attribute_ds)) {
+                            mask = ser::deserialize_from_buffer(ext.map.at(encrypted_components_attribute_ds).value, boost::type<uint32_t>{}, 0);
+                        }
+                        mask |= (1 << int(type));
+                        // just a marker. see above
+                        ext.map[encrypted_components_attribute_ds] = sstables::disk_string<uint32_t>{ser::serialize_to_buffer<bytes>(mask, 0)};
+                    }
+                    co_return make_encrypted_file(f, std::move(k));
                 }
-                co_return make_encrypted_file(f, std::move(k));
             }
         }
 
