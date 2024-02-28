@@ -123,7 +123,9 @@ public:
 
 private:
     void store_key(const key_id&, const UUID&, key_ptr);
-    opt_bytes decode_id(const opt_bytes&) const;
+
+    static opt_bytes decode_id(const opt_bytes&);
+    static bytes encode_id(const UUID&);
 
     future<std::tuple<UUID, key_ptr>> get_key(const key_info&, opt_bytes = {});
 
@@ -185,7 +187,7 @@ void replicated_key_provider::store_key(const key_id& id, const UUID& uuid, key_
     }
 }
 
-opt_bytes replicated_key_provider::decode_id(const opt_bytes& b) const {
+opt_bytes replicated_key_provider::decode_id(const opt_bytes& b) {
     if (b) {
         auto i = b->begin();
         auto v = *i++;
@@ -198,6 +200,16 @@ opt_bytes replicated_key_provider::decode_id(const opt_bytes& b) const {
         }
     }
     return std::nullopt;
+}
+
+bytes replicated_key_provider::encode_id(const UUID& uuid) {
+    bytes b{bytes::initialized_later(), header_size};
+    auto i = b.begin();
+    *i++ = version;
+    uuid.serialize(i);
+    auto md = calculate_md5(b, 1, 16);
+    std::copy(md.begin(), md.end(), i);
+    return b;
 }
 
 future<std::tuple<key_ptr, opt_bytes>> replicated_key_provider::key(const key_info& info, opt_bytes input) {
@@ -214,21 +226,9 @@ future<std::tuple<key_ptr, opt_bytes>> replicated_key_provider::key(const key_in
         }
     }
 
-    auto gen_id = !input;
-
-    return get_key(info, std::move(id)).then([gen_id](std::tuple<UUID, key_ptr> uuid_k) {
+    return get_key(info, std::move(id)).then([](std::tuple<UUID, key_ptr> uuid_k) {
         auto&& [uuid, k] = uuid_k;
-        opt_bytes id;
-        if (gen_id) { // write case. need to give key id back
-            bytes b{bytes::initialized_later(), header_size};
-            auto i = b.begin();
-            *i++ = version;
-            uuid.serialize(i);
-            auto md = calculate_md5(b, 1, 16);
-            std::copy(md.begin(), md.end(), i);
-            id = std::move(b);
-        }
-        return make_ready_future<std::tuple<key_ptr, opt_bytes>>(std::tuple(k, std::move(id)));
+        return make_ready_future<std::tuple<key_ptr, opt_bytes>>(std::tuple(k, encode_id(uuid)));
     }).handle_exception([this, info, input = std::move(input)](std::exception_ptr ep) {
         log.warn("Exception looking up key {}: {}", info, ep);
         if (_local_provider) {
