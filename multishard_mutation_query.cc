@@ -215,7 +215,7 @@ public:
             : _db(db)
             , _schema(std::move(s))
             , _erm(std::move(erm))
-            , _permit(_db.local().get_reader_concurrency_semaphore().make_tracking_only_permit(_schema.get(), "multishard-mutation-query", timeout, trace_state))
+            , _permit(_db.local().get_reader_concurrency_semaphore().make_tracking_only_permit(_schema, "multishard-mutation-query", timeout, trace_state))
             , _cmd(cmd)
             , _ranges(ranges)
             , _trace_state(std::move(trace_state))
@@ -251,7 +251,7 @@ public:
     }
 
     query::max_result_size get_max_result_size() {
-        return _cmd.max_result_size ? *_cmd.max_result_size : _db.local().get_unlimited_query_max_result_size();
+        return _cmd.max_result_size ? *_cmd.max_result_size : _db.local().get_query_max_result_size();
     }
 
     virtual flat_mutation_reader_v2 create_reader(

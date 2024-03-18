@@ -572,7 +572,7 @@ schema_ptr do_load_schema_from_schema_tables(const db::config& dbcfg, std::files
                 sst_man,
                 schema_tables_path / schema_table_table_dir[s],
                 schema_factory,
-                rcs_sem.make_tracking_only_permit(s.get(), "schema_mutation", db::no_timeout, {}),
+                rcs_sem.make_tracking_only_permit(s, "schema_mutation", db::no_timeout, {}),
                 keyspace,
                 {table});
     };
@@ -595,7 +595,7 @@ schema_ptr do_load_schema_from_schema_tables(const db::config& dbcfg, std::files
             sst_man,
             schema_tables_path / schema_table_table_dir[db::schema_tables::types()],
             db::schema_tables::types,
-            rcs_sem.make_tracking_only_permit(db::schema_tables::types().get(), "types_mutation", db::no_timeout, {}),
+            rcs_sem.make_tracking_only_permit(db::schema_tables::types(), "types_mutation", db::no_timeout, {}),
             keyspace,
             {});
     if (types_mut) {

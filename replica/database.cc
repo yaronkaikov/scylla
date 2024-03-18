@@ -1661,7 +1661,7 @@ public:
     }
     virtual future<reader_permit> obtain_reader_permit(schema_ptr schema, const char* const description, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_ptr) override {
         auto& cf = _db.local().find_column_family(_table_id);
-        return semaphore().obtain_permit(schema.get(), description, cf.estimate_read_memory_cost(), timeout, std::move(trace_ptr));
+        return semaphore().obtain_permit(schema, description, cf.estimate_read_memory_cost(), timeout, std::move(trace_ptr));
     }
 };
 
@@ -1735,7 +1735,7 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
     }
 
     auto& semaphore = get_reader_concurrency_semaphore();
-    auto max_result_size = cmd.max_result_size ? *cmd.max_result_size : get_unlimited_query_max_result_size();
+    auto max_result_size = cmd.max_result_size ? *cmd.max_result_size : get_query_max_result_size();
 
     std::optional<query::querier> querier_opt;
     lw_shared_ptr<query::result> result;
@@ -1762,7 +1762,7 @@ database::query(schema_ptr s, const query::read_command& cmd, query::result_opti
             querier_opt->permit().set_trace_state(trace_state);
             f = co_await coroutine::as_future(semaphore.with_ready_permit(querier_opt->permit(), read_func));
         } else {
-            f = co_await coroutine::as_future(semaphore.with_permit(s.get(), "data-query", cf.estimate_read_memory_cost(), timeout, trace_state, read_func));
+            f = co_await coroutine::as_future(semaphore.with_permit(s, "data-query", cf.estimate_read_memory_cost(), timeout, trace_state, read_func));
         }
 
         if (!f.failed()) {
@@ -1800,7 +1800,7 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
 
     const auto short_read_allwoed = query::short_read(cmd.slice.options.contains<query::partition_slice::option::allow_short_read>());
     auto& semaphore = get_reader_concurrency_semaphore();
-    auto max_result_size = cmd.max_result_size ? *cmd.max_result_size : get_unlimited_query_max_result_size();
+    auto max_result_size = cmd.max_result_size ? *cmd.max_result_size : get_query_max_result_size();
     auto accounter = co_await get_result_memory_limiter().new_mutation_read(max_result_size, short_read_allwoed);
     column_family& cf = find_column_family(cmd.cf_id);
 
@@ -1829,7 +1829,7 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
             querier_opt->permit().set_trace_state(trace_state);
             f = co_await coroutine::as_future(semaphore.with_ready_permit(querier_opt->permit(), read_func));
         } else {
-            f = co_await coroutine::as_future(semaphore.with_permit(s.get(), "mutation-query", cf.estimate_read_memory_cost(), timeout, trace_state, read_func));
+            f = co_await coroutine::as_future(semaphore.with_permit(s, "mutation-query", cf.estimate_read_memory_cost(), timeout, trace_state, read_func));
         }
 
         if (!f.failed()) {
@@ -1858,13 +1858,15 @@ database::query_mutations(schema_ptr s, const query::read_command& cmd, const dh
     co_return std::tuple(std::move(result), hit_rate);
 }
 
-query::max_result_size database::get_unlimited_query_max_result_size() const {
+query::max_result_size database::get_query_max_result_size() const {
     switch (classify_request(_dbcfg)) {
         case request_class::user:
-            return query::max_result_size(_cfg.max_memory_for_unlimited_query_soft_limit(), _cfg.max_memory_for_unlimited_query_hard_limit());
+            return query::max_result_size(_cfg.max_memory_for_unlimited_query_soft_limit(), _cfg.max_memory_for_unlimited_query_hard_limit(),
+                    _cfg.query_page_size_in_bytes());
         case request_class::system: [[fallthrough]];
         case request_class::maintenance:
-            return query::max_result_size(query::result_memory_limiter::unlimited_result_size);
+            return query::max_result_size(query::result_memory_limiter::unlimited_result_size, query::result_memory_limiter::unlimited_result_size,
+                    query::result_memory_limiter::maximum_result_size);
     }
     std::abort();
 }
@@ -1879,7 +1881,7 @@ reader_concurrency_semaphore& database::get_reader_concurrency_semaphore() {
 }
 
 future<reader_permit> database::obtain_reader_permit(table& tbl, const char* const op_name, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_ptr) {
-    return get_reader_concurrency_semaphore().obtain_permit(tbl.schema().get(), op_name, tbl.estimate_read_memory_cost(), timeout, std::move(trace_ptr));
+    return get_reader_concurrency_semaphore().obtain_permit(tbl.schema(), op_name, tbl.estimate_read_memory_cost(), timeout, std::move(trace_ptr));
 }
 
 future<reader_permit> database::obtain_reader_permit(schema_ptr schema, const char* const op_name, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_ptr) {
@@ -1956,7 +1958,7 @@ future<mutation> database::do_apply_counter_update(column_family& cf, const froz
             // counter state for each modified cell...
 
             tracing::trace(trace_state, "Reading counter values from the CF");
-            auto permit = get_reader_concurrency_semaphore().make_tracking_only_permit(m_schema.get(), "counter-read-before-write", timeout, trace_state);
+            auto permit = get_reader_concurrency_semaphore().make_tracking_only_permit(m_schema, "counter-read-before-write", timeout, trace_state);
             return counter_write_query(m_schema, cf.as_mutation_source(), std::move(permit), m.decorated_key(), slice, trace_state)
                     .then([this, &cf, &m, m_schema, timeout, trace_state] (auto mopt) {
                 // ...now, that we got existing state of all affected counter
@@ -3218,8 +3220,7 @@ future<foreign_ptr<lw_shared_ptr<reconcilable_result>>> query_mutations(
         const dht::partition_range& pr,
         const query::partition_slice& ps,
         db::timeout_clock::time_point timeout) {
-    auto max_size = db.local().get_unlimited_query_max_result_size();
-    auto max_res_size = query::max_result_size(max_size.soft_limit, max_size.hard_limit, query::result_memory_limiter::maximum_result_size);
+    auto max_res_size = db.local().get_query_max_result_size();
     auto cmd = query::read_command(s->id(), s->version(), ps, max_res_size, query::tombstone_limit::max);
     auto erm = s->table().get_effective_replication_map();
     if (auto shard_opt = dht::is_single_shard(erm->get_sharder(*s), *s, pr)) {
@@ -3242,8 +3243,7 @@ future<foreign_ptr<lw_shared_ptr<query::result>>> query_data(
         const dht::partition_range& pr,
         const query::partition_slice& ps,
         db::timeout_clock::time_point timeout) {
-    auto max_size = db.local().get_unlimited_query_max_result_size();
-    auto max_res_size = query::max_result_size(max_size.soft_limit, max_size.hard_limit, query::result_memory_limiter::maximum_result_size);
+    auto max_res_size = db.local().get_query_max_result_size();
     auto cmd = query::read_command(s->id(), s->version(), ps, max_res_size, query::tombstone_limit::max);
     auto prs = dht::partition_range_vector{pr};
     auto opts = query::result_options::only_result();
