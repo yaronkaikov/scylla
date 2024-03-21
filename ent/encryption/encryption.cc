@@ -600,7 +600,7 @@ public:
         case sstables::component_type::Scylla:
         case sstables::component_type::TemporaryTOC:
         case sstables::component_type::TOC:
-            return make_ready_future<file>();
+            co_return file{};
         default:
             break;
         }
@@ -630,16 +630,19 @@ public:
                             id = exta->map.at(key_id_attribute_ds).value;
                         }
 
+                        if (esx->should_delay_read(id)) {
+                            logg.debug("Encrypted sstable component {} using delayed opening {} (id: {})", sst.component_basename(type), *esx, id);
+
+                            co_return make_delayed_encrypted_file(f, esx->key_block_size(), [esx, comp = sst.component_basename(type), id = std::move(id)] {
+                                logg.trace("Delayed component {} using {} (id: {}) resolve", comp, *esx, id);
+                                return esx->key_for_read(id);
+                            });
+                        }
+
                         logg.debug("Open encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
 
-                        if (esx->should_delay_read(id)) {
-                            return make_ready_future<file>(make_delayed_encrypted_file(f, esx->key_block_size(), [esx, id = std::move(id)] {
-                                return esx->key_for_read(id);
-                            }));
-                        }
-                        return esx->key_for_read(std::move(id)).then([esx, f](::shared_ptr<symmetric_key> k) {
-                            return make_ready_future<file>(make_encrypted_file(f, std::move(k)));
-                        });
+                        auto k = co_await esx->key_for_read(std::move(id));
+                        co_return make_encrypted_file(f, std::move(k));
                     }
                 }
             }
@@ -671,8 +674,24 @@ public:
 
                 logg.debug("Write encrypted sstable component {} using {} (id: {})", sst.component_basename(type), *esx, id);
 
-                return esx->key_for_write(std::move(id)).then([&ext, esx, f, type](std::tuple<::shared_ptr<symmetric_key>, opt_bytes> k_id) {
-                    auto&& [k, id] = k_id;
+                /**
+                 * #3954 We can be (and are) called with two components simultaneously (hello index, data).
+                 * If this case we could block on the below "key" call and iff provider has certain cache behaviour (hello replicated)
+                 * or caches expire, we could end up with different keys for respective components, leading to one
+                 * of the components ending up unreadable.
+                */
+                for (;;) {
+                    auto [k, k_id] = co_await esx->key_for_write(std::move(id));
+
+                    if (k_id && ext.map.count(key_id_attribute_ds)) {
+                        id = ext.map.at(key_id_attribute_ds).value;
+                        if (k_id != id) {
+                            continue;
+                        }
+                    }
+
+                    id = std::move(k_id);
+
                     if (!ext.map.count(encryption_attribute_ds)) {
                         ext.map.emplace(encryption_attribute_ds, sstables::disk_string<uint32_t>{esx->serialize()});
                     }
@@ -688,11 +707,12 @@ public:
                         // just a marker. see above
                         ext.map[encrypted_components_attribute_ds] = sstables::disk_string<uint32_t>{ser::serialize_to_buffer<bytes>(mask, 0)};
                     }
-                    return make_ready_future<file>(make_encrypted_file(f, std::move(k)));
-                });
+                    co_return make_encrypted_file(f, std::move(k));
+                }
             }
         }
-        return make_ready_future<file>();
+
+        co_return file{};
     }
 };
 
