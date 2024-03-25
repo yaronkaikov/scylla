@@ -105,6 +105,8 @@ class repair_service : public seastar::peering_sharded_service<repair_service> {
     size_t _max_repair_memory;
     seastar::semaphore _memory_sem;
 
+    future<> _load_history_done = make_ready_future<>();
+
     future<> init_ms_handlers();
     future<> uninit_ms_handlers();
 
