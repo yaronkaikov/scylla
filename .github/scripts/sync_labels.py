@@ -57,6 +57,8 @@ def get_linked_issues_based_on_pr_body(repo, number):
         for match in matches:
             issue_number_from_pr_body.append(match)
             print(f"Found issue number: {match}")
+    else:
+        print(f'no match')
     return issue_number_from_pr_body
 
 
@@ -65,6 +67,7 @@ def sync_labels(repo, number, label, action, is_issue=False):
         linked_prs_or_issues = get_linked_pr_from_issue_number(repo, number)
     else:
         linked_prs_or_issues = get_linked_issues_based_on_pr_body(repo, number)
+        print(linked_prs_or_issues)
     for pr_or_issue_number in linked_prs_or_issues:
         if is_issue:
             target = repo.get_issue(pr_or_issue_number)
