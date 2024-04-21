@@ -686,6 +686,7 @@ void flush_rows(schema_ptr s, std::list<repair_row>& rows, lw_shared_ptr<repair_
             last_mf = mf;
             last_dk = r.get_dk_with_hash();
         }
+        r.reset_mutation_fragment();
     }
     if (last_mf && last_dk) {
         writer->do_write(std::move(last_dk), std::move(*last_mf)).get();
@@ -761,6 +762,7 @@ private:
     std::optional<shared_future<>> _stopped;
     repair_hasher _repair_hasher;
     gc_clock::time_point _compaction_time;
+    reader_concurrency_semaphore::inactive_read_handle _fake_inactive_read_handle;
 public:
     std::vector<repair_node_state>& all_nodes() {
         return _all_node_states;
@@ -864,6 +866,13 @@ public:
             for (auto& node : all_live_peer_nodes) {
                 _all_node_states.push_back(repair_node_state(node));
             }
+            // Mark the permit as evictable immediately. If there are multiple
+            // repairs launched, they can deadlock in the initial phase, before
+            // they start reading from disk (which is the point where they
+            // become evictable normally).
+            // Prevent this by marking the permit as evictable ASAP.
+            // FIXME: provide a better API for this, this is very clunky
+            _fake_inactive_read_handle = _db.local().get_reader_concurrency_semaphore().register_inactive_read(make_empty_flat_reader_v2(_schema, _permit));
     }
 
     // follower constructor
@@ -1077,10 +1086,11 @@ private:
         auto hash = _repair_hasher.do_hash_for_mf(*_repair_reader->get_current_dk(), mf);
         repair_row r(freeze(*_schema, mf), position_in_partition(mf.position()), _repair_reader->get_current_dk(), hash, is_dirty_on_master::no);
         rlogger.trace("Reading: r.boundary={}, r.hash={}", r.boundary(), r.hash());
+        auto sz = r.size();
         _metrics.row_from_disk_nr++;
-        _metrics.row_from_disk_bytes += r.size();
-        cur_size += r.size();
-        new_rows_size += r.size();
+        _metrics.row_from_disk_bytes += sz;
+        cur_size += sz;
+        new_rows_size += sz;
         cur_rows.push_back(std::move(r));
     }
 
@@ -1094,6 +1104,9 @@ private:
         std::list<repair_row> cur_rows;
         std::exception_ptr ex;
         if (!_repair_reader) {
+            // We are about to create a real evictable reader, so drop the fake
+            // reader (evicted or not), we don't need it anymore.
+            _db.local().get_reader_concurrency_semaphore().unregister_inactive_read(std::move(_fake_inactive_read_handle));
             _repair_reader.emplace(_db,
                 _cf,
                 _schema,
@@ -1323,6 +1336,7 @@ private:
                     // mutation_fragment attached because we have stored it in
                     // to_repair_rows_list above where the repair_row is created.
                     mutation_fragment mf = std::move(r.get_mutation_fragment());
+                    r.reset_mutation_fragment();
                     auto dk_with_hash = r.get_dk_with_hash();
                     return _repair_writer->do_write(std::move(dk_with_hash), std::move(mf)).then([&row_diff] {
                         row_diff.pop_front();
@@ -2901,6 +2915,26 @@ public:
                         });
                     });
                 }).get();
+
+                if (!master.all_nodes().empty()) {
+                    // Use the average number of partitions, instead of the sum
+                    // of the partitions, as the estimated partitions in a
+                    // given range. The bigger the estimated partitions, the
+                    // more memory bloom filter for the sstable would consume.
+                    _estimated_partitions /= master.all_nodes().size();
+
+                    // In addition, estimate the difference between nodes is
+                    // less than 10% for regular repair. Underestimation will
+                    // not be a big problem since those sstables produced by
+                    // repair will go through off-strategy later anyway. The
+                    // worst case is that we have a worse false positive ratio
+                    // than expected temporarily when the sstable is still in
+                    // maintenance set.
+                    //
+                    // To save memory and have less different conditions, we
+                    // use the 10% estimation for RBNO repair as well.
+                    _estimated_partitions /= 10;
+                }
 
                 parallel_for_each(master.all_nodes(), [&, this] (repair_node_state& ns) {
                     const auto& node = ns.node;
