@@ -142,7 +142,7 @@ async def with_context(ctx: ContextVar[T], val: T) -> AsyncIterator[None]:
     finally:
         ctx.reset(x)
 
-async def clean_gather(*coros: Coroutine) -> tuple:
+async def clean_gather(*coros: Coroutine) -> list:
     """Differs from asyncio.gather() in that it cancels all other tasks when one
     fails, and waits for the cancellations to complete.
     """
