@@ -617,6 +617,8 @@ async def train_basic(executable: PathLike, workdir: PathLike) -> None:
     async with with_cs_train(executable=executable, workdir=workdir) as server:
         await cs(cmd=["mixed", "ratio(read=1,write=1)"], n=N, pop=f"dist=UNIFORM(1..{2000000})", cl="local_quorum", node=server)
 
+# disable as it's very similar to CLUSTERING workload
+# and exactly the same as we use for our performance tests
 #trainers["basic"] = ("basic_dataset", train_basic)
 populators["basic_dataset"] = populate_basic
 
@@ -658,7 +660,7 @@ async def populate_alternator(executable: PathLike, workdir: PathLike) -> None:
 trainers["alternator"] = ("alternator_dataset", train_alternator)
 populators["alternator_dataset"] = populate_alternator
 
-# CS_USER  ==================================================
+# CLUSTERING ==================================================
 
 async def populate_clustering(executable: PathLike, workdir: PathLike) -> None:
     async with with_cs_populate(executable=executable, workdir=workdir) as server:
