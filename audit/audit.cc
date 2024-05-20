@@ -116,6 +116,8 @@ future<> audit::create_audit(const db::config& cfg) {
         storage_helper_name = "audit_syslog_storage_helper";
     } else if (cfg.audit() == "none") {
         // Audit is off
+        logger.info("Audit is disabled");
+
         return make_ready_future<>();
     } else {
         throw audit_exception(fmt::format("Bad configuration: invalid 'audit': {}", cfg.audit()));
@@ -133,6 +135,9 @@ future<> audit::create_audit(const db::config& cfg) {
         && !audited_categories.contains(statement_category::DCL)) {
         return make_ready_future<>();
     }
+    logger.info("Audit is enabled. Auditing to: \"{}\", with the following categories: \"{}\", keyspaces: \"{}\", and tables: \"{}\"",
+                cfg.audit(), cfg.audit_categories(), cfg.audit_keyspaces(), cfg.audit_tables());
+
     return audit_instance().start(std::move(storage_helper_name),
                                   std::move(audited_keyspaces),
                                   std::move(audited_tables),
