@@ -11,6 +11,7 @@
 #include "service/raft/discovery.hh"
 #include "service/raft/group0_fwd.hh"
 #include "gms/feature.hh"
+#include "utils/updateable_value.hh"
 
 namespace cql3 { class query_processor; }
 
@@ -121,6 +122,7 @@ class raft_group0 {
     future<> leadership_monitor_fiber();
     future<> _leadership_monitor = make_ready_future<>();
     abort_source _leadership_monitor_as;
+    utils::updateable_value_source<bool> _leadership_observable;
 
 public:
     // Passed to `setup_group0` when replacing a node.
@@ -267,6 +269,8 @@ public:
 
     // Returns true after the group 0 server has been started.
     bool joined_group0() const;
+
+    utils::observer<bool> observe_leadership(std::function<void(bool)>);
 
     const raft_address_map& address_map() const;
 private:

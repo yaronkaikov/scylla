@@ -169,8 +169,9 @@ int main(int ac, char ** av) {
     distributed<replica::database> db;
     sharded<auth::service> auth_service;
     distributed<qos::service_level_controller> sl_controller;
+    sharded<utils::walltime_compressor_tracker> compressor_tracker;
 
-    return app.run_deprecated(ac, av, [&app, &sl_controller, &auth_service] {
+    return app.run_deprecated(ac, av, [&app, &sl_controller, &compressor_tracker, &auth_service] {
         auto config = app.configuration();
         bool stay_alive = config["stay-alive"].as<bool>();
         const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
@@ -178,8 +179,10 @@ int main(int ac, char ** av) {
         seastar::sharded<netw::messaging_service> messaging;
         return create_scheduling_group("sl_default_sg", 1.0).then([&sl_controller, &auth_service] (scheduling_group default_scheduling_group){
             return sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, default_scheduling_group);
-        }).then([listen, &messaging, &sl_controller] {
-            return messaging.start(std::ref(sl_controller), locator::host_id{}, listen, 7000);
+        }).then([&compressor_tracker] {
+            return compressor_tracker.start([] { return utils::advanced_rpc_compressor::tracker::config(); });
+        }).then([listen, &messaging, &sl_controller, &compressor_tracker] {
+            return messaging.start(std::ref(sl_controller), std::ref(compressor_tracker), locator::host_id{}, listen, 7000);
         }).then([config, stay_alive, &messaging] () {
             auto testers = new distributed<tester>;
             return testers->start(std::ref(messaging)).then([testers]{

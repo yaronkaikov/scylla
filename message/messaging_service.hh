@@ -27,6 +27,7 @@
 #include <array>
 #include <absl/container/btree_set.h>
 #include <seastar/net/tls.hh>
+#include "utils/advanced_rpc_compressor.hh"
 
 // forward declarations
 namespace streaming {
@@ -224,6 +225,7 @@ public:
     struct rpc_protocol_client_wrapper;
     struct rpc_protocol_server_wrapper;
     struct shard_info;
+    struct compressor_factory_wrapper;
 
     using msg_addr = netw::msg_addr;
     using inet_address = gms::inet_address;
@@ -326,6 +328,7 @@ private:
     std::vector<tenant_connection_index> _connection_index_for_tenant;
     std::unordered_map<sstring, size_t> _dynamic_tenants_to_client_idx;
     qos::service_level_controller& _sl_controller;
+    std::unique_ptr<compressor_factory_wrapper> _compressor_factory_wrapper;
 
     struct connection_ref;
     std::unordered_multimap<locator::host_id, connection_ref> _host_connections;
@@ -340,8 +343,8 @@ private:
 public:
     using clock_type = lowres_clock;
 
-    messaging_service(qos::service_level_controller& sl_controller, locator::host_id id, gms::inet_address ip, uint16_t port);
-    messaging_service(qos::service_level_controller& sl_controller, config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>);
+    messaging_service(qos::service_level_controller& sl_controller, utils::walltime_compressor_tracker&, locator::host_id id, gms::inet_address ip, uint16_t port);
+    messaging_service(qos::service_level_controller& sl_controller, utils::walltime_compressor_tracker&, config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>);
     ~messaging_service();
 
     future<> start();

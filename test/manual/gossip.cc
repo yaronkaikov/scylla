@@ -71,9 +71,11 @@ int main(int ac, char ** av) {
             token_metadata.start([] () noexcept { return db::schema_tables::hold_merge_lock(); }, locator::token_metadata::config{}).get();
             auto stop_token_mgr = defer([&] { token_metadata.stop().get(); });
             sharded<qos::service_level_controller> sl_controller;
+            sharded<utils::walltime_compressor_tracker> compressor_tracker;
             scheduling_group default_scheduling_group = create_scheduling_group("sl_default_sg", 1.0).get();
             sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, default_scheduling_group).get();
-            messaging.start(std::ref(sl_controller), locator::host_id{}, listen, 7000).get();
+            compressor_tracker.start([] { return utils::advanced_rpc_compressor::tracker::config(); }).get();
+            messaging.start(std::ref(sl_controller), std::ref(compressor_tracker), locator::host_id{}, listen, 7000).get();
             auto stop_messaging = deferred_stop(messaging);
 
             gms::gossip_config gcfg;

@@ -637,8 +637,18 @@ private:
                 return make_ready_future<>();
             }).get();
 
+            sharded<utils::walltime_compressor_tracker> compressor_tracker;
+            auto arct_cfg = [&] {
+                return utils::advanced_rpc_compressor::tracker::config{
+                    .zstd_quota_fraction{1.0},
+                    .register_metrics = true,
+                };
+            };
+            compressor_tracker.start(arct_cfg).get();
+            auto stop_compressor_tracker = defer([&compressor_tracker] { compressor_tracker.stop().get(); });
+
             // don't start listening so tests can be run in parallel
-            _ms.start(std::ref(_sl_controller), host_id, listen, std::move(7000)).get();
+            _ms.start(std::ref(_sl_controller), std::ref(compressor_tracker), host_id, listen, std::move(7000)).get();
             auto stop_ms = defer([this] { _ms.stop().get(); });
 
             // Normally the auth server is already stopped in here,

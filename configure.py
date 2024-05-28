@@ -475,6 +475,9 @@ scylla_tests = set([
     'test/boost/pretty_printers_test',
     'test/boost/cdc_generation_test',
     'test/boost/aggregate_fcts_test',
+    'test/boost/advanced_rpc_compressor_test',
+    'test/boost/stream_compressor_test',
+    'test/boost/dict_trainer_test',
     'test/boost/allocation_strategy_test',
     'test/boost/alternator_unit_test',
     'test/boost/anchorless_list_test',
@@ -1087,6 +1090,10 @@ scylla_core = (['message/messaging_service.cc',
                 'utils/gz/crc_combine.cc',
                 'utils/gz/crc_combine_table.cc',
                 'utils/s3/client.cc',
+                'utils/advanced_rpc_compressor.cc',
+                'utils/dict_trainer.cc',
+                'utils/stream_compressor.cc',
+                'utils/alien_worker.cc',
                 'gms/version_generator.cc',
                 'gms/versioned_value.cc',
                 'gms/gossiper.cc',
@@ -1968,11 +1975,12 @@ abseil_pkgs = [
 pkgs += abseil_pkgs
 
 user_cflags += " " + pkg_config('jsoncpp', '--cflags')
-libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
+libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-lz', '-lsnappy', '-lcrypto', pkg_config('jsoncpp', '--libs'),
                  ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lldap -llber',
                  # Must link with static version of libzstd, since
                  # experimental APIs that we use are only present there.
                  maybe_static(True, '-lzstd'),
+                 maybe_static(True, '-llz4'),
                  maybe_static(args.staticboost, '-lboost_date_time -lboost_regex -licuuc -licui18n'),
                  '-lxxhash',
                  '-ldeflate',

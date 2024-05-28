@@ -35,12 +35,17 @@ namespace service {
     class migration_manager;
 }
 
+namespace utils {
+    class shared_dict;
+};
+
 namespace db {
 
 class system_distributed_keyspace {
 public:
     static constexpr auto NAME = "system_distributed";
     static constexpr auto NAME_EVERYWHERE = "system_distributed_everywhere";
+    static constexpr auto DICTS = "dicts";
 
     static constexpr auto VIEW_BUILD_STATUS = "view_build_status";
     static constexpr auto SERVICE_LEVELS = "service_levels";
@@ -79,6 +84,7 @@ private:
 public:
     static std::vector<schema_ptr> all_distributed_tables();
     static std::vector<schema_ptr> all_everywhere_tables();
+    static schema_ptr dicts();
 
     system_distributed_keyspace(cql3::query_processor&, service::migration_manager&, service::storage_proxy&);
 
@@ -119,6 +125,12 @@ public:
     future<> set_service_level(sstring service_level_name, qos::service_level_options slo) const;
     future<> drop_service_level(sstring service_level_name) const;
     bool workload_prioritization_tables_exists();
+
+    // Publishes a new compression dictionary to `dicts`,
+    // with the current timestamp.
+    future<> publish_dict(std::vector<std::byte>) const;
+    // Queries `dicts` for the most recent compression dictionary.
+    future<utils::shared_dict> query_dict() const;
 private:
     future<> create_tables(std::vector<schema_ptr> tables);
 };

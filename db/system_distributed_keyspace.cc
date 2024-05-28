@@ -22,6 +22,7 @@
 #include "cql3/query_processor.hh"
 #include "service/storage_proxy.hh"
 #include "gms/feature_service.hh"
+#include "utils/shared_dict.hh"
 
 #include "service/migration_manager.hh"
 #include "db/config.hh"
@@ -164,6 +165,20 @@ schema_ptr service_levels() {
     return schema;
 }
 
+schema_ptr system_distributed_keyspace::dicts() {
+    static thread_local auto schema = [] {
+        auto id = generate_legacy_id(system_distributed_keyspace::NAME, system_distributed_keyspace::DICTS);
+        return schema_builder(system_distributed_keyspace::NAME, system_distributed_keyspace::DICTS, std::make_optional(id))
+                .with_column("name", utf8_type, column_kind::partition_key)
+                .with_column("timestamp", reversed_type_impl::get_instance(timestamp_type), column_kind::clustering_key)
+                .with_column("origin", uuid_type, column_kind::clustering_key)
+                .with_column("data", bytes_type)
+                .with_version(db::system_keyspace::generate_schema_version(id))
+                .build();
+    }();
+    return schema;
+}
+
  static std::vector<schema_ptr> workload_prioritization_tables() {
      return std::vector({service_levels()});
  }
@@ -187,6 +202,7 @@ static std::vector<schema_ptr> ensured_tables() {
         cdc_desc(),
         cdc_timestamps(),
         service_levels(),
+        system_distributed_keyspace::dicts(),
     };
 }
 
@@ -929,6 +945,46 @@ future<> system_distributed_keyspace::drop_service_level(sstring service_level_n
             db::consistency_level::ONE,
             internal_distributed_query_state(),
             {service_level_name}, cql3::query_processor::cache_internal::yes).discard_result();
+}
+
+future<> system_distributed_keyspace::publish_dict(std::vector<std::byte> raw_data) const {
+    auto host_id = _sp.local_db().get_token_metadata().get_my_id();
+    auto ts = db_clock::now();
+    static sstring prepared_query = format("INSERT INTO {}.{} (name, timestamp, origin, data) VALUES (?, ?, ?, ?) USING TTL 86400;", NAME, DICTS);
+    auto data = bytes(reinterpret_cast<bytes::value_type*>(raw_data.data()), raw_data.size());
+    const char* dict_name = "general";
+    dlogger.info("Publishing new compression dictionary: {} {} {}", dict_name, ts, host_id);
+    co_await _qp.execute_internal(prepared_query, db::consistency_level::ONE, internal_distributed_query_state(),
+        {
+            data_value(dict_name),
+            data_value(ts),
+            data_value(host_id.uuid()),
+            data_value(std::move(data)),
+        }, cql3::query_processor::cache_internal::no);
+    dlogger.info("Published new compression dictionary.");
+}
+
+future<utils::shared_dict> system_distributed_keyspace::query_dict() const {
+    static sstring prepared_query = format("SELECT * FROM {}.{} WHERE name = ? LIMIT 1;", NAME, DICTS);
+    return _qp.execute_internal(prepared_query, db::consistency_level::QUORUM, internal_distributed_query_state(), {"general"}, cql3::query_processor::cache_internal::yes).then(
+                [] (shared_ptr<cql3::untyped_result_set> result_set) {
+        if (!result_set->empty()) {
+            auto &&row = result_set->one();
+            auto content = row.get_as<bytes>("data");
+            auto content_view = std::span(reinterpret_cast<const std::byte*>(content.data()), content.size());
+            auto timestamp = row.get_as<db_clock::time_point>("timestamp").time_since_epoch().count();
+            auto origin = row.get_as<utils::UUID>("origin");
+            const int zstd_compression_level = 1;
+            return utils::shared_dict(
+                {content_view.begin(), content_view.end()},
+                timestamp,
+                origin,
+                zstd_compression_level
+            );
+        } else {
+            return utils::shared_dict();
+        }
+    });
 }
 
 }

@@ -105,6 +105,11 @@
 #include "service/raft/raft_group0_client.hh"
 #include "service/raft/raft_group0.hh"
 
+#include "utils/dict_trainer.hh"
+#include "utils/alien_worker.hh"
+#include "utils/advanced_rpc_compressor.hh"
+#include "utils/advanced_rpc_compressor_protocol.hh"
+
 #include <boost/algorithm/string/join.hpp>
 
 #define P11_KIT_FUTURE_UNSTABLE_API
@@ -686,6 +691,10 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     sharded<gms::gossiper> gossiper;
     sharded<locator::snitch_ptr> snitch;
 
+    // This worker wasn't designed to be used from multiple threads.
+    // If you are attempting to do that, make sure you know what you are doing.
+    auto rpc_dict_training_worker = utils::alien_worker(startlog, 19);
+
     return app.run(ac, av, [&] () -> future<int> {
 
         auto&& opts = app.configuration();
@@ -715,7 +724,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
         return seastar::async([&app, cfg, ext, &cm, &sstm, &db, &qp, &bm, &proxy, &forward_service, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service, &gossiper, &snitch,
                 &token_metadata, &erm_factory, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
-                &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager, &task_manager] {
+                &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager, &task_manager, &rpc_dict_training_worker] {
           try {
               if (opts.contains("relabel-config-file") && !opts["relabel-config-file"].as<sstring>().empty()) {
                   // calling update_relabel_config_from_file can cause an exception that would stop startup
@@ -1236,6 +1245,25 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
               return make_ready_future<>();
           }).get();
 
+            utils::dict_sampler dict_sampler;
+            auto arct_cfg = [&] {
+                return utils::advanced_rpc_compressor::tracker::config{
+                    .zstd_min_msg_size = cfg->internode_compression_zstd_min_message_size,
+                    .zstd_max_msg_size = cfg->internode_compression_zstd_max_message_size,
+                    .zstd_quota_fraction = cfg->internode_compression_zstd_max_cpu_fraction,
+                    .zstd_quota_refresh_ms = cfg->internode_compression_zstd_cpu_quota_refresh_period_ms,
+                    .zstd_longterm_quota_fraction = cfg->internode_compression_zstd_max_longterm_cpu_fraction,
+                    .zstd_longterm_quota_refresh_ms = cfg->internode_compression_zstd_longterm_cpu_quota_refresh_period_ms,
+                    .algo_config = cfg->internode_compression_algorithms,
+                    .register_metrics = true,
+                    .checksumming = cfg->internode_compression_checksumming,
+                };
+            };
+            static sharded<utils::walltime_compressor_tracker> compressor_tracker;
+            compressor_tracker.start(arct_cfg).get();
+            auto stop_compressor_tracker = defer_verbose_shutdown("compressor_tracker", [] { compressor_tracker.stop().get(); });
+            compressor_tracker.local().attach_to_dict_sampler(&dict_sampler);
+
             netw::messaging_service::config mscfg;
 
             mscfg.id = host_id;
@@ -1297,7 +1325,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }
 
             // Delay listening messaging_service until gossip message handlers are registered
-            messaging.start(std::ref(sl_controller), mscfg, scfg, creds).get();
+            messaging.start(std::ref(sl_controller), std::ref(compressor_tracker), mscfg, scfg, creds).get();
             auto stop_ms = defer_verbose_shutdown("messaging service", [&messaging] {
                 messaging.invoke_on_all(&netw::messaging_service::stop).get();
             });
@@ -1725,6 +1753,51 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                         ::make_shared<qos::standard_service_level_distributed_data_accessor>(sys_dist_ks.local())));
                 lifecycle_notifier.local().register_subscriber(&controller);
             }).get();
+
+            utils::dict_training_loop dtl;
+            auto dict_training_loop_future = dtl.start(
+                dict_sampler,
+                [&] (utils::dict_sampler::dict_type d) { return sys_dist_ks.local().publish_dict(std::move(d)); },
+                cfg->rpc_dict_training_min_time_seconds,
+                cfg->rpc_dict_training_min_bytes,
+                rpc_dict_training_worker);
+            bool is_raft_leader = false;
+            auto maybe_toggle_dict_training = [&] {
+                if (cfg->rpc_dict_training_when() == utils::dict_training_loop::when::type::NEVER) {
+                    dtl.pause();
+                } else if (cfg->rpc_dict_training_when() == utils::dict_training_loop::when::type::ALWAYS) {
+                    dtl.unpause();
+                } else if (cfg->rpc_dict_training_when() == utils::dict_training_loop::when::type::WHEN_LEADER) {
+                    is_raft_leader ? dtl.unpause() : dtl.pause();
+                }
+            };
+            auto finish_dict_training_loop = defer_verbose_shutdown("dictionary training", [&dtl, &dict_training_loop_future] {
+                dtl.cancel();
+                dict_training_loop_future.get();
+            });
+            // Maybe toggle training whenever leadership status changes.
+            auto leadership_observer_for_dtl = group0_service.observe_leadership([&] (bool leader) noexcept {
+                is_raft_leader = leader;
+                maybe_toggle_dict_training();
+            });
+            // Maybe toggle training whenever rpc_dict_training_when is live-updated.
+            auto dict_training_when_observer = cfg->rpc_dict_training_when.observe([&] (const auto& x) {
+                maybe_toggle_dict_training();
+            });
+            // Apply the initial value of rpc_dict_training_when.
+            maybe_toggle_dict_training();
+
+            utils::dict_update_loop dul;
+            auto dict_update_loop_future = dul.start(
+                compressor_tracker,
+                [&] { return sys_dist_ks.local().query_dict(); },
+                cfg->rpc_dict_update_period_seconds
+            );
+            auto finish_dict_update_loop = defer_verbose_shutdown("dictionary refresh", [&dul, &dict_update_loop_future] {
+                dul.cancel();
+                dict_update_loop_future.get();
+            });
+
 
             supervisor::notify("starting tracing");
             tracing.invoke_on_all(&tracing::tracing::start, std::ref(qp), std::ref(mm)).get();
