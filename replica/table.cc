@@ -294,7 +294,7 @@ static flat_mutation_reader_v2 maybe_compact_for_streaming(flat_mutation_reader_
     return make_compacting_reader(
             std::move(underlying),
             compaction_time,
-            [] (const dht::decorated_key&) { return api::min_timestamp; }, // disable tombstone purging
+            [compaction_can_gc] (const dht::decorated_key&) { return compaction_can_gc ? api::max_timestamp : api::min_timestamp; },
             cm.get_tombstone_gc_state(),
             streamed_mutation::forwarding::no);
 }
