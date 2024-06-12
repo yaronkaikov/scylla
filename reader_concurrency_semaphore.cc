@@ -968,10 +968,11 @@ void reader_concurrency_semaphore::signal(const resources& r) noexcept {
     maybe_admit_waiters();
 }
 
-reader_concurrency_semaphore::reader_concurrency_semaphore(int count, ssize_t memory, sstring name, size_t max_queue_length,
+reader_concurrency_semaphore::reader_concurrency_semaphore(utils::updateable_value<int> count, ssize_t memory, sstring name, size_t max_queue_length,
             utils::updateable_value<uint32_t> serialize_limit_multiplier, utils::updateable_value<uint32_t> kill_limit_multiplier)
-    : _initial_resources(count, memory)
-    , _resources(count, memory)
+    : _initial_resources(count(), memory)
+    , _resources(count(), memory)
+    , _count_observer(count.observe([this] (const int& new_count) { set_resources({new_count, _initial_resources.memory}); }))
     , _name(std::move(name))
     , _max_queue_length(max_queue_length)
     , _serialize_limit_multiplier(std::move(serialize_limit_multiplier))
@@ -980,7 +981,7 @@ reader_concurrency_semaphore::reader_concurrency_semaphore(int count, ssize_t me
 
 reader_concurrency_semaphore::reader_concurrency_semaphore(no_limits, sstring name)
     : reader_concurrency_semaphore(
-            std::numeric_limits<int>::max(),
+            utils::updateable_value(std::numeric_limits<int>::max()),
             std::numeric_limits<ssize_t>::max(),
             std::move(name),
             std::numeric_limits<size_t>::max(),
