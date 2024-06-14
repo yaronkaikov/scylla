@@ -85,7 +85,7 @@ public:
     {
         if (ops_info && ops_info->as) {
             _abort_subscription = ops_info->as->subscribe([this] () noexcept {
-                (void)abort();
+                abort();
             });
         }
     }

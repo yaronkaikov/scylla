@@ -54,6 +54,7 @@ private:
     serialized_action _update_task_ttl_action;
     utils::observer<uint32_t> _task_ttl_observer;
     uint32_t _task_ttl;
+    bool _tm_for_test = false;
 public:
     class task_not_found : public std::exception {
         sstring _cause;
@@ -125,7 +126,7 @@ public:
             virtual future<task_manager::task::progress> get_progress() const;
             virtual tasks::is_abortable is_abortable() const noexcept;
             virtual tasks::is_internal is_internal() const noexcept;
-            virtual future<> abort() noexcept;
+            virtual void abort() noexcept;
             bool is_complete() const noexcept;
             virtual void release_resources() noexcept {}
         protected:
@@ -161,7 +162,7 @@ public:
         future<progress> get_progress() const;
         tasks::is_abortable is_abortable() const noexcept;
         tasks::is_internal is_internal() const noexcept;
-        future<> abort() noexcept;
+        void abort() noexcept;
         bool abort_requested() const noexcept;
         future<> done() const noexcept;
         void register_task();
