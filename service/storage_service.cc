@@ -3086,6 +3086,18 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
         }
 
         co_await _group0->finish_setup_after_join(*this, *_qp, _migration_manager.local(), _raft_topology_change_enabled);
+
+        std::unordered_set<inet_address> ips;
+        const auto& am = _group0->address_map();
+        for (auto id : _topology_state_machine._topology.normal_nodes | boost::adaptors::map_keys) {
+            auto ip = am.find(id);
+            if (ip) {
+                ips.insert(*ip);
+            }
+        }
+
+        co_await _gossiper.notify_nodes_on_up(std::move(ips));
+
         co_return;
     }
 
@@ -3275,6 +3287,15 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     assert(_group0);
     co_await _group0->finish_setup_after_join(*this, *_qp, _migration_manager.local(), _raft_topology_change_enabled);
     co_await _cdc_gens.local().after_join(std::move(cdc_gen_id));
+
+    std::unordered_set<inet_address> ips;
+    _gossiper.for_each_endpoint_state([this, &ips] (const inet_address& addr, const gms::endpoint_state&) {
+        if (_gossiper.is_normal(addr)) {
+            ips.insert(addr);
+        }
+    });
+
+    co_await _gossiper.notify_nodes_on_up(std::move(ips));
 }
 
 future<> storage_service::mark_existing_views_as_built(sharded<db::system_distributed_keyspace>& sys_dist_ks) {

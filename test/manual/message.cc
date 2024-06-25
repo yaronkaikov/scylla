@@ -24,6 +24,10 @@
 #include "utils/UUID.hh"
 #include "utils/fb_utilities.hh"
 #include "service/qos/service_level_controller.hh"
+#include "log.hh"
+#include "locator/token_metadata.hh"
+#include "db/schema_tables.hh"
+#include "idl/gossip.dist.hh"
 
 using namespace std::chrono_literals;
 using namespace netw;
@@ -55,7 +59,7 @@ public:
     uint16_t port() const { return ms.port(); }
 public:
     void init_handler() {
-        ms.register_gossip_digest_syn([this] (const rpc::client_info& cinfo, gms::gossip_digest_syn msg) {
+        ser::gossip_rpc_verbs::register_gossip_digest_syn(&ms, [this] (const rpc::client_info& cinfo, gms::gossip_digest_syn msg) {
             fmt::print("Server got syn msg = {}\n", msg);
 
             auto from = netw::messaging_service::get_source(cinfo);
@@ -72,13 +76,13 @@ public:
             };
             gms::gossip_digest_ack ack(std::move(digests), std::move(eps));
             // FIXME: discarded future.
-            (void)ms.send_gossip_digest_ack(from, std::move(ack)).handle_exception([] (auto ep) {
+            (void)ser::gossip_rpc_verbs::send_gossip_digest_ack(&ms, from, std::move(ack)).handle_exception([] (auto ep) {
                 fmt::print("Fail to send ack : {}", ep);
             });
-            return messaging_service::no_wait();
+            return make_ready_future<rpc::no_wait_type>(netw::messaging_service::no_wait());
         });
 
-        ms.register_gossip_digest_ack([this] (const rpc::client_info& cinfo, gms::gossip_digest_ack msg) {
+        ser::gossip_rpc_verbs::register_gossip_digest_ack(&ms, [this] (const rpc::client_info& cinfo, gms::gossip_digest_ack msg) {
             fmt::print("Server got ack msg = {}\n", msg);
             auto from = netw::messaging_service::get_source(cinfo);
             // Prepare gossip_digest_ack2 message
@@ -88,24 +92,24 @@ public:
             };
             gms::gossip_digest_ack2 ack2(std::move(eps));
             // FIXME: discarded future.
-            (void)ms.send_gossip_digest_ack2(from, std::move(ack2)).handle_exception([] (auto ep) {
+            (void)ser::gossip_rpc_verbs::send_gossip_digest_ack2(&ms, from, std::move(ack2)).handle_exception([] (auto ep) {
                 fmt::print("Fail to send ack2 : {}", ep);
             });
             digest_test_done.set_value();
-            return messaging_service::no_wait();
+            return make_ready_future<rpc::no_wait_type>(netw::messaging_service::no_wait());
         });
 
-        ms.register_gossip_digest_ack2([] (const rpc::client_info& cinfo, gms::gossip_digest_ack2 msg) {
+        ser::gossip_rpc_verbs::register_gossip_digest_ack2(&ms, [] (const rpc::client_info& cinfo, gms::gossip_digest_ack2 msg) {
             fmt::print("Server got ack2 msg = {}\n", msg);
-            return messaging_service::no_wait();
+            return make_ready_future<rpc::no_wait_type>(netw::messaging_service::no_wait());
         });
 
-        ms.register_gossip_shutdown([] (inet_address from, rpc::optional<int64_t> generation_number_opt) {
+        ser::gossip_rpc_verbs::register_gossip_shutdown(&ms, [] (inet_address from, rpc::optional<int64_t> generation_number_opt) {
             fmt::print("Server got shutdown msg = {}\n", from);
-            return messaging_service::no_wait();
+            return make_ready_future<rpc::no_wait_type>(netw::messaging_service::no_wait());
         });
 
-        ms.register_gossip_echo([] (const rpc::client_info& cinfo, rpc::optional<int64_t> gen_opt) {
+        ser::gossip_rpc_verbs::register_gossip_echo(&ms, [] (const rpc::client_info& cinfo, rpc::opt_time_point, rpc::optional<int64_t> gen_opt, rpc::optional<bool> notify_up) {
             fmt::print("Server got gossip echo msg\n");
             throw std::runtime_error("I'm throwing runtime_error exception");
             return make_ready_future<>();
@@ -125,7 +129,7 @@ public:
         digests.push_back(gms::gossip_digest(ep1, gen++, ver++));
         digests.push_back(gms::gossip_digest(ep2, gen++, ver++));
         gms::gossip_digest_syn syn("my_cluster", "my_partition", digests, utils::null_uuid());
-        return ms.send_gossip_digest_syn(id, std::move(syn)).then([this] {
+        return ser::gossip_rpc_verbs::send_gossip_digest_syn(&ms, id, std::move(syn)).then([this] {
             return digest_test_done.get_future();
         });
     }
@@ -135,7 +139,7 @@ public:
         auto id = get_msg_addr();
         inet_address from("127.0.0.1");
         int64_t gen = 0x1;
-        return ms.send_gossip_shutdown(id, from, gen).then([] () {
+        return ser::gossip_rpc_verbs::send_gossip_shutdown(&ms, id, from, gen).then([] () {
             fmt::print("Client sent gossip_shutdown got reply = void\n");
             return make_ready_future<>();
         });
@@ -145,7 +149,7 @@ public:
         fmt::print("=== {} ===\n", __func__);
         auto id = get_msg_addr();
         int64_t gen = 0x1;
-        return ms.send_gossip_echo(id, gen, std::chrono::seconds(10)).then_wrapped([] (auto&& f) {
+        return ser::gossip_rpc_verbs::send_gossip_echo(&ms, id, netw::messaging_service::clock_type::now() + std::chrono::seconds(10), gen, false).then_wrapped([] (auto&& f) {
             try {
                 f.get();
                 return make_ready_future<>();

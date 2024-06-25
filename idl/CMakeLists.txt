@@ -60,6 +60,7 @@ set(idl_headers
   position_in_partition.idl.hh
   experimental/broadcast_tables_lang.idl.hh
   utils.idl.hh
+  gossip.idl.hh
   )
 
 foreach(idl_header ${idl_headers})
