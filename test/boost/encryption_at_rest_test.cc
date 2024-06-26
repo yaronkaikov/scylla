@@ -167,8 +167,11 @@ static future<> kmip_test_helper(const std::function<future<>(std::string_view, 
 
     tmpdir tmp;
 
-    // TODO: can we have a better reference to resource dir?
-    auto resourcedir = "./test/resource/certs";
+    static const char* def_resourcedir = "./test/resource/certs";
+    const char* resourcedir = std::getenv("KMIP_RESOURCE_DIR");
+    if (resourcedir == nullptr) {
+        resourcedir = def_resourcedir;
+    } 
 
     co_await f(resourcedir, tmp);
 }

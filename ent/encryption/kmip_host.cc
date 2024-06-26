@@ -829,6 +829,9 @@ future<std::vector<kmip_host::id_type>> kmip_host::impl::find_matching_keys(cons
 
     auto [kdl_attrs, crypt_alg] = make_attributes(info, false);
 
+    static const char kmip_tag_cryptographic_length[] = KMIP_TAG_CRYPTOGRAPHIC_LENGTH_STR;
+    static const char kmip_tag_cryptographic_usage_mask[] = KMIP_TAG_CRYPTOGRAPHIC_USAGE_MASK_STR;
+
     // #1079. Query mask apparently ignores things like cryptographic 
     // attribute set of options, instead we must specify the query 
     // as a list of attributes. 
@@ -840,16 +843,17 @@ future<std::vector<kmip_host::id_type>> kmip_host::impl::find_matching_keys(cons
                     KMIP_TAG_CRYPTOGRAPHIC_ALGORITHM,
                     int(crypt_alg))
                     );
-    kmip_chk(KMIP_DATA_LIST_add_attr_enum_by_tag(kdl_attrs,
-                    KMIP_TAG_CRYPTOGRAPHIC_LENGTH,
+    kmip_chk(KMIP_DATA_LIST_add_attr_int(kdl_attrs,
+                    // our kmip sdk is broken/const-challenged
+                    const_cast<char*>(kmip_tag_cryptographic_length),
                     int(info.info.len))
                     );
     kmip_chk(KMIP_DATA_LIST_add_attr_enum_by_tag(kdl_attrs,
                     KMIP_TAG_STATE,
                     KMIP_STATE_ACTIVE)
                     );
-    kmip_chk(KMIP_DATA_LIST_add_attr_enum_by_tag(kdl_attrs,
-                    KMIP_TAG_CRYPTOGRAPHIC_USAGE_MASK,
+    kmip_chk(KMIP_DATA_LIST_add_attr_int(kdl_attrs,
+                    const_cast<char*>(kmip_tag_cryptographic_usage_mask),
                     KMIP_CRYPTOGRAPHIC_USAGE_ENCRYPT|KMIP_CRYPTOGRAPHIC_USAGE_DECRYPT)
                     );
 
