@@ -7,6 +7,7 @@
  */
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/exception.hh>
 
 #include "task_manager.hh"
 #include "api/api-doc/task_manager.json.hh"
@@ -124,7 +125,7 @@ void set_task_manager(http_context& ctx, routes& r, db::config& cfg) {
             chunked_stats local_res;
             tasks::task_manager::module_ptr module;
             try {
-                module = tm.find_module(req->param["module"]);
+                module = tm.find_module(req->get_path_param("module"));
             } catch (...) {
                 throw bad_param_exception(fmt::format("{}", std::current_exception()));
             }
@@ -139,25 +140,34 @@ void set_task_manager(http_context& ctx, routes& r, db::config& cfg) {
 
         std::function<future<>(output_stream<char>&&)> f = [r = std::move(res)] (output_stream<char>&& os) -> future<> {
             auto s = std::move(os);
-            auto res = std::move(r);
-            co_await s.write("[");
-            std::string delim = "";
-            for (auto& v: res) {
-                for (auto& stats: v) {
-                    co_await s.write(std::exchange(delim, ", "));
-                    tm::task_stats ts;
-                    ts = stats;
-                    co_await formatter::write(s, ts);
+            std::exception_ptr ex;
+            try {
+                auto res = std::move(r);
+                co_await s.write("[");
+                std::string delim = "";
+                for (auto& v: res) {
+                    for (auto& stats: v) {
+                        co_await s.write(std::exchange(delim, ", "));
+                        tm::task_stats ts;
+                        ts = stats;
+                        co_await formatter::write(s, ts);
+                    }
                 }
+                co_await s.write("]");
+                co_await s.flush();
+            } catch (...) {
+                ex = std::current_exception();
             }
-            co_await s.write("]");
             co_await s.close();
+            if (ex) {
+                co_await coroutine::return_exception_ptr(std::move(ex));
+            }
         };
         co_return std::move(f);
     });
 
     tm::get_task_status.set(r, [&ctx] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
-        auto id = tasks::task_id{utils::UUID{req->param["task_id"]}};
+        auto id = tasks::task_id{utils::UUID{req->get_path_param("task_id")}};
         tasks::task_manager::foreign_task_ptr task;
         try {
             task = co_await tasks::task_manager::invoke_on_task(ctx.tm, id, std::function([] (tasks::task_manager::task_ptr task) -> future<tasks::task_manager::foreign_task_ptr> {
@@ -174,7 +184,7 @@ void set_task_manager(http_context& ctx, routes& r, db::config& cfg) {
     });
 
     tm::abort_task.set(r, [&ctx] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
-        auto id = tasks::task_id{utils::UUID{req->param["task_id"]}};
+        auto id = tasks::task_id{utils::UUID{req->get_path_param("task_id")}};
         try {
             co_await tasks::task_manager::invoke_on_task(ctx.tm, id, [] (tasks::task_manager::task_ptr task) -> future<> {
                 if (!task->is_abortable()) {
@@ -189,7 +199,7 @@ void set_task_manager(http_context& ctx, routes& r, db::config& cfg) {
     });
 
     tm::wait_task.set(r, [&ctx] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
-        auto id = tasks::task_id{utils::UUID{req->param["task_id"]}};
+        auto id = tasks::task_id{utils::UUID{req->get_path_param("task_id")}};
         tasks::task_manager::foreign_task_ptr task;
         try {
             task = co_await tasks::task_manager::invoke_on_task(ctx.tm, id, std::function([] (tasks::task_manager::task_ptr task) {
@@ -210,7 +220,7 @@ void set_task_manager(http_context& ctx, routes& r, db::config& cfg) {
 
     tm::get_task_status_recursively.set(r, [&ctx] (std::unique_ptr<http::request> req) -> future<json::json_return_type> {
         auto& _ctx = ctx;
-        auto id = tasks::task_id{utils::UUID{req->param["task_id"]}};
+        auto id = tasks::task_id{utils::UUID{req->get_path_param("task_id")}};
         std::queue<tasks::task_manager::foreign_task_ptr> q;
         utils::chunked_vector<full_task_status> res;
 
