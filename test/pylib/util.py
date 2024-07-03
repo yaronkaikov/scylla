@@ -15,6 +15,7 @@ from typing import Callable, Awaitable, Optional, TypeVar, Generic
 from cassandra.cluster import NoHostAvailable, Session, Cluster # type: ignore # pylint: disable=no-name-in-module
 from cassandra.protocol import InvalidRequest # type: ignore # pylint: disable=no-name-in-module
 from cassandra.pool import Host # type: ignore # pylint: disable=no-name-in-module
+from cassandra.query import SimpleStatement # type: ignore # pylint: disable=no-name-in-module
 
 from test.pylib.internal_types import ServerInfo
 
@@ -141,3 +142,12 @@ async def get_enabled_features(cql: Session, host: Host) -> set[str]:
     """Returns a set of cluster features that a node considers to be enabled."""
     rs = await cql.run_async(f"SELECT value FROM system.scylla_local WHERE key = 'enabled_features'", host=host)
     return set(rs[0].value.split(","))
+
+
+async def wait_for_view(cql: Session, name: str, node_count: int, timeout: int = 120):
+    async def view_is_built():
+        stmt = SimpleStatement(f"SELECT COUNT(*) FROM system_distributed.view_build_status WHERE status = 'SUCCESS' AND view_name = '{name}' ALLOW FILTERING", consistency_level=ConsistencyLevel.LOCAL_ONE)
+        done = await cql.run_async(stmt)
+        return done[0][0] == node_count or None
+    deadline = time.time() + timeout
+    await wait_for(view_is_built, deadline)
