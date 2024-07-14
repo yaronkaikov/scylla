@@ -436,7 +436,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
                 sstables.push_back(std::move(sst));
             }
 
-            auto ret = cs.get_reshaping_job(sstables, s, reshape_mode::strict);
+            auto ret = cs.get_reshaping_job(sstables, s, reshape_config{.mode = reshape_mode::strict});
             BOOST_REQUIRE(ret.sstables.size() == s->max_compaction_threshold());
             BOOST_REQUIRE(ret.max_sstable_bytes == target_sstable_size_in_mb*1024*1024);
         }
@@ -451,7 +451,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
                 sstables.push_back(std::move(sst));
             }
 
-            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, reshape_mode::strict).sstables.size() == disjoint_sstable_count);
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, reshape_config{.mode = reshape_mode::strict}).sstables.size() == disjoint_sstable_count);
         }
 
         {
@@ -466,7 +466,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
                 sstables.push_back(std::move(sst));
             }
 
-            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, reshape_mode::strict).sstables.size() == 0);
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, reshape_config{.mode = reshape_mode::strict}).sstables.size() == 0);
         }
 
         {
@@ -479,7 +479,7 @@ SEASTAR_TEST_CASE(ics_reshape_test) {
                 sstables.push_back(std::move(sst));
             }
 
-            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, reshape_mode::strict).sstables.size() == uint64_t(s->max_compaction_threshold()));
+            BOOST_REQUIRE(cs.get_reshaping_job(sstables, s, reshape_config{.mode = reshape_mode::strict}).sstables.size() == uint64_t(s->max_compaction_threshold()));
         }
     });
 }

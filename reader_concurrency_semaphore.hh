@@ -189,6 +189,7 @@ private:
     size_t _max_queue_length = std::numeric_limits<size_t>::max();
     utils::updateable_value<uint32_t> _serialize_limit_multiplier;
     utils::updateable_value<uint32_t> _kill_limit_multiplier;
+    utils::updateable_value<uint32_t> _cpu_concurrency;
     stats _stats;
     bool _stopped = false;
     bool _evicting = false;
@@ -204,7 +205,7 @@ private:
 
     bool has_available_units(const resources& r) const;
 
-    bool all_need_cpu_permits_are_awaiting() const;
+    bool cpu_concurrency_limit_reached() const;
 
     [[nodiscard]] std::exception_ptr check_queue_size(std::string_view queue_name);
 
@@ -278,7 +279,8 @@ public:
             sstring name,
             size_t max_queue_length,
             utils::updateable_value<uint32_t> serialize_limit_multiplier,
-            utils::updateable_value<uint32_t> kill_limit_multiplier);
+            utils::updateable_value<uint32_t> kill_limit_multiplier,
+            utils::updateable_value<uint32_t> cpu_concurrency);
 
     reader_concurrency_semaphore(
             int count,
@@ -287,8 +289,20 @@ public:
             size_t max_queue_length,
             utils::updateable_value<uint32_t> serialize_limit_multiplier,
             utils::updateable_value<uint32_t> kill_limit_multiplier)
+        : reader_concurrency_semaphore(count, memory, std::move(name), max_queue_length,
+                std::move(serialize_limit_multiplier), std::move(kill_limit_multiplier), utils::updateable_value<uint32_t>(1))
+    { }
+
+    reader_concurrency_semaphore(
+            int count,
+            ssize_t memory,
+            sstring name,
+            size_t max_queue_length,
+            utils::updateable_value<uint32_t> serialize_limit_multiplier,
+            utils::updateable_value<uint32_t> kill_limit_multiplier,
+            utils::updateable_value<uint32_t> cpu_concurrency)
         : reader_concurrency_semaphore(utils::updateable_value(count), memory, std::move(name), max_queue_length,
-                std::move(serialize_limit_multiplier), std::move(kill_limit_multiplier))
+                std::move(serialize_limit_multiplier), std::move(kill_limit_multiplier), std::move(cpu_concurrency))
     { }
 
     /// Create a semaphore with practically unlimited count and memory.
@@ -306,9 +320,10 @@ public:
             ssize_t memory = std::numeric_limits<ssize_t>::max(),
             size_t max_queue_length = std::numeric_limits<size_t>::max(),
             utils::updateable_value<uint32_t> serialize_limit_multipler = utils::updateable_value(std::numeric_limits<uint32_t>::max()),
-            utils::updateable_value<uint32_t> kill_limit_multipler = utils::updateable_value(std::numeric_limits<uint32_t>::max()))
+            utils::updateable_value<uint32_t> kill_limit_multipler = utils::updateable_value(std::numeric_limits<uint32_t>::max()),
+            utils::updateable_value<uint32_t> cpu_concurrency = utils::updateable_value<uint32_t>(1))
         : reader_concurrency_semaphore(utils::updateable_value<uint32_t>(count), memory, std::move(name), max_queue_length, std::move(serialize_limit_multipler),
-                std::move(kill_limit_multipler))
+                std::move(kill_limit_multipler), std::move(cpu_concurrency))
     {}
 
     virtual ~reader_concurrency_semaphore();

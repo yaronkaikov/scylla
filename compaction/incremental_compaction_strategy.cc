@@ -333,7 +333,8 @@ void incremental_compaction_strategy::sort_run_bucket_by_first_key(size_bucket_t
 }
 
 compaction_descriptor
-incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input, schema_ptr schema, reshape_mode mode) const {
+incremental_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input, schema_ptr schema, reshape_config cfg) const {
+    auto mode = cfg.mode;
     size_t offstrategy_threshold = std::max(schema->min_compaction_threshold(), 4);
     size_t max_sstables = std::max(schema->max_compaction_threshold(), int(offstrategy_threshold));
 

@@ -80,7 +80,7 @@ fi
 PRODUCT=scylla-enterprise
 VERSION=2024.1.8
 
-BASE_VERSION=5.4.9
+BASE_VERSION=5.4.10
 
 if test -f version
 then

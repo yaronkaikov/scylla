@@ -360,7 +360,8 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
             "_streaming_concurrency_sem",
             std::numeric_limits<size_t>::max(),
             utils::updateable_value(std::numeric_limits<uint32_t>::max()),
-            utils::updateable_value(std::numeric_limits<uint32_t>::max()))
+            utils::updateable_value(std::numeric_limits<uint32_t>::max()),
+            utils::updateable_value(uint32_t(1)))
     // No limits, just for accounting.
     , _compaction_concurrency_sem(reader_concurrency_semaphore::no_limits{}, "compaction")
     , _system_read_concurrency_sem(
@@ -397,7 +398,8 @@ database::database(const db::config& cfg, database_config dbcfg, service::migrat
     , _sst_dir_semaphore(sst_dir_sem)
     , _reader_concurrency_semaphores_group(max_memory_concurrent_reads(), max_count_concurrent_reads, max_inactive_queue_length(),
         _cfg.reader_concurrency_semaphore_serialize_limit_multiplier,
-        _cfg.reader_concurrency_semaphore_kill_limit_multiplier)
+        _cfg.reader_concurrency_semaphore_kill_limit_multiplier,
+        _cfg.reader_concurrency_semaphore_cpu_concurrency)
     , _stop_barrier(std::move(barrier))
     , _update_memtable_flush_static_shares_action([this, &cfg] { return _memtable_controller.update_static_shares(cfg.memtable_flush_static_shares()); })
     , _memtable_flush_static_shares_observer(cfg.memtable_flush_static_shares.observe(_update_memtable_flush_static_shares_action.make_observer()))

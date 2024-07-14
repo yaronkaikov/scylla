@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 namespace sstables {
 
 enum class compaction_strategy_type {
@@ -20,4 +22,10 @@ enum class compaction_strategy_type {
 };
 
 enum class reshape_mode { strict, relaxed };
+
+struct reshape_config {
+    reshape_mode mode;
+    const uint64_t free_storage_space;
+};
+
 }
