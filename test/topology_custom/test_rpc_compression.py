@@ -100,6 +100,7 @@ async def test_dict_training(manager: ManagerClient) -> None:
         'rpc_dict_training_when': 'never',
         'rpc_dict_training_min_bytes': training_min_bytes,
         'rpc_dict_training_min_time_seconds': 0,
+        'rpc_dict_update_period_seconds': 1,
     }
     cmdline = [
         '--logger-log-level=dict_training=trace'
