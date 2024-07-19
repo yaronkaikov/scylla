@@ -456,7 +456,8 @@ messaging_service::messaging_service(qos::service_level_controller& sl_controlle
     // which in turn relies on _connection_index_for_tenant to be initialized.
     _connection_index_for_tenant.reserve(_scheduling_config.statement_tenants.size());
     for (unsigned i = 0; i <  _scheduling_config.statement_tenants.size(); ++i) {
-        _connection_index_for_tenant.push_back({_scheduling_config.statement_tenants[i].sched_group, i});
+        auto& tenant_cfg = _scheduling_config.statement_tenants[i];
+        _connection_index_for_tenant.push_back({tenant_cfg.sched_group, i, tenant_cfg.enabled});
     }
 
     register_handler(this, messaging_verb::CLIENT_ID, [this] (rpc::client_info& ci, gms::inet_address broadcast_address, uint32_t src_cpu_id, rpc::optional<uint64_t> max_result_size, rpc::optional<utils::UUID> host_id) {
@@ -712,14 +713,19 @@ messaging_service::get_rpc_client_idx(messaging_verb verb) {
     if (_connection_index_for_tenant.size() == 0) {
         return idx;
     }
-    // A statement or statement-ack verb
     const auto curr_sched_group = current_scheduling_group();
     for (unsigned i = 0; i < _connection_index_for_tenant.size(); ++i) {
         if (_connection_index_for_tenant[i].sched_group == curr_sched_group) {
-            // i == 0: the default tenant maps to the default client indexes beloning to the interval
-            // [PER_SHARD_CONNECTION_COUNT, PER_SHARD_CONNECTION_COUNT + PER_TENANT_CONNECTION_COUNT).
-            idx += i * PER_TENANT_CONNECTION_COUNT;
-            return idx;
+            if(_connection_index_for_tenant[i].enabled) {
+                // i == 0: the default tenant maps to the default client indexes beloning to the interval
+                // [PER_SHARD_CONNECTION_COUNT, PER_SHARD_CONNECTION_COUNT + PER_TENANT_CONNECTION_COUNT).
+                idx += i * PER_TENANT_CONNECTION_COUNT;
+                return idx;
+            } else {
+                // If the tenant is disable, immediately return current index to
+                // use $system tenant. 
+                return idx;
+            }
         }
 
     }
