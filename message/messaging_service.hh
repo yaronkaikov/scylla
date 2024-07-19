@@ -21,6 +21,7 @@
 #include "streaming/stream_fwd.hh"
 #include "locator/host_id.hh"
 
+#include <any>
 #include <list>
 #include <vector>
 #include <optional>
@@ -559,6 +560,12 @@ public:
     unsigned get_rpc_client_idx(messaging_verb verb);
     static constexpr std::array<std::string_view, 3> _connection_types_prefix = {"statement:", "statement-ack:", "forward:"};
     unsigned add_statement_tenant(sstring tenant_name, scheduling_group sg);
+
+    void init_feature_listeners();
+private:
+    std::any _maintenance_tenant_enabled_listener;
+
+    void enable_scheduling_tenant(std::string_view name);
 };
 
 } // namespace netw
