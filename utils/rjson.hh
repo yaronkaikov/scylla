@@ -338,6 +338,12 @@ inline bytes base64_decode(const value& v) {
     return ::base64_decode(std::string_view(v.GetString(), v.GetStringLength()));
 }
 
+inline bool is_leaf(const rjson::value& value) {
+    return !value.IsObject() && !value.IsArray();
+}
+
+future<> destroy_gently(rjson::value&& value);
+
 } // end namespace rjson
 
 namespace std {
