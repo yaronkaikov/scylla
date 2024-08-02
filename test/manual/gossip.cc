@@ -12,7 +12,9 @@
 #include <seastar/core/app-template.hh>
 #include <seastar/util/closeable.hh>
 
+#include "db/config.hh"
 #include "db/system_distributed_keyspace.hh"
+#include "gms/feature_service.hh"
 #include "message/messaging_service.hh"
 #include "gms/gossiper.hh"
 #include "gms/application_state.hh"
@@ -63,6 +65,7 @@ int main(int ac, char ** av) {
 
             sharded<abort_source> abort_sources;
             sharded<locator::shared_token_metadata> token_metadata;
+            sharded<gms::feature_service> feature_service;
             sharded<netw::messaging_service> messaging;
             sharded<auth::service> auth_service;
 
@@ -75,7 +78,9 @@ int main(int ac, char ** av) {
             scheduling_group default_scheduling_group = create_scheduling_group("sl_default_sg", 1.0).get();
             sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, default_scheduling_group).get();
             compressor_tracker.start([] { return utils::advanced_rpc_compressor::tracker::config(); }).get();
-            messaging.start(std::ref(sl_controller), std::ref(compressor_tracker), locator::host_id{}, listen, 7000).get();
+            auto feature_cfg = gms::feature_config_from_db_config(*cfg, {});
+            feature_service.start(feature_cfg).get();
+            messaging.start(std::ref(sl_controller), std::ref(compressor_tracker), locator::host_id{}, listen, 7000, std::ref(feature_service)).get();
             auto stop_messaging = deferred_stop(messaging);
 
             gms::gossip_config gcfg;

@@ -648,7 +648,7 @@ private:
             auto stop_compressor_tracker = defer([&compressor_tracker] { compressor_tracker.stop().get(); });
 
             // don't start listening so tests can be run in parallel
-            _ms.start(std::ref(_sl_controller), std::ref(compressor_tracker), host_id, listen, std::move(7000)).get();
+            _ms.start(std::ref(_sl_controller), std::ref(compressor_tracker), host_id, listen, std::move(7000), std::ref(_feature_service)).get();
             auto stop_ms = defer([this] { _ms.stop().get(); });
 
             // Normally the auth server is already stopped in here,

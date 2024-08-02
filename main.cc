@@ -1322,7 +1322,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }
 
             // Delay listening messaging_service until gossip message handlers are registered
-            messaging.start(std::ref(sl_controller), std::ref(compressor_tracker), mscfg, scfg, creds).get();
+            messaging.start(std::ref(sl_controller), std::ref(compressor_tracker), mscfg, scfg, creds, std::ref(feature_service)).get();
             auto stop_ms = defer_verbose_shutdown("messaging service", [&messaging] {
                 messaging.invoke_on_all(&netw::messaging_service::stop).get();
             });

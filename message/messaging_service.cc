@@ -123,6 +123,7 @@
 #include "idl/forward_request.dist.impl.hh"
 #include "idl/storage_service.dist.impl.hh"
 #include "idl/join_node.dist.impl.hh"
+#include "gms/feature_service.hh"
 
 namespace netw {
 
@@ -272,9 +273,9 @@ future<> messaging_service::unregister_handler(messaging_verb verb) {
     return _rpc->unregister_handler(verb);
 }
 
-messaging_service::messaging_service(qos::service_level_controller& sl_controller, utils::walltime_compressor_tracker& wct, locator::host_id id, gms::inet_address ip, uint16_t port)
+messaging_service::messaging_service(qos::service_level_controller& sl_controller, utils::walltime_compressor_tracker& wct, locator::host_id id, gms::inet_address ip, uint16_t port, gms::feature_service& feature_service)
     : messaging_service(sl_controller, wct, config{std::move(id), std::move(ip), port},
-                        scheduling_config{{{{}, "$default"}}, {}, {}}, nullptr)
+                        scheduling_config{{{{}, "$default"}}, {}, {}}, nullptr, feature_service)
 {}
 
 static
@@ -439,7 +440,7 @@ void messaging_service::do_start_listen() {
 }
 
 messaging_service::messaging_service(qos::service_level_controller& sl_controller, utils::walltime_compressor_tracker& arct,
-        config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder> credentials)
+        config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder> credentials, gms::feature_service& feature_service)
     : _cfg(std::move(cfg))
     , _rpc(new rpc_protocol_wrapper(serializer { }))
     , _credentials_builder(credentials ? std::make_unique<seastar::tls::credentials_builder>(*credentials) : nullptr)
@@ -448,6 +449,7 @@ messaging_service::messaging_service(qos::service_level_controller& sl_controlle
     , _scheduling_info_for_connection_index(initial_scheduling_info())
     , _sl_controller(sl_controller)
     , _compressor_factory_wrapper(std::make_unique<compressor_factory_wrapper>(arct, _cfg.enable_advanced_rpc_compression))
+    , _feature_service(feature_service)
 {
     _rpc->set_logger(&rpc_logger);
 
