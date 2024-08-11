@@ -66,7 +66,7 @@ reader_concurrency_semaphore& reader_concurrency_semaphore_group::add_or_update(
             sg,
             0,
             _max_concurrent_reads,
-            sg.name() + "_read_concurrency_sem",
+            sg.name(),
             _max_queue_length,
             _serialize_limit_multiplier,
             _kill_limit_multiplier,

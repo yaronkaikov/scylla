@@ -1902,7 +1902,8 @@ future<> sstable::generate_summary() {
     };
 
     auto index_file = co_await new_sstable_component_file(_read_error_handler, component_type::Index, open_flags::ro);
-    auto sem = reader_concurrency_semaphore(reader_concurrency_semaphore::no_limits{}, "sstables::generate_summary()");
+    auto sem = reader_concurrency_semaphore(reader_concurrency_semaphore::no_limits{}, "sstables::generate_summary()",
+            reader_concurrency_semaphore::register_metrics::no);
 
     std::exception_ptr ex;
 
@@ -2833,7 +2834,8 @@ future<bool> sstable::has_partition_key(const utils::hashed_key& hk, const dht::
     }
     bool present;
     std::exception_ptr ex;
-    auto sem = reader_concurrency_semaphore(reader_concurrency_semaphore::no_limits{}, "sstables::has_partition_key()");
+    auto sem = reader_concurrency_semaphore(reader_concurrency_semaphore::no_limits{}, "sstables::has_partition_key()",
+            reader_concurrency_semaphore::register_metrics::no);
     std::unique_ptr<sstables::index_reader> lh_index_ptr = nullptr;
     try {
         lh_index_ptr = std::make_unique<sstables::index_reader>(s, sem.make_tracking_only_permit(_schema, s->get_filename(), db::no_timeout, {}));
