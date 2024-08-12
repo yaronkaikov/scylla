@@ -786,15 +786,6 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "If this happens, this option can be used to make the stalls less severe.")
     , internode_compression_checksumming(this, "internode_compression_checksumming", liveness::LiveUpdate, value_status::Used, true,
         "Computes and checks checksums for compressed RPC frames. This is a paranoid precaution against corruption bugs in the compression protocol.")
-    , rpc_dict_training_when(this, "rpc_dict_training_when", liveness::LiveUpdate, value_status::Used, utils::dict_training_loop::when::type::NEVER,
-        "Specifies when RPC compression dictionary training is performed by this node.\n"
-        "`never` disables the training completely.\n`always` (not recommended) enables it on all nodes.")
-    , rpc_dict_training_min_time_seconds(this, "rpc_dict_training_min_time_seconds", liveness::LiveUpdate, value_status::Used, 3600,
-        "Specifies the minimum duration of RPC compression dictionary training.")
-    , rpc_dict_training_min_bytes(this, "rpc_dict_training_min_bytes", liveness::LiveUpdate, value_status::Used, 1'000'000'000,
-        "Specifies the minimum volume of RPC compression dictionary training.")
-    , rpc_dict_update_period_seconds(this, "rpc_dict_update_period_seconds", liveness::LiveUpdate, value_status::Used, 10*60,
-        "Specifies how often the system_distributed.dicts is queried for new dictionaries.")
     , internode_compression_algorithms(this, "internode_compression_algorithms", liveness::LiveUpdate, value_status::Used, {
             utils::compression_algorithm::type::ZSTD,
             utils::compression_algorithm::type::LZ4,
