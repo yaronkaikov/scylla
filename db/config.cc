@@ -791,6 +791,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
             utils::compression_algorithm::type::LZ4,
         },
         "Specifies RPC compression algorithms supported by this node. ")
+    , internode_compression_enable_advanced(this, "internode_compression_enable_advanced", liveness::MustRestart, value_status::Used, false,
+        "Enables the new implementation of RPC compression. If disabled, Scylla will fall back to the old implementation.")
     , inter_dc_tcp_nodelay(this, "inter_dc_tcp_nodelay", value_status::Used, false,
         "Enable or disable tcp_nodelay for inter-data center communication. When disabled larger, but fewer, network packets are sent. This reduces overhead from the TCP protocol itself. However, if cross data-center responses are blocked, it will increase latency.")
     , streaming_socket_timeout_in_ms(this, "streaming_socket_timeout_in_ms", value_status::Unused, 0,

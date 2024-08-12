@@ -55,6 +55,7 @@ async def test_basic(manager: ManagerClient) -> None:
     Also, tests that changing internode_compression_zstd_max_cpu_fraction from 0.0 to 1.0 enables zstd as expected.
     """
     cfg = {
+        'internode_compression_enable_advanced': True,
         'internode_compression': "all",
         'internode_compression_zstd_max_cpu_fraction': 0.0}
     logger.info(f"Booting initial cluster")

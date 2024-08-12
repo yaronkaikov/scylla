@@ -161,10 +161,13 @@ class messaging_service::compressor_factory_wrapper {
     advanced_rpc_compressor_factory _arcf;
     rpc::multi_algo_compressor_factory _multi_factory;
 public:
-    compressor_factory_wrapper(decltype(advanced_rpc_compressor_factory::_tracker) t)
+    compressor_factory_wrapper(decltype(advanced_rpc_compressor_factory::_tracker) t, bool enable_advanced)
         : _arcf(t)
-        , _multi_factory({
+        , _multi_factory(enable_advanced ? rpc::multi_algo_compressor_factory{
             &_arcf,
+            &_lz4_fragmented_compressor_factory,
+            &_lz4_compressor_factory,
+        } : rpc::multi_algo_compressor_factory{
             &_lz4_fragmented_compressor_factory,
             &_lz4_compressor_factory,
         })
@@ -444,7 +447,7 @@ messaging_service::messaging_service(qos::service_level_controller& sl_controlle
     , _scheduling_config(scfg)
     , _scheduling_info_for_connection_index(initial_scheduling_info())
     , _sl_controller(sl_controller)
-    , _compressor_factory_wrapper(std::make_unique<compressor_factory_wrapper>(arct))
+    , _compressor_factory_wrapper(std::make_unique<compressor_factory_wrapper>(arct, _cfg.enable_advanced_rpc_compression))
 {
     _rpc->set_logger(&rpc_logger);
 

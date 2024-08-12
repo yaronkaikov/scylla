@@ -1251,7 +1251,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     .zstd_longterm_quota_fraction = cfg->internode_compression_zstd_max_longterm_cpu_fraction,
                     .zstd_longterm_quota_refresh_ms = cfg->internode_compression_zstd_longterm_cpu_quota_refresh_period_ms,
                     .algo_config = cfg->internode_compression_algorithms,
-                    .register_metrics = true,
+                    .register_metrics = cfg->internode_compression_enable_advanced(),
                     .checksumming = cfg->internode_compression_checksumming,
                 };
             };
@@ -1290,6 +1290,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             } else if (compress_what == "dc") {
                 mscfg.compress = netw::messaging_service::compress_what::dc;
             }
+            mscfg.enable_advanced_rpc_compression = cfg->internode_compression_enable_advanced();
 
             if (encrypt == "all") {
                 mscfg.encrypt = netw::messaging_service::encrypt_what::all;
