@@ -277,11 +277,8 @@ public:
     named_value<uint32_t> internode_compression_zstd_min_message_size;
     named_value<uint32_t> internode_compression_zstd_max_message_size;
     named_value<bool> internode_compression_checksumming;
-    named_value<enum_option<utils::dict_training_loop::when>> rpc_dict_training_when;
-    named_value<uint32_t> rpc_dict_training_min_time_seconds;
-    named_value<uint64_t> rpc_dict_training_min_bytes;
-    named_value<uint32_t> rpc_dict_update_period_seconds;
     named_value<utils::advanced_rpc_compressor::tracker::algo_config> internode_compression_algorithms;
+    named_value<bool> internode_compression_enable_advanced;
     named_value<bool> inter_dc_tcp_nodelay;
     named_value<uint32_t> streaming_socket_timeout_in_ms;
     named_value<bool> start_native_transport;

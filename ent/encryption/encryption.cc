@@ -45,7 +45,6 @@
 #include "cql3/query_processor.hh"
 #include "db/extensions.hh"
 #include "db/system_keyspace.hh"
-#include "db/system_distributed_keyspace.hh"
 #include "serializer.hh"
 #include "serializer_impl.hh"
 #include "schema/schema.hh"
@@ -889,7 +888,7 @@ future<seastar::shared_ptr<encryption_context>> register_extensions(const db::co
         f = f.then([opts = *opts, &exts] {
             return smp::invoke_on_all([opts = make_lw_shared<options>(opts), &exts] () mutable {
                 auto& f = exts.schema_extensions().at(encryption_attribute);
-                for (auto& s : { db::system_keyspace::paxos(), db::system_keyspace::batchlog(), db::system_distributed_keyspace::dicts() }) {
+                for (auto& s : { db::system_keyspace::paxos(), db::system_keyspace::batchlog() }) {
                     exts.add_extension_to_schema(s, encryption_attribute, f(*opts));
                 }
             });

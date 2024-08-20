@@ -278,6 +278,7 @@ public:
         uint16_t ssl_port = 0;
         encrypt_what encrypt = encrypt_what::none;
         compress_what compress = compress_what::none;
+        bool enable_advanced_rpc_compression = false;
         tcp_nodelay_what tcp_nodelay = tcp_nodelay_what::all;
         bool listen_on_broadcast_address = false;
         size_t rpc_memory_limit = 1'000'000;

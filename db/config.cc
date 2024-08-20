@@ -786,20 +786,13 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "If this happens, this option can be used to make the stalls less severe.")
     , internode_compression_checksumming(this, "internode_compression_checksumming", liveness::LiveUpdate, value_status::Used, true,
         "Computes and checks checksums for compressed RPC frames. This is a paranoid precaution against corruption bugs in the compression protocol.")
-    , rpc_dict_training_when(this, "rpc_dict_training_when", liveness::LiveUpdate, value_status::Used, utils::dict_training_loop::when::type::NEVER,
-        "Specifies when RPC compression dictionary training is performed by this node.\n"
-        "`never` disables the training completely.\n`always` (not recommended) enables it on all nodes.")
-    , rpc_dict_training_min_time_seconds(this, "rpc_dict_training_min_time_seconds", liveness::LiveUpdate, value_status::Used, 3600,
-        "Specifies the minimum duration of RPC compression dictionary training.")
-    , rpc_dict_training_min_bytes(this, "rpc_dict_training_min_bytes", liveness::LiveUpdate, value_status::Used, 1'000'000'000,
-        "Specifies the minimum volume of RPC compression dictionary training.")
-    , rpc_dict_update_period_seconds(this, "rpc_dict_update_period_seconds", liveness::LiveUpdate, value_status::Used, 10*60,
-        "Specifies how often the system_distributed.dicts is queried for new dictionaries.")
     , internode_compression_algorithms(this, "internode_compression_algorithms", liveness::LiveUpdate, value_status::Used, {
             utils::compression_algorithm::type::ZSTD,
             utils::compression_algorithm::type::LZ4,
         },
         "Specifies RPC compression algorithms supported by this node. ")
+    , internode_compression_enable_advanced(this, "internode_compression_enable_advanced", liveness::MustRestart, value_status::Used, false,
+        "Enables the new implementation of RPC compression. If disabled, Scylla will fall back to the old implementation.")
     , inter_dc_tcp_nodelay(this, "inter_dc_tcp_nodelay", value_status::Used, false,
         "Enable or disable tcp_nodelay for inter-data center communication. When disabled larger, but fewer, network packets are sent. This reduces overhead from the TCP protocol itself. However, if cross data-center responses are blocked, it will increase latency.")
     , streaming_socket_timeout_in_ms(this, "streaming_socket_timeout_in_ms", value_status::Unused, 0,
