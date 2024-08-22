@@ -50,7 +50,8 @@ class ReplaceConfig(NamedTuple):
     ignore_dead_nodes: list[IPAddress | HostID] = []
 
 
-def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str], cluster_name: str) -> dict[str, object]:
+def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str], cluster_name: str,
+                     server_encryption: str) -> dict[str, object]:
     return {
         'cluster_name': cluster_name,
         'workdir': str(workdir.resolve()),
@@ -109,6 +110,14 @@ def make_scylla_conf(workdir: pathlib.Path, host_addr: str, seed_addrs: List[str
         'reader_concurrency_semaphore_kill_limit_multiplier': 0,
 
         'force_schema_commit_log': True,
+
+        'server_encryption_options': {
+            'internode_encryption': server_encryption,
+            'certificate': 'conf/scylla.crt',
+            'keyfile': 'conf/scylla.key',
+            'truststore': 'conf/scyllacadb.pem',
+        },
+
     }
 
 # Seastar options can not be passed through scylla.yaml, use command line
@@ -209,7 +218,8 @@ class ScyllaServer:
                  cluster_name: str, ip_addr: str, seeds: List[str],
                  cmdline_options: List[str],
                  config_options: Dict[str, Any],
-                 property_file: Dict[str, Any]) -> None:
+                 property_file: Dict[str, Any],
+                 server_encryption: str) -> None:
         # pylint: disable=too-many-arguments
         self.server_id = ServerNum(ScyllaServer.newid())
         self.exe = pathlib.Path(exe).resolve()
@@ -228,12 +238,20 @@ class ScyllaServer:
         self.log_filename = (self.vardir / shortname).with_suffix(".log")
         self.config_filename = self.workdir / "conf/scylla.yaml"
         self.property_filename = self.workdir / "conf/cassandra-rackdc.properties"
+        self.certificate_filename = self.workdir / "conf/scylla.crt"
+        self.keyfile_filename = self.workdir / "conf/scylla.key"
+        self.truststore_filename = self.workdir / "conf/scyllacadb.pem"
+        self.resourcesdir = pathlib.Path.cwd() / "test/pylib/resources"
+        self.resources_certificate_file = self.resourcesdir / "scylla.crt"
+        self.resources_keyfile_file = self.resourcesdir / "scylla.key"
+
         # Sum of basic server configuration and the user-provided config options.
         self.config = make_scylla_conf(
                 workdir = self.workdir,
                 host_addr = self.ip_addr,
                 seed_addrs = self.seeds,
-                cluster_name = self.cluster_name) \
+                cluster_name = self.cluster_name,
+                server_encryption = server_encryption) \
             | config_options
         self.property_file = property_file
 
@@ -573,7 +591,9 @@ class ScyllaServer:
             with self.property_filename.open('w') as property_file:
                 for key, value in self.property_file.items():
                     property_file.write(f'{key}={value}\n')
-
+        shutil.copyfile(self.resources_certificate_file, self.certificate_filename)
+        shutil.copyfile(self.resources_keyfile_file, self.keyfile_filename)
+        shutil.copyfile(self.resources_certificate_file, self.truststore_filename)
 
 class ScyllaCluster:
     """A cluster of Scylla servers providing an API for changes"""
@@ -587,6 +607,7 @@ class ScyllaCluster:
         property_file: dict[str, Any]
         config_from_test: dict[str, Any]
         cmdline_from_test: List[str]
+        server_encryption: str
 
     def __init__(self, logger: Union[logging.Logger, logging.LoggerAdapter],
                  host_registry: HostRegistry, replicas: int,
@@ -676,7 +697,8 @@ class ScyllaCluster:
                          cmdline: Optional[List[str]] = None,
                          config: Optional[dict[str, Any]] = None,
                          property_file: Optional[dict[str, Any]] = None,
-                         start: bool = True) -> ServerInfo:
+                         start: bool = True,
+                         server_encryption: str = "none") -> ServerInfo:
         """Add a new server to the cluster"""
         self.is_dirty = True
 
@@ -724,6 +746,7 @@ class ScyllaCluster:
             seeds = seeds,
             property_file = property_file,
             config_from_test = extra_config,
+            server_encryption = server_encryption,
             cmdline_from_test = cmdline or []
         )
 
@@ -1159,7 +1182,8 @@ class ScyllaClusterManager:
         data = await request.json()
         replace_cfg = ReplaceConfig(**data["replace_cfg"]) if "replace_cfg" in data else None
         s_info = await self.cluster.add_server(replace_cfg, data.get('cmdline'), data.get('config'),
-                                               data.get('property_file'), data.get('start', True))
+                                               data.get('property_file'), data.get('start', True),
+                                               data.get('server_encryption'))
         return {"server_id" : s_info.server_id, "ip_addr": s_info.ip_addr}
 
     async def _cluster_remove_node(self, request: aiohttp.web.Request) -> None:

@@ -176,7 +176,8 @@ class ManagerClient():
                          cmdline: Optional[List[str]] = None,
                          config: Optional[dict[str, Any]] = None,
                          property_file: Optional[dict[str, Any]] = None,
-                         start: bool = True) -> ServerInfo:
+                         start: bool = True,
+                         server_encryption: str = "none") -> ServerInfo:
         """Add a new server"""
         try:
             data: dict[str, Any] = {'start': start}
@@ -188,6 +189,8 @@ class ManagerClient():
                 data['config'] = config
             if property_file:
                 data['property_file'] = property_file
+            if server_encryption:
+                data['server_encryption'] = server_encryption
             server_info = await self.client.put_json("/cluster/addserver", data, response_type="json",
                                                      timeout=ScyllaServer.TOPOLOGY_TIMEOUT)
         except Exception as exc:
