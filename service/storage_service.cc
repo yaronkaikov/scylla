@@ -3204,17 +3204,21 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
         // if we got here, it means that the workload priotization didn't exist before and
         // also that the cluster currently doesn't support workload prioritization.
         // we delay the creation of the tables and accessing them until it does.
-      _workload_prioritization_registration = _feature_service.workload_prioritization.when_enabled([this, &sys_dist_ks] () {
-            // since we are creating tables here and we wouldn't wont to have a race condition
-            // we will first wait for a random period of time and only then start the routine
-            // the race condition can happen because the feature flag will "light up" in about
-            // the same time on all nodes. The more nodes there are, the higher the chance for
-            // a race.
-            std::random_device seed_gen;
-            std::default_random_engine rnd_engine(seed_gen());
-            std::uniform_int_distribution<> delay_generator(0,5000000);
-            sleep(std::chrono::microseconds(delay_generator(rnd_engine))).get();
-            start_workload_prioritization(workload_prioritization_create_tables::yes, sys_dist_ks).get();
+        //
+        // the callback might be run immediately and it uses async methods, so the thread is needed
+        co_await seastar::async([&] {
+            _workload_prioritization_registration = _feature_service.workload_prioritization.when_enabled([this, &sys_dist_ks] () {
+                // since we are creating tables here and we wouldn't want to have a race condition
+                // we will first wait for a random period of time and only then start the routine
+                // the race condition can happen because the feature flag will "light up" in about
+                // the same time on all nodes. The more nodes there are, the higher the chance for
+                // a race.
+                std::random_device seed_gen;
+                std::default_random_engine rnd_engine(seed_gen());
+                std::uniform_int_distribution<> delay_generator(0,5000000);
+                sleep(std::chrono::microseconds(delay_generator(rnd_engine))).get();
+                start_workload_prioritization(workload_prioritization_create_tables::yes, sys_dist_ks).get();
+            });
         });
     }
 
