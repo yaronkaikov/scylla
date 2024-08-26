@@ -771,7 +771,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "\tdc : Traffic between data centers is compressed.\n"
         "\tnone : No compression.")
     , internode_compression_zstd_max_cpu_fraction(this, "internode_compression_zstd_max_cpu_fraction", liveness::LiveUpdate, value_status::Used, 0.000,
-        "ZSTD compression of RPC will consume at most this fraction of each internode_compression_zstd_quota_refresh_period_ms time slice.")
+        "ZSTD compression of RPC will consume at most this fraction of each internode_compression_zstd_quota_refresh_period_ms time slice.\n"
+        "If you wish to try out zstd for RPC compression, 0.05 is a reasonable starting point.")
     , internode_compression_zstd_cpu_quota_refresh_period_ms(this, "internode_compression_zstd_cpu_quota_refresh_period_ms", liveness::LiveUpdate, value_status::Used, 20,
         "Advanced. ZSTD compression of RPC will consume at most internode_compression_zstd_max_cpu_fraction (plus one message) of in each time slice of this length.")
     , internode_compression_zstd_max_longterm_cpu_fraction(this, "internode_compression_zstd_max_longterm_cpu_fraction", liveness::LiveUpdate, value_status::Used, 1.000,
