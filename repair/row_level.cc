@@ -18,6 +18,7 @@
 #include "mutation_writer/multishard_writer.hh"
 #include "dht/i_partitioner.hh"
 #include "dht/sharder.hh"
+#include "utils/error_injection.hh"
 #include "utils/to_string.hh"
 #include "utils/xx_hasher.hh"
 #include "utils/UUID.hh"
@@ -2256,7 +2257,8 @@ future<repair_flush_hints_batchlog_response> repair_service::repair_flush_hints_
     db::hints::sync_point sync_point = co_await _sp.local().create_hint_sync_point(std::move(target_nodes));
     lowres_clock::time_point deadline = lowres_clock::now() + req.hints_timeout;
     try {
-        if (!_bm.local_is_initialized()) {
+        bool bm_throw = utils::get_local_injector().enter("repair_flush_hints_batchlog_handler_bm_uninitialized");
+        if (!_bm.local_is_initialized() || bm_throw) {
             throw std::runtime_error("Backlog manager isn't initialized");
         }
         co_await coroutine::all(
