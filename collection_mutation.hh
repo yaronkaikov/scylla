@@ -12,6 +12,7 @@
 #include "schema/schema_fwd.hh"
 #include "gc_clock.hh"
 #include "mutation/atomic_cell.hh"
+#include "compaction/compaction_garbage_collector.hh"
 #include <iosfwd>
 #include <forward_list>
 
