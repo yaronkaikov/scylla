@@ -3200,6 +3200,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
     // workload prioritization before):
     if (sys_dist_ks.local().workload_prioritization_tables_exists()) {
         co_await start_workload_prioritization(workload_prioritization_create_tables::no, sys_dist_ks);
+        slogger.info("Workload prioritization v1 is already started.");
     } else {
         // if we got here, it means that the workload priotization didn't exist before and
         // also that the cluster currently doesn't support workload prioritization.
@@ -3218,6 +3219,7 @@ future<> storage_service::join_token_ring(sharded<db::system_distributed_keyspac
                 std::uniform_int_distribution<> delay_generator(0,5000000);
                 sleep(std::chrono::microseconds(delay_generator(rnd_engine))).get();
                 start_workload_prioritization(workload_prioritization_create_tables::yes, sys_dist_ks).get();
+                slogger.info("Workload prioritization v1 started.");
             });
         });
     }
