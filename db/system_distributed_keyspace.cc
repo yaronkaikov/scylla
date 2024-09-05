@@ -354,14 +354,13 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
 }
 
  future<> system_distributed_keyspace::start_workload_prioritization() {
-     if (this_shard_id() != 0) {
-         return make_ready_future<>();
-     }
-     if (_qp.db().get_config().create_service_levels_table &&
-             _qp.db().features().workload_prioritization) {
-         return create_tables(workload_prioritization_tables());
-     }
-     return make_ready_future();
+    if (this_shard_id() != 0) {
+        co_return;
+    }
+    if (_qp.db().get_config().create_service_levels_table &&
+            _qp.db().features().workload_prioritization) {
+        co_await create_tables(workload_prioritization_tables());
+    }
 }
  
 future<> system_distributed_keyspace::start() {
