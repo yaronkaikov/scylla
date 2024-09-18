@@ -1039,10 +1039,13 @@ future<> compaction_manager::stop_ongoing_compactions(sstring reason, table_stat
 
 future<> compaction_manager::drain() {
     cmlog.info("Asked to drain");
-    if (*_early_abort_subscription) {
+    if (_state == state::enabled) {
+        // This is a drain request and not a shutdown request.
+        // Disable the state so that it can be enabled later if requested.
         _state = state::disabled;
-        co_await stop_ongoing_compactions("drain");
     }
+    // Stop ongoing compactions, if the request has not been sent already and wait for them to stop.
+    co_await stop_ongoing_compactions("drain");
     cmlog.info("Drained");
 }
 
