@@ -1504,12 +1504,11 @@ public:
                     return std::max(lhs, rhs);
                 });
     }
-    std::chrono::microseconds calculate_delay(db::view::update_backlog backlog) {
-        constexpr auto delay_limit_us = 1000000;
+    std::chrono::microseconds calculate_delay(db::view::update_backlog backlog, uint32_t view_flow_control_delay_limit_in_ms) {
         auto adjust = [] (float x) { return x * x * x; };
         auto budget = std::max(storage_proxy::clock_type::duration(0),
             _expire_timer.get_timeout() - storage_proxy::clock_type::now());
-        std::chrono::microseconds ret(uint32_t(adjust(backlog.relative_size()) * delay_limit_us));
+        std::chrono::microseconds ret(uint32_t(adjust(backlog.relative_size()) * view_flow_control_delay_limit_in_ms * 1000));
         // "budget" has millisecond resolution and can potentially be long
         // in the future so converting it to microseconds may overflow.
         // So to compare buget and ret we need to convert both to the lower
@@ -1525,7 +1524,7 @@ public:
     template<typename Func>
     void delay(tracing::trace_state_ptr trace, Func&& on_resume) {
         auto backlog = max_backlog();
-        auto delay = calculate_delay(backlog);
+        auto delay = calculate_delay(backlog, _proxy->data_dictionary().get_config().view_flow_control_delay_limit_in_ms());
         stats().last_mv_flow_control_delay = delay;
         stats().mv_flow_control_delay += delay.count();
         if (delay.count() == 0) {

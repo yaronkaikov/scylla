@@ -499,6 +499,7 @@ public:
     utils::updateable_value<std::unordered_map<sstring, s3::endpoint_config>> object_storage_config;
 
     named_value<std::vector<error_injection_at_startup>> error_injections_at_startup;
+    named_value<uint32_t> view_flow_control_delay_limit_in_ms;
 
     bool create_role_attributes_table = true; // Some upgrade tests don't want enterprise-only tables
     bool create_service_levels_table = true; // Some upgrade tests don't want enterprise-only tables
