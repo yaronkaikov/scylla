@@ -1028,6 +1028,7 @@ class multishard_combining_reader_v2 : public flat_mutation_reader_v2::impl {
     unsigned _concurrency = 1;
 
     multishard_reader_buffer_hint _buffer_hint = multishard_reader_buffer_hint::no;
+    read_ahead _read_ahead = read_ahead::yes;
 
     void on_partition_range_change(const dht::partition_range& pr);
     bool maybe_move_to_next_shard(const dht::token* const t = nullptr);
@@ -1044,7 +1045,8 @@ public:
             const query::partition_slice& ps,
             tracing::trace_state_ptr trace_state,
             mutation_reader::forwarding fwd_mr,
-            multishard_reader_buffer_hint buffer_hint);
+            multishard_reader_buffer_hint buffer_hint,
+            read_ahead read_ahead);
 
     // this is captured.
     multishard_combining_reader_v2(const multishard_combining_reader_v2&) = delete;
@@ -1149,9 +1151,10 @@ multishard_combining_reader_v2::multishard_combining_reader_v2(
         const query::partition_slice& ps,
         tracing::trace_state_ptr trace_state,
         mutation_reader::forwarding fwd_mr,
-        multishard_reader_buffer_hint buffer_hint)
+        multishard_reader_buffer_hint buffer_hint,
+        read_ahead read_ahead)
     : impl(std::move(s), std::move(permit)), _keep_alive_sharder(std::move(keep_alive_sharder)), _sharder(sharder),
-            _buffer_hint(buffer_hint) {
+            _buffer_hint(buffer_hint), _read_ahead(read_ahead) {
 
     on_partition_range_change(pr);
 
@@ -1216,10 +1219,11 @@ flat_mutation_reader_v2 make_multishard_combining_reader_v2(
         const query::partition_slice& ps,
         tracing::trace_state_ptr trace_state,
         mutation_reader::forwarding fwd_mr,
-        multishard_reader_buffer_hint buffer_hint) {
+        multishard_reader_buffer_hint buffer_hint,
+        read_ahead read_ahead) {
     auto& sharder = erm->get_sharder(*schema);
     return make_flat_mutation_reader_v2<multishard_combining_reader_v2>(sharder, std::any(std::move(erm)), std::move(lifecycle_policy),
-            std::move(schema), std::move(permit), pr, ps, std::move(trace_state), fwd_mr, buffer_hint);
+            std::move(schema), std::move(permit), pr, ps, std::move(trace_state), fwd_mr, buffer_hint, read_ahead);
 }
 
 flat_mutation_reader_v2 make_multishard_combining_reader_v2_for_tests(
@@ -1231,7 +1235,8 @@ flat_mutation_reader_v2 make_multishard_combining_reader_v2_for_tests(
         const query::partition_slice& ps,
         tracing::trace_state_ptr trace_state,
         mutation_reader::forwarding fwd_mr,
-        multishard_reader_buffer_hint buffer_hint) {
+        multishard_reader_buffer_hint buffer_hint,
+        read_ahead read_ahead) {
     return make_flat_mutation_reader_v2<multishard_combining_reader_v2>(sharder, std::any(),
-            std::move(lifecycle_policy), std::move(schema), std::move(permit), pr, ps, std::move(trace_state), fwd_mr, buffer_hint);
+            std::move(lifecycle_policy), std::move(schema), std::move(permit), pr, ps, std::move(trace_state), fwd_mr, buffer_hint, read_ahead);
 }
