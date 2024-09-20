@@ -312,7 +312,7 @@ flat_mutation_reader_v2 repair_reader::make_reader(
                     return std::optional<dht::partition_range>(dht::to_partition_range(*shard_range));
                 }
                 return std::optional<dht::partition_range>();
-            }, compaction_time, multishard_reader_buffer_size, read_ahead::yes);
+            }, compaction_time, multishard_reader_buffer_size, read_ahead(dbconfig.repair_multishard_reader_enable_read_ahead()));
         }
         case read_strategy::multishard_filter: {
             // We can't have two permits with count resource for 1 repair.
