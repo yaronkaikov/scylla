@@ -24,6 +24,7 @@
 #include "cdc/generation_id.hh"
 #include "locator/host_id.hh"
 #include "mutation/canonical_mutation.hh"
+#include "types/types.hh"
 
 namespace sstables {
     struct entry_descriptor;
@@ -111,6 +112,7 @@ class system_keyspace : public seastar::peering_sharded_service<system_keyspace>
     cql3::query_processor& _qp;
     replica::database& _db;
     std::unique_ptr<local_cache> _cache;
+    bool _peers_table_read_fixup_done = false;
 
     static schema_ptr raft_snapshot_config();
     static schema_ptr local();
@@ -125,8 +127,15 @@ class system_keyspace : public seastar::peering_sharded_service<system_keyspace>
     static schema_ptr large_cells();
     static schema_ptr scylla_local();
     future<> force_blocking_flush(sstring cfname);
-    template <typename Value>
-    future<> update_cached_values(gms::inet_address ep, sstring column_name, Value value);
+    // This function is called when the system.peers table is read,
+    // and it fixes some types of inconsistencies that can occur
+    // due to node crashes:
+    //  * missing host_id. This is possible in the old versions of the code. Such records
+    //  are removed and the warning is written to the log.
+    //  * duplicate IPs for a given host_id. This is possible when some node changes its IP
+    //  and this node crashes after adding a new IP but before removing the old one. The
+    //  record with older timestamp is removed, the warning is written to the log.
+    future<> peers_table_read_fixup();
 public:
     static schema_ptr size_estimates();
 public:
@@ -255,16 +264,21 @@ public:
     */
     future<> update_tokens(const std::unordered_set<dht::token>& tokens);
 
-    /**
-     * Record tokens being used by another node in the PEERS table.
-     */
-    future<> update_tokens(gms::inet_address ep, const std::unordered_set<dht::token>& tokens);
-
     future<std::unordered_map<gms::inet_address, gms::inet_address>> get_preferred_ips();
 
 public:
-    template <typename Value>
-    future<> update_peer_info(gms::inet_address ep, sstring column_name, Value value);
+    struct peer_info {
+        std::optional<sstring> data_center;
+        std::optional<net::inet_address> preferred_ip;
+        std::optional<sstring> rack;
+        std::optional<sstring> release_version;
+        std::optional<net::inet_address> rpc_address;
+        std::optional<utils::UUID> schema_version;
+        std::optional<std::unordered_set<dht::token>> tokens;
+        std::optional<sstring> supported_features;
+    };
+
+    future<> update_peer_info(gms::inet_address ep, locator::host_id hid, const peer_info& info);
 
     future<> remove_endpoint(gms::inet_address ep);
 
@@ -520,7 +534,7 @@ public:
     future<> shutdown();
 
 private:
-    future<::shared_ptr<cql3::untyped_result_set>> execute_cql(const sstring& query_string, const std::initializer_list<data_value>& values);
+    future<::shared_ptr<cql3::untyped_result_set>> execute_cql(const sstring& query_string, const data_value_list& values);
     template <typename... Args>
     future<::shared_ptr<cql3::untyped_result_set>> execute_cql_with_timeout(sstring req, db::timeout_clock::time_point timeout, Args&&... args);
 
