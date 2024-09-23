@@ -13,6 +13,8 @@
 #include <seastar/core/app-template.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/rpc/rpc_types.hh>
+#include "db/config.hh"
+#include "gms/feature_service.hh"
 #include "message/messaging_service.hh"
 #include "gms/gossip_digest_syn.hh"
 #include "gms/gossip_digest_ack.hh"
@@ -176,13 +178,17 @@ int main(int ac, char ** av) {
         bool stay_alive = config["stay-alive"].as<bool>();
         const gms::inet_address listen = gms::inet_address(config["listen-address"].as<std::string>());
         utils::fb_utilities::set_broadcast_address(listen);
+        auto cfg = gms::feature_config_from_db_config(db::config(), {});
+        seastar::sharded<gms::feature_service> feature_service;
         seastar::sharded<netw::messaging_service> messaging;
         return create_scheduling_group("sl_default_sg", 1.0).then([&sl_controller, &auth_service] (scheduling_group default_scheduling_group){
             return sl_controller.start(std::ref(auth_service), qos::service_level_options{.shares = 1000}, default_scheduling_group);
         }).then([&compressor_tracker] {
             return compressor_tracker.start([] { return utils::advanced_rpc_compressor::tracker::config(); });
-        }).then([listen, &messaging, &sl_controller, &compressor_tracker] {
-            return messaging.start(std::ref(sl_controller), std::ref(compressor_tracker), locator::host_id{}, listen, 7000);
+        }).then([&feature_service, &cfg] {
+            return feature_service.start(cfg);
+        }).then([listen, &messaging, &sl_controller, &compressor_tracker, &feature_service] {
+            return messaging.start(std::ref(sl_controller), std::ref(compressor_tracker), locator::host_id{}, listen, 7000, std::ref(feature_service));
         }).then([config, stay_alive, &messaging] () {
             auto testers = new distributed<tester>;
             return testers->start(std::ref(messaging)).then([testers]{

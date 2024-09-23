@@ -21,6 +21,7 @@
 #include "streaming/stream_fwd.hh"
 #include "locator/host_id.hh"
 
+#include <any>
 #include <list>
 #include <vector>
 #include <optional>
@@ -41,6 +42,7 @@ namespace gms {
     class gossip_digest_ack2;
     class gossip_get_endpoint_states_request;
     class gossip_get_endpoint_states_response;
+    class feature_service;
 }
 
 namespace db {
@@ -289,6 +291,7 @@ public:
         struct tenant {
             scheduling_group sched_group;
             sstring name;
+            bool enabled = true;
         };
         // Must have at least one element. No two tenants should have the same
         // scheduling group. [0] is the default tenant, that all unknown
@@ -309,6 +312,7 @@ private:
     struct tenant_connection_index {
         scheduling_group sched_group;
         unsigned cliend_idx;
+        bool enabled;
     };
 private:
     config _cfg;
@@ -330,6 +334,7 @@ private:
     std::unordered_map<sstring, size_t> _dynamic_tenants_to_client_idx;
     qos::service_level_controller& _sl_controller;
     std::unique_ptr<compressor_factory_wrapper> _compressor_factory_wrapper;
+    gms::feature_service& _feature_service;
 
     struct connection_ref;
     std::unordered_multimap<locator::host_id, connection_ref> _host_connections;
@@ -344,8 +349,8 @@ private:
 public:
     using clock_type = lowres_clock;
 
-    messaging_service(qos::service_level_controller& sl_controller, utils::walltime_compressor_tracker&, locator::host_id id, gms::inet_address ip, uint16_t port);
-    messaging_service(qos::service_level_controller& sl_controller, utils::walltime_compressor_tracker&, config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>);
+    messaging_service(qos::service_level_controller& sl_controller, utils::walltime_compressor_tracker&, locator::host_id id, gms::inet_address ip, uint16_t port, gms::feature_service& feature_service);
+    messaging_service(qos::service_level_controller& sl_controller, utils::walltime_compressor_tracker&, config cfg, scheduling_config scfg, std::shared_ptr<seastar::tls::credentials_builder>, gms::feature_service& feature_service);
     ~messaging_service();
 
     future<> start();
@@ -555,6 +560,12 @@ public:
     unsigned get_rpc_client_idx(messaging_verb verb);
     static constexpr std::array<std::string_view, 3> _connection_types_prefix = {"statement:", "statement-ack:", "forward:"};
     unsigned add_statement_tenant(sstring tenant_name, scheduling_group sg);
+
+    void init_feature_listeners();
+private:
+    std::any _maintenance_tenant_enabled_listener;
+
+    void enable_scheduling_tenant(std::string_view name);
 };
 
 } // namespace netw
