@@ -617,7 +617,10 @@ private:
             const gms::inet_address listen("127.0.0.1");
 
             _sys_ks.start(std::ref(_qp), std::ref(_db)).get();
-            auto stop_sys_kd = defer([this] { _sys_ks.stop().get(); });
+            auto stop_sys_kd = defer([this] {
+                _sys_ks.invoke_on_all(&db::system_keyspace::shutdown).get();
+                _sys_ks.stop().get();
+            });
 
             replica::distributed_loader::init_system_keyspace(_sys_ks, _erm_factory, _db).get();
             _db.local().maybe_init_schema_commitlog();
@@ -798,9 +801,6 @@ private:
             }
 
             group0_client.init().get();
-            auto stop_system_keyspace = defer([this] {
-                _sys_ks.invoke_on_all(&db::system_keyspace::shutdown).get();
-            });
 
             auto shutdown_db = defer([this] {
                 _db.invoke_on_all(&replica::database::shutdown).get();
