@@ -35,6 +35,7 @@
 #include <seastar/coroutine/maybe_yield.hh>
 
 #include <boost/range/adaptor/transformed.hpp>
+#include <boost/algorithm/string/join.hpp>
 
 #include <optional>
 #include <vector>
@@ -823,8 +824,15 @@ bool system_distributed_keyspace::workload_prioritization_tables_exists() {
     return !has_missing_columns(_qp.db(), true);
 }
 
+static sstring get_columns(cql3::query_processor& qp, std::string_view ks_name, std::string_view cf_name) {
+    auto schema = qp.db().find_schema(ks_name, cf_name);
+    return boost::algorithm::join(schema->all_columns() | boost::adaptors::transformed([] (const auto& col) {
+        return col.name_as_cql_string();
+    }), " ,");
+}
+
 future<qos::service_levels_info> system_distributed_keyspace::get_service_levels() const {
-    static sstring prepared_query = format("SELECT * FROM {}.{};", NAME, SERVICE_LEVELS);
+    static sstring prepared_query = format("SELECT {} FROM {}.{};", get_columns(_qp, NAME, SERVICE_LEVELS), NAME, SERVICE_LEVELS);
     return _qp.execute_internal(prepared_query,
             db::consistency_level::ONE,
             internal_distributed_query_state(),
@@ -849,7 +857,7 @@ future<qos::service_levels_info> system_distributed_keyspace::get_service_levels
 }
 
 future<qos::service_levels_info> system_distributed_keyspace::get_service_level(sstring service_level_name) const {
-    static sstring prepared_query = format("SELECT * FROM {}.{} WHERE service_level = ?;", NAME, SERVICE_LEVELS);
+    static sstring prepared_query = format("SELECT {} FROM {}.{} WHERE service_level = ?;", get_columns(_qp, NAME, SERVICE_LEVELS), NAME, SERVICE_LEVELS);
     return _qp.execute_internal(prepared_query, db::consistency_level::ONE, internal_distributed_query_state(), {service_level_name}, cql3::query_processor::cache_internal::yes).then(
                 [service_level_name = std::move(service_level_name)] (shared_ptr<cql3::untyped_result_set> result_set) {
         qos::service_levels_info service_levels;
