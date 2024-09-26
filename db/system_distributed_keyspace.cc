@@ -164,10 +164,6 @@ schema_ptr service_levels() {
     }();
     return schema;
 }
-
- static std::vector<schema_ptr> workload_prioritization_tables() {
-     return std::vector({service_levels()});
- }
  
 static const sstring CDC_TIMESTAMPS_KEY = "timestamps";
 
@@ -218,16 +214,19 @@ system_distributed_keyspace::system_distributed_keyspace(cql3::query_processor& 
         , _sp(sp) {
 }
 
-static thread_local std::pair<std::string_view, data_type> new_columns[] {
-    {"timeout", duration_type},
-    {"workload_type", utf8_type}
+static std::vector<std::pair<std::string_view, data_type>> new_service_levels_columns(bool workload_prioritization_enabled) {
+    std::vector<std::pair<std::string_view, data_type>> new_columns {{"timeout", duration_type}, {"workload_type", utf8_type}};
+    if (workload_prioritization_enabled) {
+        new_columns.push_back({"shares", int32_type});
+    }
+    return new_columns;
 };
 
-static bool has_missing_columns(data_dictionary::database db) noexcept {
+static bool has_missing_columns(data_dictionary::database db, bool workload_prioritization_enabled) noexcept {
     assert(this_shard_id() == 0);
     try {
         auto schema = db.find_schema(system_distributed_keyspace::NAME, system_distributed_keyspace::SERVICE_LEVELS);
-        for (const auto& col : new_columns) {
+        for (const auto& col : new_service_levels_columns(workload_prioritization_enabled)) {
             auto& [col_name, col_type] = col;
             bytes options_name = to_bytes(col_name.data());
             if (schema->get_column_definition(options_name)) {
@@ -243,13 +242,13 @@ static bool has_missing_columns(data_dictionary::database db) noexcept {
     return false;
 }
 
-static future<> add_new_columns_if_missing(replica::database& db, ::service::migration_manager& mm, ::service::group0_guard group0_guard) noexcept {
+static future<> add_new_columns_if_missing(replica::database& db, ::service::migration_manager& mm, ::service::group0_guard group0_guard, bool workload_prioritization_enabled) noexcept {
     assert(this_shard_id() == 0);
     try {
         auto schema = db.find_schema(system_distributed_keyspace::NAME, system_distributed_keyspace::SERVICE_LEVELS);
         schema_builder b(schema);
         bool updated = false;
-        for (const auto& col : new_columns) {
+        for (const auto& col : new_service_levels_columns(workload_prioritization_enabled)) {
             auto& [col_name, col_type] = col;
             bytes options_name = to_bytes(col_name.data());
             if (schema->get_column_definition(options_name)) {
@@ -345,9 +344,10 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
     }
 
     _started = true;
-    if (has_missing_columns(_qp.db())) {
+    bool workload_prioritization_enabled = _sp.features().workload_prioritization;
+    if (has_missing_columns(_qp.db(), workload_prioritization_enabled)) {
         auto group0_guard = co_await _mm.start_group0_operation();
-        co_await add_new_columns_if_missing(_qp.db().real_database(), _mm, std::move(group0_guard));
+        co_await add_new_columns_if_missing(_qp.db().real_database(), _mm, std::move(group0_guard), workload_prioritization_enabled);
     } else {
         dlogger.info("All schemas are uptodate on start");
     }
@@ -359,7 +359,7 @@ future<> system_distributed_keyspace::create_tables(std::vector<schema_ptr> tabl
     }
     if (_qp.db().get_config().create_service_levels_table &&
             _qp.db().features().workload_prioritization) {
-        co_await create_tables(workload_prioritization_tables());
+        co_await create_tables({service_levels()});
     }
 }
  
@@ -820,11 +820,7 @@ static qos::service_level_options::shares_type get_shares(const cql3::untyped_re
 }
 
 bool system_distributed_keyspace::workload_prioritization_tables_exists() {
-    auto tables = workload_prioritization_tables();
-    auto table_exists = [this] (schema_ptr& table) {
-        return  _qp.db().has_schema(NAME, table->cf_name());
-    };
-    return std::all_of(std::begin(tables), std::end(tables), table_exists);
+    return !has_missing_columns(_qp.db(), true);
 }
 
 future<qos::service_levels_info> system_distributed_keyspace::get_service_levels() const {
