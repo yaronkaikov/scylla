@@ -495,9 +495,10 @@ public:
     major_compaction_task_executor(compaction_manager& mgr,
             throw_if_stopping do_throw_if_stopping,
             table_state* t,
-            tasks::task_id parent_id)
+            tasks::task_id parent_id,
+            bool consider_only_existing_data)
         : compaction_task_executor(mgr, do_throw_if_stopping, t, sstables::compaction_type::Compaction, "Major compaction")
-        , major_compaction_task_impl(mgr._task_manager_module, tasks::task_id::create_random_id(), 0, "compaction group", t->schema()->ks_name(), t->schema()->cf_name(), "", parent_id)
+        , major_compaction_task_impl(mgr._task_manager_module, tasks::task_id::create_random_id(), 0, "compaction group", t->schema()->ks_name(), t->schema()->cf_name(), "", parent_id, flush_mode::compacted_tables, consider_only_existing_data)
     {}
 protected:
     virtual future<> run() override {
@@ -522,6 +523,7 @@ protected:
         table_state* t = _compacting_table;
         sstables::compaction_strategy cs = t->get_compaction_strategy();
         sstables::compaction_descriptor descriptor = cs.get_major_compaction_job(*t, _cm.get_candidates(*t));
+        descriptor.gc_check_only_compacting_sstables = _consider_only_existing_data;
         auto compacting = compacting_sstable_registration(_cm, _cm.get_compaction_state(t), descriptor.sstables);
         auto on_replace = compacting.update_on_sstable_replacement();
         setup_new_compaction(descriptor.run_identifier);
@@ -532,6 +534,12 @@ protected:
         // and the user_initiated_backlog_tracker is set up
         // the exclusive lock can be freed to let regular compaction run in parallel to major
         lock_holder.return_all();
+
+        co_await utils::get_local_injector().inject_with_handler("major_compaction_wait", [] (auto& handler) -> future<> {
+            cmlog.info("major_compaction_wait: waiting");
+            co_await handler.wait_for_message(std::chrono::steady_clock::now() + std::chrono::minutes{5});
+            cmlog.info("major_compaction_wait: released");
+        });
 
         co_await compact_sstables_and_update_history(std::move(descriptor), _compaction_data, on_replace);
 
@@ -581,13 +589,13 @@ std::optional<gate::holder> compaction_manager::start_compaction(table_state& t)
     return it->second.gate.hold();
 }
 
-future<> compaction_manager::perform_major_compaction(table_state& t, std::optional<tasks::task_info> info) {
+future<> compaction_manager::perform_major_compaction(table_state& t, std::optional<tasks::task_info> info, bool consider_only_existing_data) {
     auto gh = start_compaction(t);
     if (!gh) {
         co_return;
     }
 
-    co_await perform_compaction<major_compaction_task_executor>(throw_if_stopping::no, info, &t, info.value_or(tasks::task_info{}).id).discard_result();
+    co_await perform_compaction<major_compaction_task_executor>(throw_if_stopping::no, info, &t, info.value_or(tasks::task_info{}).id, consider_only_existing_data).discard_result();
 }
 
 namespace compaction {

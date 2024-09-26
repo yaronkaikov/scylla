@@ -246,15 +246,35 @@ class ScyllaRESTAPIClient():
         """Flush the specified or all tables in the keyspace"""
         url = f"/storage_service/keyspace_flush/{keyspace}"
         if table is not None:
-            url += "?cf={table}"
+            url += f"?cf={table}"
         await self.client.post(url, host=node_ip)
 
-    async def keyspace_compaction(self, node_ip: str, keyspace: str, table: Optional[str] = None) -> None:
+    async def keyspace_compaction(self, node_ip: str, keyspace: str, table: Optional[str] = None, consider_only_existing_data: bool = False) -> None:
         """Compact the specified or all tables in the keyspace"""
         url = f"/storage_service/keyspace_compaction/{keyspace}"
+        params = {
+            "consider_only_existing_data": str(consider_only_existing_data),
+        }
         if table is not None:
-            url += "?cf={table}"
-        await self.client.post(url, host=node_ip)
+            params["cf"] = table
+        await self.client.post(url, host=node_ip, params=params)
+
+    def __get_autocompaction_url(self, keyspace: str, table: Optional[str] = None) -> str:
+        """Return autocompaction url for the given keyspace/table"""
+        return f"/storage_service/auto_compaction/{keyspace}" if not table else \
+            f"/column_family/autocompaction/{keyspace}:{table}"
+
+    async def enable_autocompaction(self, node_ip: str, keyspace: str, table: Optional[str] = None) -> None:
+        """Enable autocompaction for the given keyspace/table"""
+        await self.client.post(self.__get_autocompaction_url(keyspace, table), host=node_ip)
+
+    async def disable_autocompaction(self, node_ip: str, keyspace: str, table: Optional[str] = None) -> None:
+        """Disable autocompaction for the given keyspace/table"""
+        await self.client.delete(self.__get_autocompaction_url(keyspace, table), host=node_ip)
+
+    async def drop_sstable_caches(self, node_ip: str) -> None:
+        """Drop sstable caches"""
+        await self.client.post(f"/system/drop_sstable_caches", host=node_ip)
 
 
 class ScyllaMetrics:

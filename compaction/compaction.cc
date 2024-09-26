@@ -145,12 +145,18 @@ std::ostream& operator<<(std::ostream& os, compaction_type_options::scrub::quara
 
 static api::timestamp_type get_max_purgeable_timestamp(const table_state& table_s, sstable_set::incremental_selector& selector,
         const std::unordered_set<shared_sstable>& compacting_set, const dht::decorated_key& dk, uint64_t& bloom_filter_checks,
-        const api::timestamp_type compacting_max_timestamp) {
+        const api::timestamp_type compacting_max_timestamp, const bool gc_check_only_compacting_sstables) {
     if (!table_s.tombstone_gc_enabled()) [[unlikely]] {
         return api::min_timestamp;
     }
 
     auto timestamp = api::max_timestamp;
+    if (gc_check_only_compacting_sstables) {
+        // If gc_check_only_compacting_sstables is enabled, do not
+        // check memtables and other sstables not being compacted.
+        return timestamp;
+    }
+
     auto memtable_min_timestamp = table_s.min_memtable_timestamp();
     // Use memtable timestamp if it contains data older than the sstables being compacted,
     // and if the memtable also contains the key we're calculating max purgeable timestamp for.
@@ -476,6 +482,8 @@ protected:
     // Garbage collected sstables that were added to SSTable set and should be eventually removed from it.
     std::vector<shared_sstable> _used_garbage_collected_sstables;
     utils::observable<> _stop_request_observable;
+    // optional tombstone_gc_state that is used when gc has to check only the compacting sstables to collect tombstones.
+    std::optional<tombstone_gc_state> _tombstone_gc_state_with_commitlog_check_disabled;
 private:
     compaction_data& init_compaction_data(compaction_data& cdata, const compaction_descriptor& descriptor) const {
         cdata.compaction_fan_in = descriptor.fan_in();
@@ -521,6 +529,7 @@ protected:
         , _owned_ranges(std::move(descriptor.owned_ranges))
         , _sharder(descriptor.sharder)
         , _owned_ranges_checker(_owned_ranges ? std::optional<dht::incremental_owned_ranges_checker>(*_owned_ranges) : std::nullopt)
+        , _tombstone_gc_state_with_commitlog_check_disabled(descriptor.gc_check_only_compacting_sstables ? std::make_optional(_table_s.get_tombstone_gc_state().with_commitlog_check_disabled()) : std::nullopt)
     {
         for (auto& sst : _sstables) {
             _stats_collector.update(sst->get_encoding_stats_for_compaction());
@@ -712,6 +721,10 @@ private:
         return _table_s.get_compaction_strategy().make_sstable_set(_schema);
     }
 
+    const tombstone_gc_state& get_tombstone_gc_state() const {
+        return _tombstone_gc_state_with_commitlog_check_disabled ? _tombstone_gc_state_with_commitlog_check_disabled.value() : _table_s.get_tombstone_gc_state();
+    }
+
     future<> setup() {
         auto ssts = make_lw_shared<sstables::sstable_set>(make_sstable_set_for_input());
         formatted_sstables_list formatted_msg;
@@ -746,7 +759,7 @@ private:
             // for a better estimate for the number of partitions in the merged
             // sstable than just adding up the lengths of individual sstables.
             _estimated_partitions += sst->get_estimated_key_count();
-            auto gc_before = sst->get_gc_before_for_drop_estimation(gc_clock::now(), _table_s.get_tombstone_gc_state(), _schema);
+            auto gc_before = sst->get_gc_before_for_drop_estimation(gc_clock::now(), get_tombstone_gc_state(), _schema);
             sum_of_estimated_droppable_tombstone_ratio += sst->estimate_droppable_tombstone_ratio(gc_before);
             _compacting_data_file_size += sst->ondisk_data_size();
 
@@ -786,7 +799,7 @@ private:
                 reader.consume_in_thread(std::move(cfc));
             });
         });
-        const auto& gc_state = _table_s.get_tombstone_gc_state();
+        const auto& gc_state = get_tombstone_gc_state();
         return consumer(make_compacting_reader(setup_sstable_reader(), compaction_time, max_purgeable_func(), gc_state));
     }
 
@@ -807,7 +820,7 @@ private:
                     using compact_mutations = compact_for_compaction_v2<compacted_fragments_writer, compacted_fragments_writer>;
                     auto cfc = compact_mutations(*schema(), now,
                         max_purgeable_func(),
-                        _table_s.get_tombstone_gc_state(),
+                        get_tombstone_gc_state(),
                         get_compacted_fragments_writer(),
                         get_gc_compacted_fragments_writer());
 
@@ -817,7 +830,7 @@ private:
                 using compact_mutations = compact_for_compaction_v2<compacted_fragments_writer, noop_compacted_fragments_consumer>;
                 auto cfc = compact_mutations(*schema(), now,
                     max_purgeable_func(),
-                    _table_s.get_tombstone_gc_state(),
+                    get_tombstone_gc_state(),
                     get_compacted_fragments_writer(),
                     noop_compacted_fragments_consumer());
                 reader.consume_in_thread(std::move(cfc));
@@ -882,7 +895,7 @@ private:
             };
         }
         return [this] (const dht::decorated_key& dk) {
-            return get_max_purgeable_timestamp(_table_s, *_selector, _compacting_for_max_purgeable_func, dk, _bloom_filter_checks, _compacting_max_timestamp);
+            return get_max_purgeable_timestamp(_table_s, *_selector, _compacting_for_max_purgeable_func, dk, _bloom_filter_checks, _compacting_max_timestamp, _tombstone_gc_state_with_commitlog_check_disabled.has_value());
         };
     }
 
