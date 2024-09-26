@@ -22,6 +22,7 @@
 #include "cql3/query_processor.hh"
 #include "service/storage_proxy.hh"
 #include "gms/feature_service.hh"
+#include "utils/error_injection.hh"
 #include "utils/shared_dict.hh"
 
 #include "service/migration_manager.hh"
@@ -157,11 +158,14 @@ schema_ptr cdc_timestamps() {
 schema_ptr service_levels() {
     static thread_local auto schema = [] {
         auto id = generate_legacy_id(system_distributed_keyspace::NAME, system_distributed_keyspace::SERVICE_LEVELS);
-        return schema_builder(system_distributed_keyspace::NAME, system_distributed_keyspace::SERVICE_LEVELS, std::make_optional(id))
+        auto builder = schema_builder(system_distributed_keyspace::NAME, system_distributed_keyspace::SERVICE_LEVELS, std::make_optional(id))
                 .with_column("service_level", utf8_type, column_kind::partition_key)
                 .with_column("shares", int32_type)
-                .with_version(db::system_keyspace::generate_schema_version(id))
-                .build();
+                .with_version(db::system_keyspace::generate_schema_version(id));
+        if (utils::get_local_injector().enter("service_levels_v1_table_without_shares")) {
+            builder.remove_column("shares");
+        }
+        return builder.build();
     }();
     return schema;
 }

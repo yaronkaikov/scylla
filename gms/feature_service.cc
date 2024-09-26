@@ -27,6 +27,7 @@ static logging::logger logger("features");
 
 static const char* enable_test_feature_error_injection_name = "features_enable_test_feature";
 static const char* enable_test_feature_as_deprecated_error_injection_name = "features_enable_test_feature_as_deprecated";
+static const char* suppress_workload_prioritization_feature = "suppress_workload_prioritization";
 
 static bool is_test_only_feature_deprecated() {
     return utils::get_local_injector().enter(enable_test_feature_as_deprecated_error_injection_name);
@@ -151,6 +152,11 @@ std::set<std::string_view> feature_service::supported_feature_set() const {
     for (const sstring& s : _config._disabled_features) {
         features.erase(s);
     }
+
+    if (utils::get_local_injector().enter(suppress_workload_prioritization_feature)) {
+        features.erase("WORKLOAD_PRIORITIZATION");
+    }
+
     return features;
 }
 
