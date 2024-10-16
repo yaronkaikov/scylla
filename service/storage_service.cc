@@ -3795,8 +3795,10 @@ future<> storage_service::on_change(gms::inet_address endpoint, const gms::appli
     const auto host_id = _gossiper.get_host_id(endpoint);
     if (get_token_metadata().is_normal_token_owner(endpoint)) {
         if (endpoint != get_broadcast_address()) {
-            slogger.debug("endpoint={} on_change:     updating system.peers table", endpoint);
-            co_await _sys_ks.local().update_peer_info(endpoint, host_id, get_peer_info_for_update(endpoint, states));
+            slogger.debug("endpoint={}/{} on_change:     updating system.peers table", endpoint, host_id);
+            if (auto info = get_peer_info_for_update(endpoint, states)) {
+                co_await _sys_ks.local().update_peer_info(endpoint, host_id, *info);
+            }
         }
         if (states.contains(application_state::RPC_READY)) {
             slogger.debug("Got application_state::RPC_READY for node {}, is_cql_ready={}", endpoint, ep_state->is_cql_ready());
@@ -3851,11 +3853,25 @@ db::system_keyspace::peer_info storage_service::get_peer_info_for_update(inet_ad
     if (!ep_state) {
         return db::system_keyspace::peer_info{};
     }
-    return get_peer_info_for_update(endpoint, ep_state->get_application_state_map());
+    auto info = get_peer_info_for_update(endpoint, ep_state->get_application_state_map());
+    if (!info) {
+        if (!_raft_topology_change_enabled) {
+            on_internal_error_noexcept(slogger, seastar::format("get_peer_info_for_update({}): application state has no peer info: {}", endpoint, ep_state->get_application_state_map()));
+        }
+        return db::system_keyspace::peer_info{};
+    }
+    return *info;
 }
 
-db::system_keyspace::peer_info storage_service::get_peer_info_for_update(inet_address endpoint, const gms::application_state_map& app_state_map) {
-    db::system_keyspace::peer_info ret;
+std::optional<db::system_keyspace::peer_info> storage_service::get_peer_info_for_update(inet_address endpoint, const gms::application_state_map& app_state_map) {
+    std::optional<db::system_keyspace::peer_info> ret;
+
+    auto get_peer_info = [&] () -> db::system_keyspace::peer_info& {
+        if (!ret) {
+            ret.emplace();
+        }
+        return *ret;
+    };
 
     auto insert_string = [&] (std::optional<sstring>& opt, const gms::versioned_value& value, std::string_view) {
         opt.emplace(value.value());
@@ -3882,28 +3898,28 @@ db::system_keyspace::peer_info storage_service::get_peer_info_for_update(inet_ad
     for (const auto& [state, value] : app_state_map) {
         switch (state) {
         case application_state::DC:
-            insert_string(ret.data_center, value, "data_center");
+            insert_string(get_peer_info().data_center, value, "data_center");
             break;
         case application_state::INTERNAL_IP:
-            insert_address(ret.preferred_ip, value, "preferred_ip");
+            insert_address(get_peer_info().preferred_ip, value, "preferred_ip");
             break;
         case application_state::RACK:
-            insert_string(ret.rack, value, "rack");
+            insert_string(get_peer_info().rack, value, "rack");
             break;
         case application_state::RELEASE_VERSION:
-            insert_string(ret.release_version, value, "release_version");
+            insert_string(get_peer_info().release_version, value, "release_version");
             break;
         case application_state::RPC_ADDRESS:
-            insert_address(ret.rpc_address, value, "rpc_address");
+            insert_address(get_peer_info().rpc_address, value, "rpc_address");
             break;
         case application_state::SCHEMA:
-            insert_uuid(ret.schema_version, value, "schema_version");
+            insert_uuid(get_peer_info().schema_version, value, "schema_version");
             break;
         case application_state::TOKENS:
             // tokens are updated separately
             break;
         case application_state::SUPPORTED_FEATURES:
-            insert_string(ret.supported_features, value, "supported_features");
+            insert_string(get_peer_info().supported_features, value, "supported_features");
             break;
         default:
             break;
