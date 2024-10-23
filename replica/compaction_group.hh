@@ -66,6 +66,15 @@ private:
     static uint64_t calculate_disk_space_used_for(const sstables::sstable_set& set);
 
     future<> delete_sstables_atomically(std::vector<sstables::shared_sstable> sstables_to_remove);
+    // Tracks the maximum timestamp observed across all SSTables in this group.
+    // This is used by the compacting reader to determine if a memtable contains entries
+    // with timestamps that overlap with those in the SSTables of the compaction group.
+    // For this purpose, tracking the maximum seen timestamp is sufficient rather than the
+    // actual maximum across all SSTables. So, the variable is updated only when a new SSTable
+    // is added to the group. While `set_main_sstables` and `set_maintenance_sstables` can
+    // replace entire sstable sets, they are still called only by compaction, so the maximum
+    // seen timestamp remains the same and there is no need to update the variable in those cases.
+    api::timestamp_type _max_seen_timestamp = api::missing_timestamp;
 public:
     compaction_group(table& t, size_t gid, dht::token_range token_range);
 
@@ -107,6 +116,7 @@ public:
     void add_sstable(sstables::shared_sstable sstable);
     // Add sstable to maintenance set
     void add_maintenance_sstable(sstables::shared_sstable sst);
+    api::timestamp_type max_seen_timestamp() const { return _max_seen_timestamp; }
 
     // Update main sstable set based on info in completion descriptor, where input sstables
     // will be replaced by output ones, row cache ranges are possibly invalidated and
