@@ -1,0 +1,53 @@
+name: Notify PR Authors of Conflicts
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Runs daily at midnight
+  workflow_dispatch:      # Manual trigger for testing
+
+jobs:
+  notify_conflict_prs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Notify PR Authors of Conflicts
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const conflictLabel = 'conflict';
+            const branchPrefix = 'branch-';
+            const daysOpenThreshold = 3;
+
+            // Get all open pull requests
+            const { data: pullRequests } = await github.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            const now = new Date();
+
+            for (const pr of pullRequests) {
+              const createdAt = new Date(pr.created_at);
+              const daysOpen = (now - createdAt) / (1000 * 60 * 60 * 24);
+
+              // Check if PR has the 'conflict' label, targets a branch with the specified prefix, and has been open for more than the threshold
+              const hasConflictLabel = pr.labels.some(label => label.name === conflictLabel);
+              const targetsBranchPrefix = pr.base.ref.startsWith(branchPrefix);
+
+              if (hasConflictLabel && targetsBranchPrefix && daysOpen > daysOpenThreshold) {
+                const author = pr.user.login;
+
+                // Post a comment on the PR to notify the author
+                await github.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: pr.number,
+                  body: `@${author}, this PR has been open with conflicts. Please resolve the conflicts to allow merging.`,
+                });
+
+                console.log(`Notified @${author} for PR #${pr.number}`);
+              }
+            }
