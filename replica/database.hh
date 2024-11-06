@@ -66,6 +66,7 @@
 #include "utils/serialized_action.hh"
 #include "compaction/compaction_fwd.hh"
 #include "service/qos/qos_configuration_change_subscriber.hh"
+#include "readers/multishard.hh"
 
 class cell_locker;
 class cell_locker_stats;
@@ -1861,7 +1862,8 @@ flat_mutation_reader_v2 make_multishard_streaming_reader(
         reader_permit permit,
         std::function<std::optional<dht::partition_range>()> range_generator,
         gc_clock::time_point compaction_time,
-        std::optional<size_t> multishard_reader_buffer_size);
+        std::optional<size_t> multishard_reader_buffer_size,
+        read_ahead read_ahead);
 
 flat_mutation_reader_v2 make_multishard_streaming_reader(
         distributed<replica::database>& db,
@@ -1869,6 +1871,7 @@ flat_mutation_reader_v2 make_multishard_streaming_reader(
         reader_permit permit,
         const dht::partition_range& range,
         gc_clock::time_point compaction_time,
-        std::optional<size_t> multishard_reader_buffer_size);
+        std::optional<size_t> multishard_reader_buffer_size,
+        read_ahead read_ahead);
 
 bool is_internal_keyspace(std::string_view name);

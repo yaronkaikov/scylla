@@ -312,14 +312,14 @@ flat_mutation_reader_v2 repair_reader::make_reader(
                     return std::optional<dht::partition_range>(dht::to_partition_range(*shard_range));
                 }
                 return std::optional<dht::partition_range>();
-            }, compaction_time, multishard_reader_buffer_size);
+            }, compaction_time, multishard_reader_buffer_size, read_ahead::yes);
         }
         case read_strategy::multishard_filter: {
             // We can't have two permits with count resource for 1 repair.
             // So we release the one on _permit so the only one is the one the
             // shard reader will obtain.
             _permit.release_base_resources();
-            return make_filtering_reader(make_multishard_streaming_reader(db, _schema, _permit, _range, compaction_time, {}),
+            return make_filtering_reader(make_multishard_streaming_reader(db, _schema, _permit, _range, compaction_time, {}, read_ahead::yes),
                 [&remote_sharder, remote_shard](const dht::decorated_key& k) {
                     return remote_sharder.shard_of(k.token()) == remote_shard;
                 });
