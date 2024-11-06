@@ -1852,10 +1852,23 @@ future<> start_large_data_handler(sharded<replica::database>& db);
 // Range generator must generate disjoint, monotonically increasing ranges.
 // Opt-in for compacting the output by passing `compaction_time`, see
 // make_streaming_reader() for more details.
-flat_mutation_reader_v2 make_multishard_streaming_reader(distributed<replica::database>& db, schema_ptr schema, reader_permit permit,
-        std::function<std::optional<dht::partition_range>()> range_generator, gc_clock::time_point compaction_time);
+// Setting multishard_reader_buffer_size enables the multishard reader's buffer
+// size optimization (see make_multishard_combining_reader_v2()), using the
+// given size.
+flat_mutation_reader_v2 make_multishard_streaming_reader(
+        distributed<replica::database>& db,
+        schema_ptr schema,
+        reader_permit permit,
+        std::function<std::optional<dht::partition_range>()> range_generator,
+        gc_clock::time_point compaction_time,
+        std::optional<size_t> multishard_reader_buffer_size);
 
-flat_mutation_reader_v2 make_multishard_streaming_reader(distributed<replica::database>& db,
-    schema_ptr schema, reader_permit permit, const dht::partition_range& range, gc_clock::time_point compaction_time);
+flat_mutation_reader_v2 make_multishard_streaming_reader(
+        distributed<replica::database>& db,
+        schema_ptr schema,
+        reader_permit permit,
+        const dht::partition_range& range,
+        gc_clock::time_point compaction_time,
+        std::optional<size_t> multishard_reader_buffer_size);
 
 bool is_internal_keyspace(std::string_view name);
