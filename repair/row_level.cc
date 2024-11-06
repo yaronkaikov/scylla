@@ -298,13 +298,21 @@ flat_mutation_reader_v2 repair_reader::make_reader(
             // So we release the one on _permit so the only one is the one the
             // shard reader will obtain.
             _permit.release_base_resources();
+            std::optional<size_t> multishard_reader_buffer_size;
+            const auto& dbconfig = db.local().get_config();
+            if (dbconfig.repair_multishard_reader_buffer_hint_size()) {
+                // Setting the repair buffer size as the multishard reader's buffer
+                // size helps avoid extra cross-shard round-trips and possible
+                // evict-recreate cycles.
+                multishard_reader_buffer_size = dbconfig.repair_multishard_reader_buffer_hint_size();
+            }
             return make_multishard_streaming_reader(db, _schema, _permit, [this] {
                 auto shard_range = _sharder.next();
                 if (shard_range) {
                     return std::optional<dht::partition_range>(dht::to_partition_range(*shard_range));
                 }
                 return std::optional<dht::partition_range>();
-            }, compaction_time, {});
+            }, compaction_time, multishard_reader_buffer_size);
         }
         case read_strategy::multishard_filter: {
             // We can't have two permits with count resource for 1 repair.
