@@ -230,8 +230,8 @@ protected:
             }
             // Note that it's not enough for the node to be is_alive() - a
             // node joining the cluster is also "alive" but not responsive to
-            // requests. We need the node to be in normal state. See #19694.
-            if (_gossiper.is_normal(ip)) {
+            // requests. We alive *and* normal. See #19694, #21538.
+            if (_gossiper.is_alive(ip) && _gossiper.is_normal(ip)) {
                 rjson::push_back(results, rjson::from_string(ip.to_sstring()));
             }
         }
