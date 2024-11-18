@@ -1878,6 +1878,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             scheduling_group_key_config cql_sg_stats_cfg = make_scheduling_group_key_config<cql_transport::cql_sg_stats>();
+            cql_sg_stats_cfg.rename = [] (void* ptr) {
+                reinterpret_cast<cql_transport::cql_sg_stats*>(ptr)->rename_metrics();
+            };
             cql_transport::controller cql_server_ctl(auth_service, mm_notifier, gossiper, qp, service_memory_limiter, sl_controller, lifecycle_notifier, *cfg, scheduling_group_key_create(cql_sg_stats_cfg).get0());
 
             ss.local().register_protocol_server(cql_server_ctl);

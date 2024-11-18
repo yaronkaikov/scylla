@@ -197,12 +197,15 @@ cql_sg_stats::cql_sg_stats()
     if (std::find(vector_ref.begin(), vector_ref.end(), current_scheduling_group().name()) != vector_ref.end()) {
         return;
     }
+
+    _use_metrics = true;
     register_metrics();
 }
 
 void cql_sg_stats::register_metrics()
 {
     namespace sm = seastar::metrics;
+    auto new_metrics = sm::metric_groups();
     std::vector<sm::metric_definition> transport_metrics;
     auto cur_sg_name = current_scheduling_group().name();
 
@@ -228,7 +231,14 @@ void cql_sg_stats::register_metrics()
         );
     }
 
-    _metrics.add_group("transport", std::move(transport_metrics));
+    new_metrics.add_group("transport", std::move(transport_metrics));
+    _metrics = std::exchange(new_metrics, {});
+}
+
+void cql_sg_stats::rename_metrics() {
+    if (_use_metrics) {
+        register_metrics();
+    }
 }
 
 cql_server::cql_server(distributed<cql3::query_processor>& qp, auth::service& auth_service,
