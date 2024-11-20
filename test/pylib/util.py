@@ -15,7 +15,7 @@ from typing import Callable, Awaitable, Optional, TypeVar, Generic
 from cassandra.cluster import NoHostAvailable, Session, Cluster # type: ignore # pylint: disable=no-name-in-module
 from cassandra.protocol import InvalidRequest # type: ignore # pylint: disable=no-name-in-module
 from cassandra.pool import Host # type: ignore # pylint: disable=no-name-in-module
-from cassandra.query import SimpleStatement # type: ignore # pylint: disable=no-name-in-module
+from cassandra.query import SimpleStatement, ConsistencyLevel # type: ignore # pylint: disable=no-name-in-module
 
 from test.pylib.internal_types import ServerInfo
 
