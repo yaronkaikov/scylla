@@ -1006,6 +1006,11 @@ db::config::config(std::shared_ptr<db::extensions> exts)
             " This can reduce the amount of data repair has to process.")
     , repair_partition_count_estimation_ratio(this, "repair_partition_count_estimation_ratio", liveness::LiveUpdate, value_status::Used, 0.1,
         "Specify the fraction of partitions written by repair out of the total partitions. The value is currently only used for bloom filter estimation. Value is between 0 and 1.")
+    , repair_multishard_reader_buffer_hint_size(this, "repair_multishard_reader_buffer_hint_size", liveness::LiveUpdate, value_status::Used, 1 * 1024 * 1024,
+        "The buffer size to use for the buffer-hint feature of the multishard reader when running repair in mixed-shard clusters. This can help the performance of mixed-shard repair (including RBNO). Set to 0 to disable the hint feature altogether.")
+    , repair_multishard_reader_enable_read_ahead(this, "repair_multishard_reader_enable_read_ahead", liveness::LiveUpdate, value_status::Used, false,
+        "The multishard reader has a read-ahead feature to improve latencies of range-scans. This feature can be detrimental when the multishard reader is used under repair, as is the case in repair in mixed-shard clusters."
+        " This know allows disabling this read-ahead (default), this can help the performance of mixed-shard repair (including RBNO).")
     , ring_delay_ms(this, "ring_delay_ms", value_status::Used, 30 * 1000, "Time a node waits to hear from other nodes before joining the ring in milliseconds. Same as -Dcassandra.ring_delay_ms in cassandra.")
     , shadow_round_ms(this, "shadow_round_ms", value_status::Used, 300 * 1000, "The maximum gossip shadow round time. Can be used to reduce the gossip feature check time during node boot up.")
     , fd_max_interval_ms(this, "fd_max_interval_ms", value_status::Used, 2 * 1000, "The maximum failure_detector interval time in milliseconds. Interval larger than the maximum will be ignored. Larger cluster may need to increase the default.")
