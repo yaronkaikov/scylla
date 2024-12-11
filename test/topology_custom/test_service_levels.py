@@ -7,9 +7,10 @@ import pytest
 import time
 import asyncio
 import logging
-from test.pylib.util import wait_for_cql_and_get_hosts
+from test.pylib.util import wait_for_cql_and_get_hosts, unique_name
 from test.pylib.manager_client import ManagerClient
 from test.topology.conftest import skip_mode
+from test.topology.util import wait_for_token_ring_and_group0_consistency
 from cassandra.protocol import InvalidRequest
 
 logger = logging.getLogger(__name__)
@@ -50,3 +51,34 @@ async def test_workload_prioritization_upgrade(manager: ManagerClient):
     sl_schema_upgraded = await cql.run_async("DESC TABLE system_distributed.service_levels")
     assert "shares int" in sl_schema_upgraded[0].create_statement
     await cql.run_async("CREATE SERVICE LEVEL sl2 WITH shares = 100")
+
+# Reproduces issue scylla-enterprise#4912
+@pytest.mark.asyncio
+async def test_service_level_metric_name_change(manager: ManagerClient) -> None:
+    s = await manager.server_add()
+    await wait_for_token_ring_and_group0_consistency(manager, time.time() + 30)
+    cql = manager.get_cql()
+
+    sl1 = unique_name()
+    sl2 = unique_name()
+
+    # creates scheduling group `sl:sl1`
+    await cql.run_async(f"CREATE SERVICE LEVEL {sl1}")
+    # renames scheduling group `sl:sl1` to `sl_deleted:sl1`
+    await cql.run_async(f"DROP SERVICE LEVEL {sl1}")
+    # renames scheduling group `sl_deleted:sl1` to `sl:sl2`
+    await cql.run_async(f"CREATE SERVICE LEVEL {sl2}")
+    # creates scheduling group `sl:sl1`
+    await cql.run_async(f"CREATE SERVICE LEVEL {sl1}")
+    # In issue #4912, service_level_controller thought there was no room
+    # for `sl:sl1` scheduling group because create_scheduling_group() failed due to
+    # `seastar::metrics::double_registration (registering metrics twice for metrics: transport_cql_requests_count)`
+    # but the scheduling group was actually created.
+    # When sl2 is dropped, service_level_controller tries to rename its
+    # scheduling group to `sl:sl1`, triggering 
+    # `seastar::metrics::double_registration (registering metrics twice for metrics: scheduler_runtime_ms)`
+    await cql.run_async(f"DROP SERVICE LEVEL {sl2}")
+
+    # Check if group0 is healthy
+    s2 = await manager.server_add()
+    await wait_for_token_ring_and_group0_consistency(manager, time.time() + 30)
