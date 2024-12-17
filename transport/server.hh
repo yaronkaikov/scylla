@@ -124,7 +124,9 @@ struct cql_sg_stats {
     cql_sg_stats();
     request_kind_stats& get_cql_opcode_stats(cql_binary_opcode op) { return _cql_requests_stats[static_cast<uint8_t>(op)]; }
     void register_metrics();
+    void rename_metrics();
 private:
+    bool _use_metrics = false;
     seastar::metrics::metric_groups _metrics;
     std::vector<request_kind_stats> _cql_requests_stats;
 };
