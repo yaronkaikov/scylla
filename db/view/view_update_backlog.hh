@@ -29,6 +29,10 @@ struct update_backlog {
         return float(current) / float(max);
     }
 
+    const size_t& get_current_bytes() const {
+        return current;
+    }
+
     std::partial_ordering operator<=>(const update_backlog &rhs) const {
         return relative_size() <=> rhs.relative_size();
     }
