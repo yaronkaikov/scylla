@@ -1647,7 +1647,7 @@ static future<> apply_to_remote_endpoints(service::storage_proxy& proxy, locator
 
     tracing::trace(tr_state, "Sending view update for {}.{} to {}, with pending endpoints = {}; base token = {}; view token = {}",
             mut.s->ks_name(), mut.s->cf_name(), target, pending_endpoints, base_token, view_token);
-    return proxy.send_to_endpoint(
+    co_await proxy.send_to_endpoint(
             std::move(mut),
             std::move(ermp),
             target,
@@ -1656,6 +1656,9 @@ static future<> apply_to_remote_endpoints(service::storage_proxy& proxy, locator
             std::move(tr_state),
             allow_hints,
             service::is_cancellable::yes);
+    while (utils::get_local_injector().enter("never_finish_remote_view_updates")) {
+        co_await seastar::sleep(100ms);
+    }
 }
 
 static bool should_update_synchronously(const schema& s) {
@@ -2606,6 +2609,10 @@ update_backlog node_update_backlog::add_fetch(unsigned shard, update_backlog bac
         return new_max;
     }
     return std::max(backlog, _max.load(std::memory_order_relaxed));
+}
+
+update_backlog node_update_backlog::fetch_shard(unsigned shard) {
+    return _backlogs[shard].backlog.load(std::memory_order_relaxed);
 }
 
 future<bool> check_view_build_ongoing(db::system_distributed_keyspace& sys_dist_ks, const locator::token_metadata& tm, const sstring& ks_name,

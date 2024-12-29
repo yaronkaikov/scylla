@@ -1504,12 +1504,11 @@ public:
                     return std::max(lhs, rhs);
                 });
     }
-    std::chrono::microseconds calculate_delay(db::view::update_backlog backlog) {
-        constexpr auto delay_limit_us = 1000000;
+    std::chrono::microseconds calculate_delay(db::view::update_backlog backlog, uint32_t view_flow_control_delay_limit_in_ms) {
         auto adjust = [] (float x) { return x * x * x; };
         auto budget = std::max(storage_proxy::clock_type::duration(0),
             _expire_timer.get_timeout() - storage_proxy::clock_type::now());
-        std::chrono::microseconds ret(uint32_t(adjust(backlog.relative_size()) * delay_limit_us));
+        std::chrono::microseconds ret(uint32_t(adjust(backlog.relative_size()) * view_flow_control_delay_limit_in_ms * 1000));
         // "budget" has millisecond resolution and can potentially be long
         // in the future so converting it to microseconds may overflow.
         // So to compare buget and ret we need to convert both to the lower
@@ -1525,13 +1524,15 @@ public:
     template<typename Func>
     void delay(tracing::trace_state_ptr trace, Func&& on_resume) {
         auto backlog = max_backlog();
-        auto delay = calculate_delay(backlog);
+        auto delay = calculate_delay(backlog, _proxy->data_dictionary().get_config().view_flow_control_delay_limit_in_ms());
         stats().last_mv_flow_control_delay = delay;
+        stats().mv_flow_control_delay += delay.count();
         if (delay.count() == 0) {
             tracing::trace(trace, "Delay decision due to throttling: do not delay, resuming now");
             on_resume(this);
         } else {
             ++stats().throttled_base_writes;
+            ++stats().total_throttled_base_writes;
             tracing::trace(trace, "Delaying user write due to view update backlog {}/{} by {}us",
                           backlog.current, backlog.max, delay.count());
             // Waited on indirectly.
@@ -2506,9 +2507,17 @@ void storage_proxy_stats::write_stats::register_stats() {
                            sm::description("number of currently throttled base replica write requests"),
                            {storage_proxy_stats::current_scheduling_group_label()}),
 
+            sm::make_counter("throttled_base_writes_total", total_throttled_base_writes,
+                           sm::description("number of throttled base replica write requests, a throttled write is one whose response was delayed, see mv_flow_control_delay_total"),
+                           {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
+
             sm::make_gauge("last_mv_flow_control_delay", [this] { return std::chrono::duration<float>(last_mv_flow_control_delay).count(); },
                                           sm::description("delay (in seconds) added for MV flow control in the last request"),
                                           {storage_proxy_stats::current_scheduling_group_label()}),
+
+            sm::make_counter("mv_flow_control_delay_total", [this] { return mv_flow_control_delay; },
+                                          sm::description("total delay (in microseconds) added for MV flow control, to delay the response sent to finished writes, divide this by throttled_base_writes_total to find the average delay"),
+                                          {storage_proxy_stats::current_scheduling_group_label()}).set_skip_when_empty(),
 
             sm::make_total_operations("throttled_writes", throttled_writes,
                                       sm::description("number of throttled write requests"),
@@ -2869,7 +2878,13 @@ storage_proxy::storage_proxy(distributed<replica::database>& db, storage_proxy::
         sm::make_queue_length("current_throttled_writes", [this] { return _throttled_writes.size(); },
                        sm::description("number of currently throttled write requests")),
     });
-
+    _metrics.add_group(storage_proxy_stats::REPLICA_STATS_CATEGORY, {
+        sm::make_current_bytes("view_update_backlog", [this] { return _max_view_update_backlog.fetch_shard(this_shard_id()).get_current_bytes(); },
+                       sm::description("Tracks the size of scylla_database_view_update_backlog and is used instead of that one to calculate the "
+                                        "max backlog across all shards, which is then used by other nodes to calculate appropriate throttling delays "
+                                        "if it grows too large. If it's notably different from scylla_database_view_update_backlog, it means "
+                                        "that we're currently processing a write that generated a large number of view updates.")),
+    });
     slogger.trace("hinted DCs: {}", cfg.hinted_handoff_enabled.to_configuration_string());
     _hints_manager.register_metrics("hints_manager");
     _hints_for_views_manager.register_metrics("hints_for_views_manager");

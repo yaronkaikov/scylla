@@ -1210,6 +1210,11 @@ db::config::config(std::shared_ptr<db::extensions> exts)
 
     , error_injections_at_startup(this, "error_injections_at_startup", error_injection_value_status, {}, "List of error injections that should be enabled on startup.")
 
+    , view_flow_control_delay_limit_in_ms(this, "view_flow_control_delay_limit_in_ms", liveness::LiveUpdate, value_status::Used, 1000,
+        "The maximal amount of time that materialized-view update flow control may delay responses "
+        "to try to slow down the client and prevent buildup of unfinished view updates. "
+        "To be effective, this maximal delay should be larger than the typical latencies. "
+        "Setting view_flow_control_delay_limit_in_ms to 0 disables view-update flow control.")
     , default_log_level(this, "default_log_level", value_status::Used)
     , logger_log_level(this, "logger_log_level", value_status::Used)
     , log_to_stdout(this, "log_to_stdout", value_status::Used)
