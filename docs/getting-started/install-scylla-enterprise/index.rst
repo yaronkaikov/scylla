@@ -10,17 +10,18 @@ Install ScyllaDB Enterprise
    /getting-started/installation-common/air-gapped-install
    /getting-started/installation-common/disable-housekeeping
    /getting-started/installation-common/dev-mod
+   /getting-started/install-scylla-enterprise/launch-on-aws
+   /getting-started/install-scylla-enterprise/launch-on-gcp
+   /getting-started/install-scylla-enterprise/launch-on-azure
 
 Keep your versions up-to-date. The two latest versions are supported. Also, always install the latest patches for your version.
 
 Cloud Deployment
 ---------------------
 
-To deploy ScyllaDB Enterprise on AWS, GCP, or Azure, go to 
-`ScyllaDB Download Center <https://www.scylladb.com/download/>`_. 
-Select your cloud provider and the ScyllaDB Enterprise version you want to 
-deploy and follow the instructions.
-
+* :doc:`Launch ScyllaDB on AWS </getting-started/install-scylla-enterprise/launch-on-aws>`
+* :doc:`Launch ScyllaDB on GCP </getting-started/install-scylla-enterprise/launch-on-gcp>`
+* :doc:`Launch ScyllaDB on Azure </getting-started/install-scylla-enterprise/launch-on-azure>`
 
 Installation on Linux
 --------------------------
