@@ -12,6 +12,19 @@ import rest_api
 from cassandra.protocol import SyntaxException, InvalidRequest, Unauthorized
 from util import new_test_table, new_function, new_user, new_session, new_test_keyspace, unique_name, new_type
 
+# Figure out which keyspace contains the roles table (its location changed
+# across different releases of Scylla and Cassandra)
+def get_roles_table(cql):
+    for ks in ['system', 'system_auth_v2', 'system_auth']:
+        try:
+            t = ks + '.roles'
+            cql.execute(f'SELECT * FROM {t}')
+            # If we're still here, the SELECT didn't fail
+            return t
+        except:
+            pass
+    pytest.fail("Couldn't find roles table")
+
 # Test that granting permissions to various resources works for the default user.
 # This case does not include functions, because due to differences in implementation
 # the tests will diverge between Scylla and Cassandra (e.g. there's no common language)
@@ -451,6 +464,28 @@ def test_create_on_single_function(cql):
             with new_function(cql, keyspace, fun_body) as fun:
                 with pytest.raises(SyntaxException):
                     grant(cql, 'CREATE', f'FUNCTION {keyspace}.{fun}(int, int)', user)
+
+# Reproduces https://github.com/scylladb/scylla-enterprise/issues/5210,
+# i.e. a CVE reported for Cassandra https://www.cve.org/CVERecord?id=CVE-2025-23015,
+def test_non_superuser_with_modify_all_keyspaces_permissions_cannot_modify_system_keyspaces(cql, test_keyspace):
+    roles_table = get_roles_table(cql)
+    with new_user(cql) as username:
+        with new_session(cql, username) as user_session:
+            with new_test_table(cql, test_keyspace, "a int, PRIMARY KEY (a)") as ks_cf:
+                # a non-superuser CANNOT modify any random table in any random keyspace
+                eventually_unauthorized(lambda: user_session.execute(f"INSERT INTO {ks_cf} (a) VALUES (1)"))
+                # unless we grant him a MODIFY permission to ALL KEYSPACES
+                grant(cql, 'MODIFY', 'ALL KEYSPACES', username)
+                # with which he can now MODIFY it
+                eventually_authorized(lambda: user_session.execute(f"INSERT INTO {ks_cf} (a) VALUES (1)"))
+
+                # but even an authenticated non-superuser with MODIFY on ALL KEYSPACES permissions
+                # cannot update system tables, especially elevate itself to a superuser
+                eventually_unauthorized(lambda: user_session.execute(f"UPDATE {roles_table} SET can_login = True WHERE role = '{username}'"), timeout_s=20)
+
+                # but an authenticated superuser user can update system tables
+                # (note that `cql` is a session for the already authenticated "cassandra" superuser)
+                cql.execute(f"UPDATE {roles_table} SET is_superuser = True WHERE role = '{username}'")
 
 # Test that permissions on a table are not granted to a user as a creator if the table already exists when the user
 # tries to create it. Reproduces GHSA-ww5v-p45p-3vhq
