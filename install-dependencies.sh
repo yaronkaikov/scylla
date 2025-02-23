@@ -207,11 +207,11 @@ go_arch() {
     echo ${GO_ARCH["$(arch)"]}
 }
 
-NODE_EXPORTER_VERSION=1.7.0
+NODE_EXPORTER_VERSION=1.9.0
 declare -A NODE_EXPORTER_CHECKSUM=(
-    ["x86_64"]=a550cd5c05f760b7934a2d0afad66d2e92e681482f5f57a917465b1fba3b02a6
-    ["aarch64"]=e386c7b53bc130eaf5e74da28efc6b444857b77df8070537be52678aefd34d96
-    ["s390x"]=aeda68884918f10b135b76bbcd4977cb7a1bb3c4c98a8551f8d2183bafdd9264
+    ["x86_64"]=e7b65ea30eec77180487d518081d3dcb121b975f6d95f1866dfb9156c5b24075
+    ["aarch64"]=5314fae1efff19abf807cfc8bd7dadbd47a35565c1043c236ffb0689dc15ef4f
+    ["s390x"]=089d2c2f87b4d716dd5ff006b89ab4424e7917f67830a8dd580d528f1d99ca58
 )
 NODE_EXPORTER_DIR=/opt/scylladb/dependencies
 
