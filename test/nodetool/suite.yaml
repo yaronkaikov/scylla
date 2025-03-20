@@ -1,1 +1,2 @@
 type: Tool
+launcher: unshare -rn pytest --run-within-unshare
