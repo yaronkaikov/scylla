@@ -169,6 +169,13 @@ public:
             return it->second;
         }
 
+        void set(std::string_view key, std::string_view value) const {
+            if (!_shared_data) {
+                on_internal_error(errinj_logger, "injection_shared_data is not initialized");
+            }
+            _shared_data->parameters[sstring(key)] = sstring(value);
+        }
+
         friend class error_injection;
     };
 
