@@ -413,6 +413,13 @@ public:
         co_await func(handler);
     }
 
+    error_injection_parameters get_injection_parameters(std::string_view name) {
+        if (auto data = get_data(name); data) {
+            return data->shared_data->parameters;
+        }
+        return {};
+    }
+
     future<> enable_on_all(const std::string_view& injection_name, bool one_shot = false, error_injection_parameters parameters = {}) {
         return smp::invoke_on_all([injection_name = sstring(injection_name), one_shot, parameters = std::move(parameters)] {
             auto& errinj = _local;
@@ -529,6 +536,10 @@ public:
     future<> inject_with_handler(const std::string_view& name,
                                  Func&& func) {
         return make_ready_future<>();
+    }
+
+    error_injection_parameters get_injection_parameters(std::string_view name) {
+        return {};
     }
 
     [[gnu::always_inline]]
