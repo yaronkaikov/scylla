@@ -1537,8 +1537,6 @@ SEASTAR_THREAD_TEST_CASE(test_mutation_upgrade_type_change) {
 // duplicated logic that decides if a row is expired, and this test verifies that they behave the same with respect
 // to TTL.
 SEASTAR_THREAD_TEST_CASE(test_row_marker_expiry) {
-    can_gc_fn never_gc = [] (tombstone) { return false; };
-
     auto must_be_alive = [&] (row_marker mark, gc_clock::time_point t) {
         testlog.trace("must_be_alive({}, {})", mark, t);
         BOOST_REQUIRE(mark.is_live(tombstone(), t));
@@ -1921,7 +1919,6 @@ SEASTAR_TEST_CASE(test_mutation_diff_with_random_generator) {
             }
         };
         const auto now = gc_clock::now();
-        can_gc_fn never_gc = [] (tombstone) { return false; };
         for_each_mutation_pair([&] (auto m1, auto m2, are_equal eq) {
             mutation_application_stats app_stats;
             auto s = m1.schema();
@@ -2626,7 +2623,7 @@ class basic_compacted_fragments_consumer_base {
     const schema& _schema;
     gc_clock::time_point _query_time;
     gc_clock::time_point _gc_before;
-    std::function<api::timestamp_type(const dht::decorated_key&)> _get_max_purgeable;
+    max_purgeable_fn _get_max_purgeable;
     api::timestamp_type _max_purgeable;
 
     std::vector<mutation> _mutations;
@@ -2687,7 +2684,7 @@ private:
 
 public:
     basic_compacted_fragments_consumer_base(const schema& schema, gc_clock::time_point query_time,
-            std::function<api::timestamp_type(const dht::decorated_key&)> get_max_purgeable)
+            max_purgeable_fn get_max_purgeable)
         : _schema(schema)
         , _query_time(query_time)
         , _gc_before(saturating_subtract(query_time, _schema.gc_grace_seconds()))
@@ -2757,16 +2754,13 @@ using purged_compacted_fragments_consumer = basic_compacted_fragments_consumer_b
 
 void run_compaction_data_stream_split_test(const schema& schema, reader_permit permit, gc_clock::time_point query_time,
         std::vector<mutation> mutations) {
-    auto never_gc = std::function<bool(tombstone)>([] (tombstone) { return false; });
     for (auto& mut : mutations) {
         mut.partition().compact_for_compaction(schema, never_gc, mut.decorated_key(), query_time, tombstone_gc_state(nullptr));
     }
 
     auto reader = make_flat_mutation_reader_from_mutations_v2(schema.shared_from_this(), std::move(permit), mutations);
     auto close_reader = deferred_close(reader);
-    auto get_max_purgeable = [] (const dht::decorated_key&) {
-        return api::max_timestamp;
-    };
+    auto get_max_purgeable = can_always_purge;
     auto consumer = compact_for_compaction_v2<survived_compacted_fragments_consumer, purged_compacted_fragments_consumer>(
             schema,
             query_time,

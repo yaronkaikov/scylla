@@ -254,7 +254,8 @@ table::make_reader_v2(schema_ptr s,
 
     const auto bypass_cache = slice.options.contains(query::partition_slice::option::bypass_cache);
     if (cache_enabled() && !bypass_cache && !(reversed && _config.reversed_reads_auto_bypass_cache())) {
-        if (auto reader_opt = _cache.make_reader_opt(s, permit, range, slice, &_compaction_manager.get_tombstone_gc_state(), std::move(trace_state), fwd, fwd_mr)) {
+        if (auto reader_opt = _cache.make_reader_opt(s, permit, range, slice, &_compaction_manager.get_tombstone_gc_state(),
+                    get_max_purgeable_fn_for_cache_underlying_reader(), std::move(trace_state), fwd, fwd_mr)) {
             readers.emplace_back(std::move(*reader_opt));
         }
     } else {
@@ -294,7 +295,7 @@ static flat_mutation_reader_v2 maybe_compact_for_streaming(flat_mutation_reader_
     return make_compacting_reader(
             std::move(underlying),
             compaction_time,
-            [compaction_can_gc] (const dht::decorated_key&) { return compaction_can_gc ? api::max_timestamp : api::min_timestamp; },
+            compaction_can_gc ? can_always_purge : can_never_purge,
             cm.get_tombstone_gc_state(),
             streamed_mutation::forwarding::no);
 }
@@ -1054,6 +1055,17 @@ table::try_flush_memtable_to_sstable(compaction_group& cg, lw_shared_ptr<memtabl
                 co_await with_scheduling_group(_config.memtable_to_cache_scheduling_group, [this, old, &newtabs, &cg] {
                     return update_cache(cg, old, newtabs);
                 });
+
+                co_await utils::get_local_injector().inject_with_handler("replica_post_flush_after_update_cache", [this] (auto& handler) -> future<> {
+                    const auto this_table_name = format("{}.{}", _schema->ks_name(), _schema->cf_name());
+                    if (this_table_name == handler.get("table_name")) {
+                        tlogger.info("error injection handler replica_post_flush_after_update_cache: suspending flush for table {}", this_table_name);
+                        handler.set("suspended", "true");
+                        co_await handler.wait_for_message(std::chrono::steady_clock::now() + std::chrono::minutes{5});
+                        tlogger.info("error injection handler replica_post_flush_after_update_cache: resuming flush for table {}", this_table_name);
+                    }
+                });
+
                 cg.memtables()->erase(old);
                 tlogger.debug("Memtable for {}.{} replaced, into {} sstables", old->schema()->ks_name(), old->schema()->cf_name(), newtabs.size());
                 co_return;
@@ -1744,19 +1756,7 @@ table::get_max_purgeable_fn_for_cache_underlying_reader() const {
         auto& cg = compaction_group_for_token(dk.token());
         auto max_purgeable_timestamp = api::max_timestamp;
 
-        const auto& mt = cg.memtables()->active_memtable();
-        api::timestamp_type memtable_min_timestamp = mt.get_min_timestamp();
-        if (memtable_min_timestamp > cg.max_seen_timestamp()) {
-            // All the entries in the memtable are newer than the entries in the
-            // SSTable within this compaction group. So, no need to check further.
-            return max_purgeable_timestamp;
-        }
-
-        // If a memtable with a minimum timestamp lower than the current maximum
-        // purgeable timestamp has the given key, the tombstone should not be purged.
-        if (memtable_min_timestamp < max_purgeable_timestamp && mt.contains_partition(dk)) {
-            max_purgeable_timestamp = memtable_min_timestamp;
-        }
+        max_purgeable_timestamp = std::min(cg.memtables()->min_live_timestamp(dk, cg.max_seen_timestamp()), max_purgeable_timestamp);
 
         return max_purgeable_timestamp;
     };

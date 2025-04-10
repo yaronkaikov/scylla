@@ -169,6 +169,13 @@ public:
             return it->second;
         }
 
+        void set(std::string_view key, std::string_view value) const {
+            if (!_shared_data) {
+                on_internal_error(errinj_logger, "injection_shared_data is not initialized");
+            }
+            _shared_data->parameters[sstring(key)] = sstring(value);
+        }
+
         friend class error_injection;
     };
 
@@ -406,6 +413,13 @@ public:
         co_await func(handler);
     }
 
+    error_injection_parameters get_injection_parameters(std::string_view name) {
+        if (auto data = get_data(name); data) {
+            return data->shared_data->parameters;
+        }
+        return {};
+    }
+
     future<> enable_on_all(const std::string_view& injection_name, bool one_shot = false, error_injection_parameters parameters = {}) {
         return smp::invoke_on_all([injection_name = sstring(injection_name), one_shot, parameters = std::move(parameters)] {
             auto& errinj = _local;
@@ -522,6 +536,10 @@ public:
     future<> inject_with_handler(const std::string_view& name,
                                  Func&& func) {
         return make_ready_future<>();
+    }
+
+    error_injection_parameters get_injection_parameters(std::string_view name) {
+        return {};
     }
 
     [[gnu::always_inline]]
