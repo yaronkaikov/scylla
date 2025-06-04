@@ -44,7 +44,7 @@ async def test_upgrade_to_ssl(manager: ManagerClient) -> None:
             seo['internode_encryption'] = mode
             await manager.server_update_config(srv.server_id, "server_encryption_options", seo)
             # restart
-            await manager.server_start(srv.server_id)
+            await manager.server_start(srv.server_id, wait_others=1)
             # now check we get the expected messaging server listening lines in log
             expected_ports = mode2ports[mode]
             pattern = "|".join(["port " + str(port) for port in expected_ports])
