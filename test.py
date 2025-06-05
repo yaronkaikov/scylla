@@ -478,7 +478,8 @@ class PythonTestSuite(TestSuite):
                 seeds=create_cfg.seeds,
                 cmdline_options=cmdline_options,
                 config_options=config_options,
-                property_file=create_cfg.property_file)
+                property_file=create_cfg.property_file,
+                server_encryption=create_cfg.server_encryption)
 
             return server
 
