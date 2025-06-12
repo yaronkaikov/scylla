@@ -625,6 +625,7 @@ mutation_partition_v2::find_row(const schema& s, const clustering_key& key) cons
 deletable_row&
 mutation_partition_v2::clustered_row(const schema& s, clustering_key&& key) {
     check_schema(s);
+    check_row_key(s, key, is_dummy::no);
     auto i = _rows.find(key, rows_entry::tri_compare(s));
     if (i == _rows.end()) {
         auto e = alloc_strategy_unique_ptr<rows_entry>(
@@ -637,6 +638,7 @@ mutation_partition_v2::clustered_row(const schema& s, clustering_key&& key) {
 deletable_row&
 mutation_partition_v2::clustered_row(const schema& s, const clustering_key& key) {
     check_schema(s);
+    check_row_key(s, key, is_dummy::no);
     auto i = _rows.find(key, rows_entry::tri_compare(s));
     if (i == _rows.end()) {
         auto e = alloc_strategy_unique_ptr<rows_entry>(
@@ -649,6 +651,7 @@ mutation_partition_v2::clustered_row(const schema& s, const clustering_key& key)
 deletable_row&
 mutation_partition_v2::clustered_row(const schema& s, clustering_key_view key) {
     check_schema(s);
+    check_row_key(s, key, is_dummy::no);
     auto i = _rows.find(key, rows_entry::tri_compare(s));
     if (i == _rows.end()) {
         auto e = alloc_strategy_unique_ptr<rows_entry>(
@@ -661,6 +664,7 @@ mutation_partition_v2::clustered_row(const schema& s, clustering_key_view key) {
 rows_entry&
 mutation_partition_v2::clustered_rows_entry(const schema& s, position_in_partition_view pos, is_dummy dummy, is_continuous continuous) {
     check_schema(s);
+    check_row_key(s, pos, dummy);
     auto i = _rows.find(pos, rows_entry::tri_compare(s));
     if (i == _rows.end()) {
         auto e = alloc_strategy_unique_ptr<rows_entry>(
@@ -678,6 +682,7 @@ mutation_partition_v2::clustered_row(const schema& s, position_in_partition_view
 rows_entry&
 mutation_partition_v2::clustered_row(const schema& s, position_in_partition_view pos, is_dummy dummy) {
     check_schema(s);
+    check_row_key(s, pos, dummy);
     auto cmp = rows_entry::tri_compare(s);
     auto i = _rows.lower_bound(pos, cmp);
     if (i == _rows.end() || cmp(i->position(), pos) != 0) {
@@ -695,6 +700,7 @@ mutation_partition_v2::clustered_row(const schema& s, position_in_partition_view
 deletable_row&
 mutation_partition_v2::append_clustered_row(const schema& s, position_in_partition_view pos, is_dummy dummy, is_continuous continuous) {
     check_schema(s);
+    check_row_key(s, pos, dummy);
     const auto cmp = rows_entry::tri_compare(s);
     auto i = _rows.end();
     if (!_rows.empty() && (cmp(*std::prev(i), pos) >= 0)) {
