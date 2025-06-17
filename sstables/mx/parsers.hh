@@ -287,7 +287,7 @@ public:
             }
             [[fallthrough]];
         case state::END_OPEN_MARKER_FLAG:
-            assert(_primitive._i64 + width_base > 0);
+            parse_assert(_primitive._i64 + width_base > 0);
             _width = (_primitive._i64 + width_base);
             if (_primitive.read_8(data) != read_status::ready) {
                 _state = state::END_OPEN_MARKER_LOCAL_DELETION_TIME;
