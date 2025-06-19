@@ -16,6 +16,7 @@
 #include "data_dictionary/storage_options.hh"
 #include "db/config.hh"
 #include "db/large_data_handler.hh"
+#include "db/corrupt_data_handler.hh"
 #include "gms/feature_service.hh"
 #include "sstables/version.hh"
 #include "sstables/sstable_directory.hh"
@@ -70,6 +71,7 @@ public:
 
 struct test_env_config {
     db::large_data_handler* large_data_handler = nullptr;
+    db::corrupt_data_handler* corrupt_data_handler = nullptr;
     data_dictionary::storage_options storage; // will be local by default
     size_t available_memory = memory::stats().total_memory();
 };
@@ -84,6 +86,7 @@ class test_env {
         ::cache_tracker cache_tracker;
         gms::feature_service feature_service;
         db::nop_large_data_handler nop_ld_handler;
+        db::nop_corrupt_data_handler nop_cd_handler;
         test_env_sstables_manager mgr;
         reader_concurrency_semaphore semaphore;
         sstables::sstable_generation_generator gen{0};
