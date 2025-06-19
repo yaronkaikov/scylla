@@ -546,6 +546,10 @@ public:
         return execute_cql(req, { data_value(std::forward<Args>(args))... });
     }
 
+    replica::database& local_db() const noexcept {
+        return _db;
+    }
+
     // Apply write as mutation to the system keyspace.
     // Mutation has to belong to a table int he system keyspace.
     future<> apply_mutation(mutation m);
