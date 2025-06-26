@@ -196,7 +196,7 @@ future<> standard_role_manager::create_default_role_if_missing() const {
                     db::consistency_level::QUORUM,
                     internal_distributed_query_state(),
                     {_superuser},
-                    cql3::query_processor::cache_internal::no).then([this](auto&&) {
+                    cql3::query_processor::cache_internal::yes).then([this](auto&&) {
                 log.info("Created default superuser role '{}'.", _superuser);
                 return make_ready_future<>();
             });

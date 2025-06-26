@@ -127,7 +127,7 @@ future<> password_authenticator::create_default_if_missing() const {
                     db::consistency_level::QUORUM,
                     internal_distributed_query_state(),
                     {salted_pwd, _superuser},
-                    cql3::query_processor::cache_internal::no).then([](auto&&) {
+                    cql3::query_processor::cache_internal::yes).then([](auto&&) {
                 plogger.info("Created default superuser authentication record.");
             });
         }
