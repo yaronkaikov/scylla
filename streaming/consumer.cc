@@ -7,6 +7,7 @@
  */
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/with_scheduling_group.hh>
 
 #include "consumer.hh"
 #include "replica/database.hh"
@@ -29,7 +30,9 @@ std::function<future<> (flat_mutation_reader_v2)> make_streaming_consumer(sstrin
         std::exception_ptr ex;
         try {
             auto cf = db.local().find_column_family(reader.schema()).shared_from_this();
-            auto use_view_update_path = co_await db::view::check_needs_view_update_path(sys_dist_ks.local(), db.local().get_token_metadata(), *cf, reason);
+            bool use_view_update_path = co_await with_scheduling_group(db.local().get_gossip_scheduling_group(), [&] {
+                return db::view::check_needs_view_update_path(sys_dist_ks.local(), db.local().get_token_metadata(), *cf, reason);
+            });
             //FIXME: for better estimations this should be transmitted from remote
             auto metadata = mutation_source_metadata{};
             auto& cs = cf->get_compaction_strategy();
