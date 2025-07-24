@@ -21,6 +21,7 @@
 #include "utils/fragmented_temporary_buffer.hh"
 #include "utils/overloaded_functor.hh"
 #include "utils/small_vector.hh"
+#include "exceptions.hh"
 
 #include <variant>
 
@@ -325,7 +326,7 @@ private:
     // Reads bytes belonging to an integer of size len. Returns true
     // if a full integer is now available.
     bool process_int(Buffer& data, unsigned len) {
-        assert(_pos < len);
+        sstables::parse_assert(_pos < len);
         auto n = std::min((size_t)(len - _pos), data.size());
         std::copy(data.begin(), data.begin() + n, _read_int.bytes + _pos);
         data.trim_front(n);
@@ -558,7 +559,7 @@ public:
         while (data || (!primitive_consumer::active() && non_consuming())) {
             // The primitive_consumer must finish before the enclosing state machine can continue.
             if (__builtin_expect(primitive_consumer::consume(data) == read_status::waiting, false)) {
-                assert(data.size() == 0);
+                sstables::parse_assert(data.size() == 0);
                 return proceed::yes;
             }
             auto ret = state_processor().process_state(data);
@@ -608,7 +609,7 @@ public:
             }, [this, &data, orig_data_size](skip_bytes skip) {
                 // we only expect skip_bytes to be used if reader needs to skip beyond the provided buffer
                 // otherwise it should just trim_front and proceed as usual
-                assert(data.size() == 0);
+                sstables::parse_assert(data.size() == 0);
                 _remain -= orig_data_size;
                 if (skip.get_value() >= _remain) {
                     skip_bytes skip_remaining(_remain);
@@ -626,11 +627,11 @@ public:
     }
 
     future<> fast_forward_to(size_t begin, size_t end) {
-        assert(begin >= _stream_position.position);
+        sstables::parse_assert(begin >= _stream_position.position);
         auto n = begin - _stream_position.position;
         _stream_position.position = begin;
 
-        assert(end >= _stream_position.position);
+        sstables::parse_assert(end >= _stream_position.position);
         _remain = end - _stream_position.position;
 
         primitive_consumer::reset();
