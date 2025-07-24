@@ -13,6 +13,7 @@
 #include "test/lib/test_utils.hh"
 #include "db/config.hh"
 #include "db/large_data_handler.hh"
+#include "db/corrupt_data_handler.hh"
 #include "dht/i_partitioner.hh"
 #include "gms/feature_service.hh"
 #include "repair/row_level.hh"
@@ -200,9 +201,17 @@ test_env::impl::impl(test_env_config cfg, sstables::storage_manager* sstm)
     , db_config(make_db_config(dir.path().native(), cfg.storage))
     , dir_sem(1)
     , feature_service(gms::feature_config_from_db_config(*db_config))
-    , mgr("test_env", cfg.large_data_handler == nullptr ? nop_ld_handler : *cfg.large_data_handler, *db_config,
-        feature_service, cache_tracker, cfg.available_memory, dir_sem,
-        [host_id = locator::host_id::create_random_id()]{ return host_id; }, current_scheduling_group(), sstm)
+    , nop_cd_handler(db::corrupt_data_handler::register_metrics::no)
+    , mgr(
+            "test_env",
+            cfg.large_data_handler == nullptr ? nop_ld_handler : *cfg.large_data_handler,
+            cfg.corrupt_data_handler == nullptr ? nop_cd_handler : *cfg.corrupt_data_handler,
+            *db_config,
+            feature_service,
+            cache_tracker,
+            cfg.available_memory,
+            dir_sem,
+            [host_id = locator::host_id::create_random_id()]{ return host_id; }, current_scheduling_group(), sstm)
     , semaphore(reader_concurrency_semaphore::no_limits{}, "sstables::test_env", reader_concurrency_semaphore::register_metrics::no)
     , storage(std::move(cfg.storage))
 { }
