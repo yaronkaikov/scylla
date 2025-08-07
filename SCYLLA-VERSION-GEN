@@ -78,7 +78,7 @@ fi
 
 # Default scylla product/version tags
 PRODUCT=scylla-enterprise
-VERSION=2024.1.20
+VERSION=2024.1.21
 
 BASE_VERSION=5.4.10
 
