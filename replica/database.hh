@@ -886,10 +886,6 @@ public:
         _virtual_writer.emplace(std::move(writer));
     }
 
-    bool is_virtual() const {
-        return _virtual_reader || _virtual_writer;
-    }
-
     // Queries can be satisfied from multiple data sources, so they are returned
     // as temporaries.
     //
