@@ -19,6 +19,7 @@
 #include "gms/inet_address.hh"
 #include "auth/allow_all_authenticator.hh"
 #include "auth/allow_all_authorizer.hh"
+#include "auth/maintenance_socket_authenticator.hh"
 #include "auth/maintenance_socket_role_manager.hh"
 #include <seastar/core/future.hh>
 #include <seastar/core/signal.hh>
@@ -2095,14 +2096,13 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 checkpoint(stop_signal, "starting maintenance auth service");
                 maintenance_auth_service.start(std::ref(qp), std::ref(group0_client), std::ref(mm_notifier),
                         auth::make_authorizer_factory(auth::allow_all_authorizer_name, qp, group0_client, mm),
-                        auth::make_authenticator_factory(auth::allow_all_authenticator_name, qp, group0_client, mm, auth_cache),
+                        auth::make_maintenance_socket_authenticator_factory(qp, group0_client, mm, auth_cache),
                         auth::make_maintenance_socket_role_manager_factory(qp, group0_client, mm, auth_cache),
                         maintenance_socket_enabled::yes, std::ref(auth_cache)).get();
 
                 cql_maintenance_server_ctl.emplace(maintenance_auth_service, mm_notifier, gossiper, qp, service_memory_limiter, sl_controller, lifecycle_notifier, *cfg, maintenance_cql_sg_stats_key, maintenance_socket_enabled::yes, dbcfg.statement_scheduling_group);
 
                 start_auth_service(maintenance_auth_service, stop_maintenance_auth_service, "maintenance auth service");
-                start_cql(*cql_maintenance_server_ctl, stop_maintenance_cql, "maintenance native server");
             }
 
             checkpoint(stop_signal, "starting REST API");
@@ -2137,6 +2137,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                     auth::set_maintenance_mode(svc);
                     return make_ready_future<>();
                 }).get();
+
+                start_cql(*cql_maintenance_server_ctl, stop_maintenance_cql, "maintenance native server");
 
                 ss.local().start_maintenance_mode().get();
 
@@ -2264,6 +2266,15 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 return ss.local().join_cluster(proxy, service::start_hint_manager::yes, generation_number);
             }).get();
             stop_signal.ready(false);
+
+            if (cfg->maintenance_socket() != "ignore") {
+                // Enable role operations now that node joined the cluster
+                maintenance_auth_service.invoke_on_all([](auth::service& svc) {
+                    return auth::ensure_role_operations_are_enabled(svc);
+                }).get();
+
+                start_cql(*cql_maintenance_server_ctl, stop_maintenance_cql, "maintenance native server");
+            }
 
             // At this point, `locator::topology` should be stable, i.e. we should have complete information
             // about the layout of the cluster (= list of nodes along with the racks/DCs).
