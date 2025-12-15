@@ -1211,6 +1211,7 @@ private:
         }
 
         co_await utils::get_local_injector().inject("incremental_repair_prepare_wait", utils::wait_for_message(60s));
+        rlogger.debug("Disabling compaction for range={} for incremental repair", _range);
         auto reenablers_and_holders = co_await table.get_compaction_reenablers_and_lock_holders_for_repair(_db.local(), _frozen_topology_guard, _range);
         for (auto& lock_holder : reenablers_and_holders.lock_holders) {
             _rs._repair_compaction_locks[gid].push_back(std::move(lock_holder));
@@ -1240,6 +1241,8 @@ private:
         // compaction.
         reenablers_and_holders.cres.clear();
         rlogger.info("Re-enabled compaction for range={} for incremental repair", _range);
+
+        co_await utils::get_local_injector().inject("wait_after_prepare_sstables_for_incremental_repair", utils::wait_for_message(5min));
     }
 
     // Read rows from sstable until the size of rows exceeds _max_row_buf_size  - current_size
