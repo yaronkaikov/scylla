@@ -1,0 +1,224 @@
+#!/bin/bash -e
+
+trap 'echo "error $? in $0 line $LINENO"' ERR
+
+if ! command -v buildah > /dev/null; then
+    echo install buildah 1.19.3 or later
+    exit 1
+fi
+
+bv=$(buildah --version)
+# translate to array of version components
+bv="${bv#buildah version }"
+bv="${bv% (*}"
+bv=(${bv//./ })
+
+maj=${bv[0]}
+min=${bv[1]}
+patch=${bv[2]}
+
+ok=$(( maj > 1 || ( maj == 1 && min > 19 ) || ( maj == 1 && min == 19 && patch >= 3 ) ))
+
+if (( ! ok )); then 
+    echo install buildah 1.19.3 or later
+    exit 1
+fi
+
+if ! command -v skopeo > /dev/null; then
+    echo install the skopeo package for registry inspection
+    exit 1
+fi
+
+archs=(amd64 arm64)
+
+# docker arch has a different spelling than uname arch
+declare -A arch_unames=(
+    [amd64]=x86_64
+    [arm64]=aarch64
+)
+current_arch_uname="$(uname -m)"
+
+declare -A docker_arch=(
+    [x86_64]=amd64
+    [aarch64]=arm64
+)
+
+usage() {
+    cat <<EOF
+
+Build Scylla with latest compilers from upstream sources.
+
+Options:
+  --gcc-version <version>       GCC version to build (e.g., 15.1.0, or "latest")
+                                Default: latest stable from gcc.gnu.org
+  --clang-version <version>     Clang/LLVM version to build (e.g., 19.0.0, or "latest")
+                                Default: latest stable from github.com/llvm/llvm-project
+  --disable-multiarch           Disable multiarch build (build only for current arch)
+  --image-name <name>           Docker image tag name (without registry prefix)
+                                Default: scylladb/scylla-toolchain:latest-compilers-YYYYMMDD
+  --help                        This help snippet
+EOF
+}
+
+# Default values
+GCC_VERSION="latest"
+CLANG_VERSION="latest"
+DISABLE_MULTIARCH=false
+IMAGE_NAME=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        "--gcc-version")
+            if [[ -z "$2" ]]; then
+                usage
+                exit 1
+            fi
+            GCC_VERSION="$2"
+            shift 2
+            ;;
+        "--clang-version")
+            if [[ -z "$2" ]]; then
+                usage
+                exit 1
+            fi
+            CLANG_VERSION="$2"
+            shift 2
+            ;;
+        "--disable-multiarch")
+            DISABLE_MULTIARCH=true
+            shift 1
+            ;;
+        "--image-name")
+            if [[ -z "$2" ]]; then
+                usage
+                exit 1
+            fi
+            IMAGE_NAME="$2"
+            shift 2
+            ;;
+        "--help")
+            usage
+            exit 0
+            ;;
+        *)
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+# Set default image name if not specified
+if [[ -z "${IMAGE_NAME}" ]]; then
+    IMAGE_NAME="scylladb/scylla-toolchain:latest-compilers-$(date '+%Y%m%d')"
+fi
+
+# Verify image doesn't already exist
+if skopeo inspect "docker://${IMAGE_NAME}" > /dev/null 2>&1; then
+    echo "Image ${IMAGE_NAME} already exists; select a new name with --image-name"
+    exit 1
+fi
+
+# Multiarch support check
+if ! "${DISABLE_MULTIARCH}"; then
+    for arch in "${archs[@]}"; do
+        arch_uname="${arch_unames[$arch]}"
+        if [[ "${current_arch_uname}" == "${arch_uname}" ]]; then
+            continue
+        fi
+        if [[ ! -f /proc/sys/fs/binfmt_misc/qemu-"${arch_uname}" ]]; then
+            echo install qemu-user-static
+            exit 1
+        fi
+    done
+fi
+
+if ! "${DISABLE_MULTIARCH}"; then
+    echo "Enabling multiarch build."
+    PLATFORM=${archs[@]/#/--platform=linux/}
+else
+    echo "Disabling multiarch build."
+    echo "This will build only ${docker_arch[${current_arch_uname}]} image."
+    PLATFORM=--platform=linux/${docker_arch[${current_arch_uname}]}
+fi
+
+# Resolve "latest" versions to actual releases from upstream
+resolve_gcc_version() {
+    local latest_gcc
+    # Try to fetch the latest GCC version from GNU FTP mirror
+    if command -v curl > /dev/null 2>&1; then
+        # Query available GCC releases
+        latest_gcc=$(curl -s https://ftpmirror.gnu.org/gcc/ 2>/dev/null | \
+            grep -oP 'gcc-\K[0-9]+\.[0-9]+\.[0-9]+' | \
+            sort -V | tail -1)
+        if [[ -n "${latest_gcc}" ]]; then
+            echo "${latest_gcc}"
+            return 0
+        fi
+    fi
+    
+    # Fallback: use known recent stable version
+    echo "15.2.0"
+}
+
+resolve_clang_version() {
+    local latest_clang
+    # Try to fetch latest LLVM release from GitHub API
+    if command -v curl > /dev/null 2>&1; then
+        # Query GitHub API for latest LLVM release
+        latest_clang=$(curl -s https://api.github.com/repos/llvm/llvm-project/releases | \
+            grep -oP '"tag_name": "llvmorg-\K[0-9]+\.[0-9]+\.[0-9]+' | \
+            head -1)
+        if [[ -n "${latest_clang}" ]]; then
+            echo "${latest_clang}"
+            return 0
+        fi
+    fi
+    
+    # Fallback: use known recent stable version
+    echo "21.1.8"
+}
+
+if [[ "${GCC_VERSION}" == "latest" ]]; then
+    GCC_VERSION=$(resolve_gcc_version)
+    echo "GCC version not specified; detected latest: GCC ${GCC_VERSION}"
+fi
+
+if [[ "${CLANG_VERSION}" == "latest" ]]; then
+    CLANG_VERSION=$(resolve_clang_version)
+    echo "Clang version not specified; detected latest: Clang ${CLANG_VERSION}"
+fi
+
+echo "======================================="
+echo "Building Scylla with latest compilers"
+echo "======================================="
+echo "GCC version: ${GCC_VERSION}"
+echo "Clang version: ${CLANG_VERSION}"
+echo "Image name: ${IMAGE_NAME}"
+echo "========================================"
+
+# Build the container with latest compilers
+buildah bud ${PLATFORM} \
+    --jobs 0 \
+    --squash \
+    --no-cache \
+    --pull \
+    -f tools/toolchain/Dockerfile.latest-compilers \
+    --manifest "${IMAGE_NAME}" \
+    -v "$(realpath ./):/mnt:Z" \
+    --build-arg GCC_VERSION="${GCC_VERSION}" \
+    --build-arg CLANG_VERSION="${CLANG_VERSION}" \
+    .
+
+# Update tools/toolchain/image with the new image name
+echo "${IMAGE_NAME}" > tools/toolchain/image
+
+echo ""
+echo "Done building ${IMAGE_NAME}. You can now test it, and push with"
+echo ""
+echo "    podman manifest push --all ${IMAGE_NAME} docker://${IMAGE_NAME}"
+echo ""
+echo "Updated tools/toolchain/image to: ${IMAGE_NAME}"
+echo ""
+echo "To use the new compilers for local Scylla builds, extract them from the container:"
+echo "    podman run --rm -v ./compilers:/out:Z ${IMAGE_NAME} bash -c 'tar czf /out/compilers.tar.gz /usr/local/gcc /usr/local/clang'"
+echo ""

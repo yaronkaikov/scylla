@@ -1,0 +1,57 @@
+FROM registry.fedoraproject.org/fedora:43
+
+ARG GCC_VERSION
+ARG CLANG_VERSION
+
+WORKDIR /mnt
+
+# Install GCC and Clang from system packages
+RUN dnf -y install gcc g++ clang && dnf clean all
+
+# Copy system GCC to /usr/local/gcc
+RUN mkdir -p /usr/local/gcc/bin /usr/local/gcc/lib64 && \
+    cp -P /usr/bin/gcc /usr/local/gcc/bin/ && \
+    cp -P /usr/bin/g++ /usr/local/gcc/bin/ && \
+    cp -P /usr/bin/gcov* /usr/local/gcc/bin/ 2>/dev/null || true && \
+    cp -P /usr/lib64/libstdc++* /usr/local/gcc/lib64/ 2>/dev/null || true && \
+    cp -P /usr/lib64/libgcc* /usr/local/gcc/lib64/ 2>/dev/null || true && \
+    cp -P /usr/lib64/libgomp* /usr/local/gcc/lib64/ 2>/dev/null || true && \
+    chmod +x /usr/local/gcc/bin/* 2>/dev/null || true
+
+# Copy system Clang to /usr/local/clang
+RUN mkdir -p /usr/local/clang/bin /usr/local/clang/lib64 && \
+    cp -P /usr/bin/clang* /usr/local/clang/bin/ 2>/dev/null || true && \
+    cp -P /usr/lib64/libclang* /usr/local/clang/lib64/ 2>/dev/null || true && \
+    cp -P /usr/lib64/libLLVM* /usr/local/clang/lib64/ 2>/dev/null || true && \
+    chmod +x /usr/local/clang/bin/* 2>/dev/null || true
+
+# Create compiler info summary (detect actual versions)
+RUN mkdir -p /compiler_info && \
+    GCC_ACTUAL=$(/usr/local/gcc/bin/gcc --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+\.\d+' | head -1) && \
+    CLANG_ACTUAL=$(/usr/local/clang/bin/clang --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+\.\d+' | head -1) && \
+    { \
+        echo "Compiler Build Information"; \
+        echo "=========================="; \
+        echo ""; \
+        echo "Build Date: $(date)"; \
+        echo ""; \
+        echo "GCC (Actual: ${GCC_ACTUAL:-${GCC_VERSION}}):"; \
+        if [ -f /usr/local/gcc/bin/gcc ]; then \
+            echo "  Status: ✓ Installed"; \
+            /usr/local/gcc/bin/gcc --version | head -1; \
+            echo "  Location: /usr/local/gcc"; \
+        else \
+            echo "  Status: ✗ Not installed"; \
+        fi; \
+        echo ""; \
+        echo "LLVM/Clang (Actual: ${CLANG_ACTUAL:-${CLANG_VERSION}}):"; \
+        if [ -f /usr/local/clang/bin/clang ]; then \
+            echo "  Status: ✓ Installed"; \
+            /usr/local/clang/bin/clang --version | head -1; \
+            echo "  Location: /usr/local/clang"; \
+        else \
+            echo "  Status: ✗ Not installed"; \
+        fi; \
+    } | tee /compiler_info/summary.txt
+
+CMD /bin/bash

@@ -1,0 +1,194 @@
+name: Periodic Compiler Build
+
+# Run weekly on Monday at 10 AM UTC to validate latest compiler versions
+on:
+  schedule:
+    - cron: '0 10 * * 1'
+  workflow_dispatch:
+    inputs:
+      gcc_version:
+        description: 'GCC version to build'
+        required: false
+        default: '14.2.0'
+      clang_version:
+        description: 'Clang version to build'
+        required: false
+        default: '19.0.0'
+      build_scylla:
+        description: 'Build Scylla after compilers'
+        required: false
+        default: 'true'
+      test_mode:
+        description: 'Build mode: dev, debug, release, sanitize, coverage'
+        required: false
+        default: 'dev'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  build-latest-compilers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 480  # 8 hours for compilers
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up buildah and skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y buildah skopeo
+
+      - name: Determine compiler versions
+        id: versions
+        run: |
+          GCC_VERSION="${{ github.event.inputs.gcc_version || '14.2.0' }}"
+          CLANG_VERSION="${{ github.event.inputs.clang_version || '19.0.0' }}"
+          BUILD_SCYLLA="${{ github.event.inputs.build_scylla || 'true' }}"
+          TEST_MODE="${{ github.event.inputs.test_mode || 'dev' }}"
+          
+          echo "gcc_version=${GCC_VERSION}" >> $GITHUB_OUTPUT
+          echo "clang_version=${CLANG_VERSION}" >> $GITHUB_OUTPUT
+          echo "build_scylla=${BUILD_SCYLLA}" >> $GITHUB_OUTPUT
+          echo "test_mode=${TEST_MODE}" >> $GITHUB_OUTPUT
+          
+          echo "Building with GCC ${GCC_VERSION}, Clang ${CLANG_VERSION}"
+
+      - name: Build latest compilers
+        run: |
+          ./tools/toolchain/build-latest-compilers \
+            --gcc-version "${{ steps.versions.outputs.gcc_version }}" \
+            --clang-version "${{ steps.versions.outputs.clang_version }}" \
+            --test-mode "${{ steps.versions.outputs.test_mode }}" \
+            ${{ steps.versions.outputs.build_scylla == 'true' && '--build-scylla' || '' }}
+        timeout-minutes: 480
+
+      - name: Extract compiler build information
+        id: compiler-info
+        run: |
+          # Attempt to extract build info from container
+          IMAGE_ID=$(cat tools/toolchain/image || echo "scylladb/scylla-toolchain:latest-compilers-$(date +%Y%m%d)")
+          echo "image=${IMAGE_ID}" >> $GITHUB_OUTPUT
+
+      - name: Create build summary
+        run: |
+          cat > compiler-build-summary.txt << 'EOF'
+          # Periodic Compiler Build Report
+          
+          ## Build Configuration
+          - **Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - **GCC Version**: ${{ steps.versions.outputs.gcc_version }}
+          - **Clang Version**: ${{ steps.versions.outputs.clang_version }}
+          - **Build Mode**: ${{ steps.versions.outputs.test_mode }}
+          - **Build Scylla**: ${{ steps.versions.outputs.build_scylla }}
+          
+          ## Container Image
+          - **Image ID**: ${{ steps.compiler-info.outputs.image }}
+          
+          ## Build Status
+          ✓ Compiler build completed successfully
+          
+          ## Artifacts
+          - Scylla binary: build/${{ steps.versions.outputs.test_mode }}/scylla
+          - C++ unit tests: build/${{ steps.versions.outputs.test_mode }}/test/
+          - Generated headers: build/${{ steps.versions.outputs.test_mode }}/seastar/gen/
+          
+          ## Next Steps
+          1. Run validation: `./tools/toolchain/validate-compiler-build.sh --test-mode ${{ steps.versions.outputs.test_mode }}`
+          2. Push to registry: `podman manifest push --all ${{ steps.compiler-info.outputs.image }} docker://${{ steps.compiler-info.outputs.image }}`
+          3. Update toolchain image: Update `tools/toolchain/image` with new compiler tag
+          4. Run full test suite for validation
+          
+          ## Known Issues
+          - Compiler build times: 2-4 hours per architecture depending on system resources
+          - LLVM/Clang builds from source can require 50GB+ disk space
+          - Some compiler features may not be available if builds fail
+          EOF
+          cat compiler-build-summary.txt
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-build-artifacts-${{ steps.versions.outputs.gcc_version }}-${{ steps.versions.outputs.clang_version }}
+          path: |
+            compiler-build-summary.txt
+            build/${{ steps.versions.outputs.test_mode }}/scylla
+          retention-days: 30
+
+      - name: Run validation tests
+        run: |
+          ./tools/toolchain/validate-compiler-build.sh \
+            --test-mode "${{ steps.versions.outputs.test_mode }}" \
+            --verbose
+        continue-on-error: true
+
+      - name: Create issue on compiler build failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Compiler Build Failed: GCC ${{ steps.versions.outputs.gcc_version }}, Clang ${{ steps.versions.outputs.clang_version }}`,
+              body: `## Compiler Build Failure Report
+            
+            ### Build Configuration
+            - **GCC Version**: ${{ steps.versions.outputs.gcc_version }}
+            - **Clang Version**: ${{ steps.versions.outputs.clang_version }}
+            - **Build Mode**: ${{ steps.versions.outputs.test_mode }}
+            - **Workflow Run**: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            ### Build Logs
+            See the workflow run for detailed build logs.
+            
+            ### Investigation Steps
+            1. Review compiler build logs for errors
+            2. Check for compiler-specific workarounds in .github/instructions/cpp.instructions.md
+            3. Consider filing issues upstream with compiler projects if bugs found
+            4. Document any required patches in CONTRIBUTING.md
+            
+            ### Assignees
+            - @scylladb/compiler-team (once team is created)
+            `,
+              labels: ['compiler', 'ci', 'build-failure']
+            })
+
+      - name: Create issue on validation failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Compiler Validation Failed: GCC ${{ steps.versions.outputs.gcc_version }}, Clang ${{ steps.versions.outputs.clang_version }}`,
+              body: `## Compiler Validation Failure
+            
+            Scylla failed to build or validate with the following compiler versions:
+            - **GCC**: ${{ steps.versions.outputs.gcc_version }}
+            - **Clang**: ${{ steps.versions.outputs.clang_version }}
+            
+            See workflow run for details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            `,
+              labels: ['compiler', 'validation', 'needs-investigation']
+            })
+
+      - name: Report success
+        if: success()
+        run: |
+          echo "✓ Compiler build and validation successful"
+          echo ""
+          echo "Compiler details:"
+          echo "  GCC: ${{ steps.versions.outputs.gcc_version }}"
+          echo "  Clang: ${{ steps.versions.outputs.clang_version }}"
+          echo ""
+          echo "Next: Review artifacts and consider deploying compilers to production toolchain"

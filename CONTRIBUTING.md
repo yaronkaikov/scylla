@@ -20,3 +20,48 @@ The Scylla C++ source code uses the [Seastar coding style](https://github.com/sc
 Header files in Scylla must be self-contained, i.e., each can be included without having to include specific other headers first. To verify that your change did not break this property, run `ninja dev-headers`. If you added or removed header files, you must `touch configure.py` first - this will cause `configure.py` to be automatically re-run to generate a fresh list of header files.
 
 For more criteria on what reviewers consider good code, see the [review checklist](https://github.com/scylladb/scylla/blob/master/docs/dev/review-checklist.md).
+
+## Compiler Compatibility
+
+Scylla maintains compatibility with recent versions of GCC and Clang. The periodic compiler build process validates compatibility with the latest stable compiler releases.
+
+### Current Compiler Support
+
+- **GCC**: 10.1.1 or later
+- **Clang**: 10.0 or later
+
+### Compiler-Specific Code
+
+When writing code that requires compiler-specific handling:
+
+1. Check existing workarounds in `.github/instructions/cpp.instructions.md`
+2. Use compiler version detection macros:
+   - `__clang__` - Clang/LLVM compiler
+   - `__GNUC__`, `__GNUC_MINOR__` - GCC version
+   - `__has_builtin()`, `__has_attribute()` - Feature detection (preferred)
+3. Document any compiler-specific flags or patches with comments explaining why they're needed
+
+### Compiler Upgrade Process
+
+When new compiler versions are released (typically every 6 months):
+
+1. Periodic builds are automatically triggered (see `.github/workflows/periodic-compiler-build.yml`)
+2. If failures are detected, issues are created for investigation
+3. Fixes are documented and applied to the codebase
+4. Compiler version is updated in toolchain configuration
+
+### Testing with Development Compilers
+
+To test your changes with the latest compiler versions:
+
+    # Build latest compilers in a container
+    ./tools/toolchain/build-latest-compilers \
+        --gcc-version 15.0.0 \
+        --clang-version 20.0.0 \
+        --build-scylla \
+        --test-mode dev
+
+    # Validate the build
+    ./tools/toolchain/validate-compiler-build.sh --test-mode dev --run-tests
+
+For more details, see [tools/toolchain/README.md](tools/toolchain/README.md#building-with-latest-compilers).
