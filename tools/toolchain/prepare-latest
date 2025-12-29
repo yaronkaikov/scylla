@@ -1,0 +1,210 @@
+#!/bin/bash -e
+
+trap 'echo "error $? in $0 line $LINENO"' ERR
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
+
+# Supported architectures
+archs=(amd64 arm64)
+
+# docker arch has a different spelling than uname arch
+declare -A arch_unames=(
+    [amd64]=x86_64
+    [arm64]=aarch64
+)
+
+declare -A uname_to_docker=(
+    [x86_64]=amd64
+    [aarch64]=arm64
+)
+
+current_arch_uname="$(uname -m)"
+# Normalize arm64 (macOS) to aarch64 (Linux)
+if [[ "${current_arch_uname}" == "arm64" ]]; then
+    current_arch_uname="aarch64"
+fi
+
+usage() {
+    cat <<EOF
+Build a toolchain image with latest clang and gcc sources.
+
+Options:
+  --image <name>           Override output image/manifest name
+  --llvm-tag <tag>         Override LLVM/clang tag (default: auto-discover)
+  --gcc-version <ver>      Override GCC version (default: auto-discover)
+  --disable-multiarch      Build only for current architecture
+  --dry-run                Print plan without building
+  --help                   Show this help
+EOF
+}
+
+IMAGE_OVERRIDE=""
+LLVM_OVERRIDE=""
+GCC_OVERRIDE=""
+DRY_RUN=false
+DISABLE_MULTIARCH=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        "--image") IMAGE_OVERRIDE="$2"; shift 2 ;;
+        "--llvm-tag") LLVM_OVERRIDE="$2"; shift 2 ;;
+        "--gcc-version") GCC_OVERRIDE="$2"; shift 2 ;;
+        "--disable-multiarch") DISABLE_MULTIARCH=true; shift 1 ;;
+        "--dry-run") DRY_RUN=true; shift 1 ;;
+        "--help") usage; exit 0 ;;
+        *) usage; exit 1 ;;
+    esac
+done
+
+if ! command -v buildah > /dev/null; then
+    echo "install buildah 1.19.3 or later"
+    exit 1
+fi
+
+buildah_version=$(buildah --version)
+buildah_version="${buildah_version#buildah version }"
+buildah_version="${buildah_version% (*}"
+buildah_parts=(${buildah_version//./ })
+if (( ${buildah_parts[0]} < 1 || (${buildah_parts[0]} == 1 && ${buildah_parts[1]} < 19) || (${buildah_parts[0]} == 1 && ${buildah_parts[1]} == 19 && ${buildah_parts[2]} < 3) )); then
+    echo "install buildah 1.19.3 or later"
+    exit 1
+fi
+
+if command -v skopeo > /dev/null; then
+    SKOPEO_AVAILABLE=true
+else
+    SKOPEO_AVAILABLE=false
+fi
+
+# Check for QEMU emulation support for cross-architecture builds
+if ! "${DISABLE_MULTIARCH}"; then
+    for arch in "${archs[@]}"; do
+        arch_uname="${arch_unames[$arch]}"
+        if [[ "${current_arch_uname}" == "${arch_uname}" ]]; then
+            continue
+        fi
+        if [[ ! -f /proc/sys/fs/binfmt_misc/qemu-"${arch_uname}" ]]; then
+            echo "install qemu-user-static for cross-architecture builds, or use --disable-multiarch"
+            exit 1
+        fi
+    done
+fi
+
+versions_env="$(python3 "${SCRIPT_DIR}/latest_versions.py" --format env)" || {
+    echo "Failed to detect latest versions" >&2
+    exit 1
+}
+eval "${versions_env}"
+
+if [[ -n "${LLVM_OVERRIDE}" ]]; then
+    LLVM_CLANG_TAG="${LLVM_OVERRIDE}"
+fi
+if [[ -n "${GCC_OVERRIDE}" ]]; then
+    GCC_VERSION="${GCC_OVERRIDE}"
+else
+    # Detect latest available GCC release that has a downloadable tarball
+    echo "Detecting latest GCC release..."
+    # Get list of available versions from GNU FTP
+    gcc_versions=$(curl -s --max-time 10 "https://ftp.gnu.org/gnu/gcc/" 2>/dev/null | grep -oP 'gcc-\K[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)
+    if [[ -n "${gcc_versions}" ]]; then
+        GCC_VERSION="${gcc_versions}"
+    else
+        echo "WARNING: Could not detect GCC version from FTP, using default 14.2.0"
+        GCC_VERSION="14.2.0"
+    fi
+fi
+
+if [[ -z "${LLVM_CLANG_TAG}" ]] || [[ -z "${GCC_VERSION}" ]]; then
+    echo "Failed to detect versions (LLVM_CLANG_TAG=${LLVM_CLANG_TAG}, GCC_VERSION=${GCC_VERSION})"
+    exit 1
+fi
+
+echo "LLVM/clang tag: ${LLVM_CLANG_TAG}"
+echo "GCC version:    ${GCC_VERSION}"
+
+DATE_PREFIX="$(date +%Y%m%d-%H%M%S)"
+image_default="docker.io/scylladb/scylla-toolchain:fedora-43-${DATE_PREFIX}-llvm${LLVM_CLANG_TAG}-gcc${GCC_VERSION}"
+IMAGE_NAME="${IMAGE_OVERRIDE:-${image_default}}"
+
+if "${SKOPEO_AVAILABLE}"; then
+    if skopeo inspect "docker://${IMAGE_NAME}" > /dev/null 2>&1; then
+        echo "Toolchain image ${IMAGE_NAME} exists; select a new name"
+        exit 1
+    fi
+else
+    echo "Warning: skopeo not available, skipping remote image existence check" >&2
+fi
+
+# Determine platform(s) to build
+if "${DISABLE_MULTIARCH}"; then
+    echo "Disabling multiarch build."
+    echo "This will build only ${uname_to_docker[${current_arch_uname}]} image."
+    PLATFORM="--platform=linux/${uname_to_docker[${current_arch_uname}]}"
+else
+    echo "Enabling multiarch build."
+    PLATFORM="${archs[*]/#/--platform=linux/}"
+fi
+
+echo "Image tag:       ${IMAGE_NAME}"
+echo "Platform(s):     ${PLATFORM}"
+
+# Pre-download LLVM source on host
+LLVM_TARBALL_DIR="${REPO_ROOT}/llvm_build"
+LLVM_TARBALL="${LLVM_TARBALL_DIR}/llvm-project-${LLVM_CLANG_TAG}.src.tar.xz"
+
+mkdir -p "${LLVM_TARBALL_DIR}"
+if [[ ! -f "${LLVM_TARBALL}" ]]; then
+    echo "Downloading LLVM ${LLVM_CLANG_TAG} source..."
+    if curl -L --max-time 300 -o "${LLVM_TARBALL}" "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_CLANG_TAG}/llvm-project-${LLVM_CLANG_TAG}.src.tar.xz"; then
+        echo "✓ LLVM source downloaded"
+    else
+        echo "ERROR: Failed to download LLVM source. Check your network connection."
+        rm -f "${LLVM_TARBALL}"
+        exit 1
+    fi
+else
+    echo "Using cached LLVM source: ${LLVM_TARBALL}"
+fi
+
+# Pre-download GCC source on host
+GCC_TARBALL_DIR="${REPO_ROOT}/gcc_build"
+GCC_TARBALL="${GCC_TARBALL_DIR}/gcc-${GCC_VERSION}.tar.xz"
+
+mkdir -p "${GCC_TARBALL_DIR}"
+if [[ ! -f "${GCC_TARBALL}" ]]; then
+    echo "Downloading GCC ${GCC_VERSION} source..."
+    if curl -L --max-time 300 -o "${GCC_TARBALL}" "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"; then
+        echo "✓ GCC source downloaded"
+    else
+        echo "ERROR: Failed to download GCC source. Check your network connection."
+        rm -f "${GCC_TARBALL}"
+        exit 1
+    fi
+else
+    echo "Using cached GCC source: ${GCC_TARBALL}"
+fi
+
+VOLUME_MOUNTS="-v $(realpath ./):/mnt:Z -v ${GCC_TARBALL_DIR}:/mnt/gcc_build:Z -v ${LLVM_TARBALL_DIR}:/mnt/llvm_build:Z"
+
+action=(
+    buildah bud ${PLATFORM} --jobs 0 --squash --no-cache --pull \
+        -f tools/toolchain/Dockerfile-latest \
+        --manifest "${IMAGE_NAME}" \
+        ${VOLUME_MOUNTS} \
+        --build-arg LLVM_CLANG_TAG="${LLVM_CLANG_TAG}" \
+        --build-arg LLVM_BUILD="INSTALL" \
+        --build-arg GCC_BUILD="INSTALL" \
+        --build-arg GCC_VERSION="${GCC_VERSION}"
+)
+
+if "${DRY_RUN}"; then
+    printf 'Planned command:\n%s\n' "${action[*]}"
+    exit 0
+fi
+
+"${action[@]}"
+
+echo "Done building ${IMAGE_NAME}. You can now test it, and push with"
+echo ""
+echo "    podman manifest push --all ${IMAGE_NAME} docker://${IMAGE_NAME}"

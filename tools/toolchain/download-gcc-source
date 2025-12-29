@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# Download GCC source to local cache for prepare-latest script
+# This allows building the toolchain without network access inside the container
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 <gcc-version>"
+    echo ""
+    echo "Example: $0 15.2"
+    exit 1
+fi
+
+GCC_VERSION="$1"
+GCC_TARBALL_DIR="${REPO_ROOT}/gcc_build"
+GCC_TARBALL="${GCC_TARBALL_DIR}/gcc-${GCC_VERSION}.tar.xz"
+
+mkdir -p "${GCC_TARBALL_DIR}"
+
+if [[ -f "${GCC_TARBALL}" ]]; then
+    echo "GCC ${GCC_VERSION} already cached at: ${GCC_TARBALL}"
+    exit 0
+fi
+
+echo "Downloading GCC ${GCC_VERSION} source..."
+
+GCC_URLS=(
+    "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
+    "https://mirrors.kernel.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
+    "https://sourceware.org/pub/gcc/releases/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
+)
+
+for url in "${GCC_URLS[@]}"; do
+    echo "  Trying ${url}..."
+    if curl -L --fail --progress-bar --output "${GCC_TARBALL}" "${url}"; then
+        echo "  ✓ Downloaded successfully to ${GCC_TARBALL}"
+        exit 0
+    fi
+    echo "  ✗ Failed, trying next mirror..."
+    rm -f "${GCC_TARBALL}"
+done
+
+echo "ERROR: Failed to download GCC ${GCC_VERSION} from all mirrors"
+exit 1

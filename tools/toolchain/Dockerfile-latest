@@ -1,0 +1,29 @@
+FROM registry.fedoraproject.org/fedora:43
+
+ARG LLVM_CLANG_TAG
+ARG LLVM_BUILD="SKIP"
+ARG GCC_BUILD="SKIP"
+ARG GCC_VERSION
+
+ENV LLVM_CLANG_TAG=${LLVM_CLANG_TAG}
+ENV LLVM_BUILD=${LLVM_BUILD}
+ENV GCC_BUILD=${GCC_BUILD}
+ENV GCC_VERSION=${GCC_VERSION}
+
+WORKDIR /mnt
+RUN echo install_weak_deps=False >> /etc/dnf/dnf.conf
+RUN dnf -y update \
+    && dnf -y install 'dnf-command(copr)' \
+    && dnf -y install ccache \
+    && dnf -y install devscripts debhelper fakeroot file rpm-build \
+    && ./install-dependencies.sh && dnf clean all \
+    && rm -rf /root/.cache /root/.cargo \
+    && echo 'ALL ALL=(ALL:ALL) NOPASSWD: ALL' >> /etc/sudoers \
+    && cp ./tools/toolchain/system-auth /etc/pam.d \
+    && echo 'Defaults !requiretty' >> /etc/sudoers
+RUN if [ "${GCC_BUILD}" = "INSTALL" ]; then dnf -y install gcc gcc-c++ gmp-devel mpfr-devel libmpc-devel isl-devel flex bison; fi
+RUN if [ "${LLVM_BUILD}" = "INSTALL" ]; then dnf -y install cmake ninja-build python3; fi
+RUN mkdir -p /root/.m2/repository
+RUN ./tools/toolchain/build_llvm.sh
+RUN ./tools/toolchain/optimized_gcc.sh
+CMD /bin/bash
