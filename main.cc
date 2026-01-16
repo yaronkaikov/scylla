@@ -1862,7 +1862,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             checkpoint(stop_signal, "initializing strongly consistent coordinator");
             sharded<service::strong_consistency::coordinator> sc_coordinator;
-            sc_coordinator.start(std::ref(groups_manager), std::ref(db)).get();
+            sc_coordinator.start(std::ref(groups_manager), std::ref(db), std::ref(gossiper)).get();
             auto stop_sc_coordinator = defer_verbose_shutdown("strongly consistent coordinator", [&] {
                 sc_coordinator.stop().get();
             });

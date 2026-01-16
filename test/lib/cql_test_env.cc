@@ -963,7 +963,7 @@ private:
                 std::ref(_db), std::ref(_mm), std::ref(_sys_ks), std::ref(_feature_service)).get();
             auto stop_groups_manager = defer_verbose_shutdown("strongly consistent groups manager", [this] { _groups_manager.stop().get(); });
 
-            _sc_coordinator.start(std::ref(_groups_manager), std::ref(_db)).get();
+            _sc_coordinator.start(std::ref(_groups_manager), std::ref(_db), std::ref(_gossiper)).get();
             auto stop_sc_coordinator = defer_verbose_shutdown("strongly consistent coordinator", [this] {
                 _sc_coordinator.stop().get();
             });
