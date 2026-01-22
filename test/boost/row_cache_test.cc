@@ -4516,7 +4516,7 @@ SEASTAR_TEST_CASE(test_populating_cache_with_expired_and_nonexpired_tombstones) 
             "CREATE KEYSPACE IF NOT EXISTS {} WITH REPLICATION = "
             "{{'class' : 'NetworkTopologyStrategy', 'replication_factor' : 1}};", ks_name)).get();
         env.execute_cql(format(
-            "CREATE TABLE {}.{} (pk int, ck int, PRIMARY KEY(pk, ck));", ks_name, table_name)).get();
+            "CREATE TABLE {}.{} (pk int, ck int, PRIMARY KEY(pk, ck)) WITH tombstone_gc = {{'mode': 'timeout'}};", ks_name, table_name)).get();
 
         BOOST_REQUIRE(env.local_db().has_schema(ks_name, table_name));
 
