@@ -19,6 +19,7 @@
 #include "service/migration_manager.hh"
 #include "db/system_keyspace.hh"
 #include "utils/loading_cache.hh"
+#include "utils/error_injection.hh"
 
 namespace service::strong_consistency {
 
@@ -140,6 +141,9 @@ private:
 
             auto schema_cm = co_await get_schema(schema_version);
             if (!schema_cm.first && !barrier_executed) {
+                if (utils::get_local_injector().enter("disable_raft_drop_append_entries_for_specified_group")) {
+                    utils::get_local_injector().disable("raft_drop_incoming_append_entries_for_specified_group");
+                }
                 // TODO: pass valid abort source
                 co_await _mm.get_group0_barrier().trigger();
                 barrier_executed = true;
