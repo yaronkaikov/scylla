@@ -520,6 +520,21 @@ public:
             int32_t page_size = -1,
             service::node_local_only node_local_only = service::node_local_only::no) const;
 
+    enum class write_consistency_guardrail_state { NONE, WARN, FAIL };
+    inline write_consistency_guardrail_state check_write_consistency_levels_guardrail(db::consistency_level cl) {
+        _cql_stats.writes_per_consistency_level[size_t(cl)]++;
+
+        if (_write_consistency_levels_disallowed.contains(cl)) [[unlikely]] {
+            _cql_stats.write_consistency_levels_disallowed_violations++;
+            return write_consistency_guardrail_state::FAIL;
+        }
+        if (_write_consistency_levels_warned.contains(cl)) [[unlikely]] {
+            _cql_stats.write_consistency_levels_warned_violations++;
+            return write_consistency_guardrail_state::WARN;
+        }
+        return write_consistency_guardrail_state::NONE;
+    }
+
 private:
     // Keep the holder until you stop using the `remote` services.
     std::pair<std::reference_wrapper<remote>, gate::holder> remote();
