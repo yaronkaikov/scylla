@@ -21,6 +21,8 @@
 #include "utils/loading_cache.hh"
 #include "utils/error_injection.hh"
 
+using namespace std::chrono_literals;
+
 namespace service::strong_consistency {
 
 static logging::logger logger("sc_state_machine");
@@ -50,6 +52,7 @@ public:
         static thread_local logging::logger::rate_limit rate_limit(std::chrono::seconds(10));
 
         try {
+            co_await utils::get_local_injector().inject("strong_consistency_state_machine_wait_before_apply", utils::wait_for_message(20min));
             utils::chunked_vector<frozen_mutation> muts;
             muts.reserve(command.size());
             for (const auto& c: command) {
