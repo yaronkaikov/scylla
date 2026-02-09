@@ -65,6 +65,8 @@
 #include "types/user.hh"
 
 #include "transport/cql_protocol_extension.hh"
+#include "message/messaging_service.hh"
+#include "idl/forward_cql.dist.hh"
 #include "utils/bit_cast.hh"
 #include "utils/labels.hh"
 #include "utils/result.hh"
@@ -302,6 +304,8 @@ cql_server::cql_server(sharded<cql3::query_processor>& qp, auth::service& auth_s
         return;
     }
 
+    init_messaging_service();
+
     auto ls = {
         sm::make_counter("cql-connections", _stats.connects,
                         sm::description("Counts a number of client connections.")),
@@ -335,7 +339,9 @@ cql_server::cql_server(sharded<cql3::query_processor>& qp, auth::service& auth_s
         sm::make_gauge("requests_memory_available", [this] { return _memory_available.current(); },
                         sm::description(
                             seastar::format("Holds the amount of available memory for admitting new requests (max is {}B)."
-                                            "Zero value indicates that our bottleneck is memory and more specifically - the memory quota allocated for the \"CQL transport\" component.", _config.max_request_size)))
+                                            "Zero value indicates that our bottleneck is memory and more specifically - the memory quota allocated for the \"CQL transport\" component.", _config.max_request_size))),
+        sm::make_counter("requests_forwarded_successfully", _stats.requests_forwarded_successfully,
+                        sm::description("Counts the number of requests that were forwarded to another replica and executed successfully there.")).set_skip_when_empty(),
     };
 
     std::vector<sm::metric_definition> transport_metrics;
@@ -359,6 +365,144 @@ cql_server::cql_server(sharded<cql3::query_processor>& qp, auth::service& auth_s
 }
 
 cql_server::~cql_server() = default;
+
+future<> cql_server::stop() {
+    co_await when_all_succeed(uninit_messaging_service(), server::stop()).discard_result();
+}
+
+void cql_server::init_messaging_service() {
+    ser::forward_cql_rpc_verbs::register_forward_cql_execute(&_ms,
+        [this](const rpc::client_info& cinfo, rpc::opt_time_point timeout, unsigned shard, forward_cql_execute_request req) -> future<forward_cql_execute_response> {
+            auto src_host = cinfo.retrieve_auxiliary<locator::host_id>("host_id");
+            clogger.trace("Handling forwarded CQL request from {} on shard {}", src_host, shard);
+
+            co_return co_await container().invoke_on(shard, [src_host, req = std::move(req)] (cql_server& shard_svc) mutable -> future<forward_cql_execute_response> {
+                service::client_state cs(shard_svc._auth_service,
+                    &shard_svc._sl_controller,
+                    std::move(req.client_state));
+                tracing::trace_state_ptr trace_state_ptr;
+                if (req.trace_info) {
+                    trace_state_ptr = tracing::tracing::get_local_tracing_instance().create_session(*req.trace_info);
+                    tracing::begin(trace_state_ptr);
+                }
+                service::query_state qs(cs, trace_state_ptr, empty_service_permit());
+                tracing::trace(qs.get_trace_state(), "Handling forwarded CQL request from {} on shard {}", src_host, this_shard_id());
+
+                auto opcode = static_cast<cql_binary_opcode>(req.opcode);
+
+                // Build non-owning temporary_buffer fragments over the bytes_ostream chunks.
+                // req is passed by reference and outlives the istream, so null deleters are safe.
+                std::vector<temporary_buffer<char>> fragments;
+                for (bytes_view frag : req.request_buffer.fragments()) {
+                    fragments.emplace_back(
+                        const_cast<char*>(reinterpret_cast<const char*>(frag.data())),
+                        frag.size(),
+                        deleter{}
+                    );
+                }
+                fragmented_temporary_buffer::istream is(fragments, req.request_buffer.size());
+
+                bytes_ostream temp_linearization_buffer;
+                request_reader in(std::move(is), temp_linearization_buffer);
+
+                auto result = co_await shard_svc.process(
+                    0, // stream is only used when writing the response to the client and we handle it on the forwarding node. Here we only prepare the response body
+                    in,
+                    qs.get_client_state(),
+                    empty_service_permit(),
+                    qs.get_trace_state(),
+                    opcode,
+                    req.cql_version,
+                    req.dialect,
+                    std::move(req.cached_fn_calls),
+                    handling_node_bounce::yes);
+
+                if (auto* bounce_msg = std::get_if<cql_server::result_with_bounce>(&result)) {
+                    auto host = (*bounce_msg)->move_to_host();
+                    auto shard = (*bounce_msg)->move_to_shard().value();
+                    co_return forward_cql_execute_response{
+                        .status = forward_cql_status::redirect,
+                        .target_host = host,
+                        .target_shard = shard,
+                    };
+                }
+
+                auto& final_result = std::get<cql_server::result_with_foreign_response_ptr>(result);
+
+                if (!final_result) {
+                    co_return co_await final_result.assume_error().as_exception_future<forward_cql_execute_response>();
+                }
+
+                auto response = std::move(final_result).assume_value();
+                clogger.trace("Execution of forwarded request succeeded");
+                tracing::trace(qs.get_trace_state(), "Execution of forwarded request succeeded");
+
+                auto flags = response->flags();
+                co_return forward_cql_execute_response{
+                    .status = forward_cql_status::success,
+                    .response_body = std::move(*response.get()).extract_body(),
+                    .response_flags = flags,
+                };
+            });
+        });
+}
+
+future<> cql_server::uninit_messaging_service() {
+    co_await ser::forward_cql_rpc_verbs::unregister(&_ms);
+}
+
+future<foreign_ptr<std::unique_ptr<cql_transport::response>>>
+cql_server::forward_cql(
+    locator::host_id target_host,
+    unsigned target_shard,
+    seastar::lowres_clock::time_point timeout,
+    bool is_write,
+    uint16_t stream,
+    tracing::trace_state_ptr trace_state,
+    forward_cql_execute_request req)
+{
+    clogger.trace("Forwarding CQL request to {} shard {}", target_host, target_shard);
+    tracing::trace(trace_state, "Forwarding CQL request to {} shard {}", target_host, target_shard);
+
+    auto response_fut = co_await coroutine::as_future(ser::forward_cql_rpc_verbs::send_forward_cql_execute(&_ms, target_host, timeout, target_shard, req));
+
+    if (response_fut.failed()) {
+        std::exception_ptr eptr = response_fut.get_exception();
+        if (try_catch<seastar::rpc::timeout_error>(eptr)) {
+            clogger.debug("Forwarding CQL request to {} shard {} failed due to RPC timeout. Will return blanket timeout exception", target_host, target_shard);
+            eptr = is_write
+                ? std::make_exception_ptr(exceptions::mutation_write_timeout_exception(
+                    format("Write request timed out while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, db::write_type::SIMPLE))
+                : std::make_exception_ptr(exceptions::read_timeout_exception(
+                    format("Read request timed out while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, false));
+        } else if (try_catch<seastar::rpc::closed_error>(eptr)) {
+            clogger.debug("Forwarding CQL request to {} shard {} failed due to RPC closed connection. Will return blanket failure exception", target_host, target_shard);
+            eptr = is_write
+                ? std::make_exception_ptr(exceptions::mutation_write_failure_exception(
+                    format("Write request failed while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, 0, db::write_type::SIMPLE))
+                : std::make_exception_ptr(exceptions::read_failure_exception(
+                    format("Read request failed while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, 0, false));
+        } else {
+            clogger.debug("Forwarding CQL request to {} shard {} failed with an unexpected error: {}. Will return this error to the client", target_host, target_shard, eptr);
+        }
+        co_return coroutine::exception(std::move(eptr));
+    }
+
+    auto response = response_fut.get();
+    switch (response.status) {
+    case forward_cql_status::success:
+        _stats.requests_forwarded_successfully++;
+        clogger.trace("Forwarded CQL request executed successfully on replica: {}", target_host);
+        tracing::trace(trace_state, "Forwarded CQL request executed successfully on replica: {}", target_host);
+        co_return std::make_unique<cql_transport::response>(stream, cql_binary_opcode::RESULT, response.response_flags, std::move(response.response_body));
+    case forward_cql_status::error:
+        throw std::runtime_error("Forward CQL: error handling not yet implemented");
+    case forward_cql_status::prepared_not_found:
+        throw std::runtime_error("Forward CQL: prepared_not_found handling not yet implemented");
+    case forward_cql_status::redirect:
+        throw std::runtime_error("Forward CQL: redirect handling not yet implemented");
+    }
+}
 
 shared_ptr<generic_server::connection>
 cql_server::make_connection(socket_address server_addr, connected_socket&& fd, socket_address addr, named_semaphore& sem, semaphore_units<named_semaphore_exception_factory> initial_sem_units) {
@@ -699,27 +843,27 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         switch (client_state.get_auth_state()) {
             case auth_state::UNINITIALIZED:
                 if (cqlop != cql_binary_opcode::STARTUP && cqlop != cql_binary_opcode::OPTIONS) {
-                    return make_exception_future<result_with_foreign_response_ptr>(exceptions::protocol_exception(format("Unexpected message {:d}, expecting STARTUP or OPTIONS", int(cqlop))));
+                    return make_exception_future<process_fn_return_type>(exceptions::protocol_exception(format("Unexpected message {:d}, expecting STARTUP or OPTIONS", int(cqlop))));
                 }
                 break;
             case auth_state::AUTHENTICATION:
                 // Support both SASL auth from protocol v2 and the older style Credentials auth from v1
                 if (cqlop != cql_binary_opcode::AUTH_RESPONSE && cqlop != cql_binary_opcode::CREDENTIALS) {
-                    return make_exception_future<result_with_foreign_response_ptr>(exceptions::protocol_exception(format("Unexpected message {:d}, expecting {}", int(cqlop), "SASL_RESPONSE")));
+                    return make_exception_future<process_fn_return_type>(exceptions::protocol_exception(format("Unexpected message {:d}, expecting {}", int(cqlop), "SASL_RESPONSE")));
                 }
                 break;
             case auth_state::READY: default:
                 if (cqlop == cql_binary_opcode::STARTUP) {
-                    return make_exception_future<result_with_foreign_response_ptr>(exceptions::protocol_exception("Unexpected message STARTUP, the connection is already initialized"));
+                    return make_exception_future<process_fn_return_type>(exceptions::protocol_exception("Unexpected message STARTUP, the connection is already initialized"));
                 }
                 break;
         }
 
         tracing::set_username(trace_state, client_state.user());
 
-        auto wrap_in_foreign = [] (future<std::unique_ptr<cql_server::response>> f) {
+        auto wrap_in_foreign = [] (future<std::unique_ptr<cql_server::response>> f) -> future<process_fn_return_type> {
             return f.then([] (std::unique_ptr<cql_server::response> p) {
-                return make_ready_future<result_with_foreign_response_ptr>(make_foreign(std::move(p)));
+                return make_ready_future<process_fn_return_type>(make_foreign(std::move(p)));
             });
         };
         auto in = request_reader(std::move(fbuf), *linearization_buffer_ptr);
@@ -734,9 +878,9 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         case cql_binary_opcode::BATCH:
             return _server.process(stream, std::move(in), client_state, std::move(permit), trace_state, cqlop,
                                             _version, get_dialect());
-        default:                               return make_exception_future<result_with_foreign_response_ptr>(exceptions::protocol_exception(format("Unknown opcode {:d}", int(cqlop))));
+        default:                               return make_exception_future<process_fn_return_type>(exceptions::protocol_exception(format("Unknown opcode {:d}", int(cqlop))));
         }
-    }).then_wrapped([this, cqlop, &cql_stats, stream, &client_state, linearization_buffer = std::move(linearization_buffer), trace_state] (future<result_with_foreign_response_ptr> f) {
+    }).then_wrapped([this, cqlop, &cql_stats, stream, &client_state, linearization_buffer = std::move(linearization_buffer), trace_state] (future<process_fn_return_type> f) {
         auto stop_trace = defer([&] {
             tracing::stop_foreground(trace_state);
         });
@@ -747,7 +891,7 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
                 return make_exception_future<foreign_ptr<std::unique_ptr<cql_server::response>>>(std::move(f).get_exception());
             }
 
-            result_with_foreign_response_ptr res = f.get();
+            result_with_foreign_response_ptr res = std::get<result_with_foreign_response_ptr>(f.get());
             if (!res) {
                 return std::move(res).assume_error().as_exception_future<foreign_ptr<std::unique_ptr<cql_server::response>>>();
             }
@@ -1538,9 +1682,23 @@ process_batch_internal(service::client_state& client_state, sharded<cql3::query_
     });
 }
 
-future<cql_server::result_with_foreign_response_ptr>
+// Copy the bytes from an istream into a bytes_ostream.
+// This preserves fragmentation and avoids a single large allocation
+// and the bytes can be used in an RPC verb
+static bytes_ostream copy_istream(fragmented_temporary_buffer::istream is) {
+    bytes_ostream result;
+    auto view = is.read_view(is.bytes_left());
+    if (!view) {
+        std::rethrow_exception(view.assume_error());
+    }
+    result.write(view.assume_value());
+    return result;
+}
+
+future<cql_server::process_fn_return_type>
 cql_server::process(uint16_t stream, request_reader in, service::client_state& client_state, service_permit permit,
-        tracing::trace_state_ptr trace_state, cql_binary_opcode opcode, cql_protocol_version_type version, cql3::dialect dialect)
+        tracing::trace_state_ptr trace_state, cql_binary_opcode opcode, cql_protocol_version_type version, cql3::dialect dialect,
+        cql3::computed_function_values cached_fn_calls, handling_node_bounce bounced)
 {
     fragmented_temporary_buffer::istream is = in.get_stream();
 
@@ -1557,24 +1715,57 @@ cql_server::process(uint16_t stream, request_reader in, service::client_state& c
         }
     } (opcode);
 
+    bool init_trace = (bool)!bounced; // If the request was bounced, we already started the trace in the handler
     auto msg = co_await coroutine::try_future(process_fn(client_state, _query_processor, in, stream,
-        version, permit, trace_state, true, {}, dialect));
+        version, permit, trace_state, init_trace, {}, dialect));
     while (auto* bounce_msg = std::get_if<cql_server::result_with_bounce>(&msg)) {
         auto shard = (*bounce_msg)->move_to_shard().value();
         auto&& cached_vals = (*bounce_msg)->take_cached_pk_function_calls();
-        auto sg = _config.bounce_request_smp_service_group;
-        auto gcs = client_state.move_to_other_shard();
-        auto gt = tracing::global_trace_state_ptr(trace_state);
-        msg = co_await container().invoke_on(shard, sg, [&, stream, dialect, version] (cql_server& server) -> future<process_fn_return_type> {
-            bytes_ostream linearization_buffer;
-            request_reader in(is, linearization_buffer);
-            auto local_client_state = gcs.get();
-            auto local_trace_state = gt.get();
-            co_return co_await process_fn(local_client_state, server._query_processor, in, stream, version,
-                    /* FIXME */empty_service_permit(), std::move(local_trace_state), false, cached_vals, dialect);
-        });
+        auto target_host = (*bounce_msg)->move_to_host();
+        auto my_host_id = _query_processor.local().proxy().get_token_metadata_ptr()->get_topology().my_host_id();
+        if (target_host == my_host_id) {
+            // Shard bounce
+            auto sg = _config.bounce_request_smp_service_group;
+            auto gcs = client_state.move_to_other_shard();
+            auto gt = tracing::global_trace_state_ptr(trace_state);
+            msg = co_await container().invoke_on(shard, sg, [&, stream, dialect, version] (cql_server& server) -> future<process_fn_return_type> {
+                bytes_ostream linearization_buffer;
+                request_reader in(is, linearization_buffer);
+                auto local_client_state = gcs.get();
+                auto local_trace_state = gt.get();
+                co_return co_await process_fn(local_client_state, server._query_processor, in, stream, version,
+                        /* FIXME */empty_service_permit(), std::move(local_trace_state), false, cached_vals, dialect);
+            });
+        } else {
+            // Node bounce
+            if (bounced) {
+                // If we already bounced between nodes, return the bounce message to the caller
+                // to return a 'redirect' response to the bouncing node instead of bouncing again.
+                co_return std::move(msg);
+            }
+
+            tracing::trace(trace_state, "Forwarding to node {} shard {}", target_host, shard);
+
+            auto request_bytes = copy_istream(is);
+
+            forward_cql_execute_request req{
+                .request_buffer = std::move(request_bytes),
+                .opcode = static_cast<uint8_t>(opcode),
+                .cql_version = static_cast<uint8_t>(version),
+                .dialect = dialect,
+                .client_state = client_state,
+                .trace_info = tracing::make_trace_info(trace_state),
+                .cached_fn_calls = std::move(cached_fn_calls),
+            };
+
+            auto response = co_await forward_cql(
+                target_host, shard, (*bounce_msg)->timeout().value(), (*bounce_msg)->is_write().value(),
+                stream, trace_state, std::move(req));
+
+            co_return cql_server::result_with_foreign_response_ptr(std::move(response));
+        }
     }
-    co_return std::get<cql_server::result_with_foreign_response_ptr>(std::move(msg));
+    co_return std::move(msg);
 }
 
 cql3::dialect

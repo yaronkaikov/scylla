@@ -42,6 +42,7 @@
 #include "service/maintenance_mode.hh"
 #include "service/client_routes.hh"
 #include "utils/estimated_histogram.hh"
+#include "transport/forward.hh"
 
 namespace cql3 {
 
@@ -196,6 +197,8 @@ private:
         uint32_t requests_serving = 0;
         uint64_t requests_blocked_memory = 0;
         uint64_t requests_shed = 0;
+        // forwarding stats
+        uint64_t requests_forwarded_successfully = 0;
 
         std::unordered_map<exceptions::exception_code, uint64_t> errors;
     };
@@ -228,6 +231,7 @@ public:
             maintenance_socket_enabled used_by_maintenance_socket,
             netw::messaging_service& ms);
     ~cql_server();
+    future<> stop();
 
 public:
     using response = cql_transport::response;
@@ -343,14 +347,20 @@ private:
         friend event_notifier;
     };
 
+    using handling_node_bounce = bool_class<class handling_node_bounce_class>;
     // Helper functions to encapsulate bounce processing for query, execute and batch verbs
-    future<result_with_foreign_response_ptr>
+    future<process_fn_return_type>
     process(uint16_t stream, request_reader in, service::client_state& client_state, service_permit permit, tracing::trace_state_ptr trace_state,
-            cql_binary_opcode opcode, cql_protocol_version_type version, cql3::dialect dialect);
+            cql_binary_opcode opcode, cql_protocol_version_type version, cql3::dialect dialect, cql3::computed_function_values cached_fn_calls = {}, handling_node_bounce bounced = handling_node_bounce::no);
 
     friend class type_codec;
 
 private:
+    void init_messaging_service();
+    future<> uninit_messaging_service();
+    future<foreign_ptr<std::unique_ptr<cql_transport::response>>> forward_cql(locator::host_id target_host, unsigned target_shard, seastar::lowres_clock::time_point timeout,
+            bool is_write, uint16_t stream, tracing::trace_state_ptr trace_state, forward_cql_execute_request req);
+
     virtual shared_ptr<generic_server::connection> make_connection(socket_address server_addr, connected_socket&& fd, socket_address addr, named_semaphore& sem, semaphore_units<named_semaphore_exception_factory> initial_sem_units) override;
     scheduling_group get_scheduling_group_for_new_connection() const override {
         if (_sl_controller.has_service_level(qos::service_level_controller::driver_service_level_name)) {

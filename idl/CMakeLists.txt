@@ -69,6 +69,7 @@ set(idl_headers
   node_ops.idl.hh
   tasks.idl.hh
   client_state.idl.hh
+  forward_cql.idl.hh
   )
 
 foreach(idl_header ${idl_headers})
