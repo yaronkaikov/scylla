@@ -31,6 +31,7 @@
 #include <seastar/core/future-util.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/coroutine/as_future.hh>
+#include <seastar/coroutine/try_future.hh>
 #include <seastar/net/byteorder.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/net/byteorder.hh>
@@ -342,6 +343,9 @@ cql_server::cql_server(sharded<cql3::query_processor>& qp, auth::service& auth_s
                                             "Zero value indicates that our bottleneck is memory and more specifically - the memory quota allocated for the \"CQL transport\" component.", _config.max_request_size))),
         sm::make_counter("requests_forwarded_successfully", _stats.requests_forwarded_successfully,
                         sm::description("Counts the number of requests that were forwarded to another replica and executed successfully there.")).set_skip_when_empty(),
+
+        sm::make_counter("requests_forwarded_failed", _stats.requests_forwarded_failed,
+                        sm::description("Counts the number of requests that were forwarded to another replica but failed to execute there.")).set_skip_when_empty(),
     };
 
     std::vector<sm::metric_definition> transport_metrics;
@@ -388,67 +392,89 @@ void cql_server::init_messaging_service() {
                 service::query_state qs(cs, trace_state_ptr, empty_service_permit());
                 tracing::trace(qs.get_trace_state(), "Handling forwarded CQL request from {} on shard {}", src_host, this_shard_id());
 
-                auto opcode = static_cast<cql_binary_opcode>(req.opcode);
+                auto f = co_await coroutine::as_future(shard_svc.handle_forward_execute(qs, req));
+                if (f.failed()) {
+                    auto eptr = f.get_exception();
+                    auto response = shard_svc.handle_exception(0, eptr, qs.get_trace_state(), req.cql_version, cs);
 
-                // Build non-owning temporary_buffer fragments over the bytes_ostream chunks.
-                // req is passed by reference and outlives the istream, so null deleters are safe.
-                std::vector<temporary_buffer<char>> fragments;
-                for (bytes_view frag : req.request_buffer.fragments()) {
-                    fragments.emplace_back(
-                        const_cast<char*>(reinterpret_cast<const char*>(frag.data())),
-                        frag.size(),
-                        deleter{}
-                    );
-                }
-                fragmented_temporary_buffer::istream is(fragments, req.request_buffer.size());
+                    clogger.trace("Execution of forwarded request failed with an error");
+                    tracing::trace(qs.get_trace_state(), "Execution of forwarded request failed with an error");
 
-                bytes_ostream temp_linearization_buffer;
-                request_reader in(std::move(is), temp_linearization_buffer);
-
-                auto result = co_await shard_svc.process(
-                    0, // stream is only used when writing the response to the client and we handle it on the forwarding node. Here we only prepare the response body
-                    in,
-                    qs.get_client_state(),
-                    empty_service_permit(),
-                    qs.get_trace_state(),
-                    opcode,
-                    req.cql_version,
-                    req.dialect,
-                    std::move(req.cached_fn_calls),
-                    handling_node_bounce::yes);
-
-                if (auto* bounce_msg = std::get_if<cql_server::result_with_bounce>(&result)) {
-                    auto host = (*bounce_msg)->move_to_host();
-                    auto shard = (*bounce_msg)->move_to_shard().value();
+                    auto flags = response->flags();
                     co_return forward_cql_execute_response{
-                        .status = forward_cql_status::redirect,
-                        .target_host = host,
-                        .target_shard = shard,
+                        .status = forward_cql_status::error,
+                        .response_body = std::move(*response.get()).extract_body(),
+                        .response_flags = flags,
+                        .timeout = shard_svc.timeout_for_sleep(eptr),
                     };
                 }
-
-                auto& final_result = std::get<cql_server::result_with_foreign_response_ptr>(result);
-
-                if (!final_result) {
-                    co_return co_await final_result.assume_error().as_exception_future<forward_cql_execute_response>();
-                }
-
-                auto response = std::move(final_result).assume_value();
-                clogger.trace("Execution of forwarded request succeeded");
-                tracing::trace(qs.get_trace_state(), "Execution of forwarded request succeeded");
-
-                auto flags = response->flags();
-                co_return forward_cql_execute_response{
-                    .status = forward_cql_status::success,
-                    .response_body = std::move(*response.get()).extract_body(),
-                    .response_flags = flags,
-                };
+                co_return f.get();
             });
         });
 }
 
 future<> cql_server::uninit_messaging_service() {
     co_await ser::forward_cql_rpc_verbs::unregister(&_ms);
+}
+
+future<forward_cql_execute_response> cql_server::handle_forward_execute(
+    service::query_state& qs, forward_cql_execute_request& req)
+{
+    auto opcode = static_cast<cql_binary_opcode>(req.opcode);
+
+    // Build non-owning temporary_buffer fragments over the bytes_ostream chunks.
+    // req is passed by reference and outlives the istream, so null deleters are safe.
+    std::vector<temporary_buffer<char>> fragments;
+    for (bytes_view frag : req.request_buffer.fragments()) {
+        fragments.emplace_back(
+            const_cast<char*>(reinterpret_cast<const char*>(frag.data())),
+            frag.size(),
+            deleter{}
+        );
+    }
+    fragmented_temporary_buffer::istream is(fragments, req.request_buffer.size());
+
+    bytes_ostream temp_linearization_buffer;
+    request_reader in(std::move(is), temp_linearization_buffer);
+
+    auto result = co_await coroutine::try_future(process(
+        0, // stream is only used when writing the response to the client and we handle it on the forwarding node. Here we only prepare the response body
+        in,
+        qs.get_client_state(),
+        empty_service_permit(),
+        qs.get_trace_state(),
+        opcode,
+        req.cql_version,
+        req.dialect,
+        std::move(req.cached_fn_calls),
+        handling_node_bounce::yes));
+
+    if (auto* bounce_msg = std::get_if<cql_server::result_with_bounce>(&result)) {
+        auto host = (*bounce_msg)->move_to_host();
+        auto shard = (*bounce_msg)->move_to_shard().value();
+        co_return forward_cql_execute_response{
+            .status = forward_cql_status::redirect,
+            .target_host = host,
+            .target_shard = shard,
+        };
+    }
+
+    auto& final_result = std::get<cql_server::result_with_foreign_response_ptr>(result);
+
+    if (!final_result) {
+        co_return co_await coroutine::try_future(final_result.assume_error().as_exception_future<forward_cql_execute_response>());
+    }
+
+    auto response = std::move(final_result).assume_value();
+    clogger.trace("Execution of forwarded request succeeded");
+    tracing::trace(qs.get_trace_state(), "Execution of forwarded request succeeded");
+
+    auto flags = response->flags();
+    co_return forward_cql_execute_response{
+        .status = forward_cql_status::success,
+        .response_body = std::move(*response.get()).extract_body(),
+        .response_flags = flags,
+    };
 }
 
 future<foreign_ptr<std::unique_ptr<cql_transport::response>>>
@@ -495,8 +521,17 @@ cql_server::forward_cql(
         clogger.trace("Forwarded CQL request executed successfully on replica: {}", target_host);
         tracing::trace(trace_state, "Forwarded CQL request executed successfully on replica: {}", target_host);
         co_return std::make_unique<cql_transport::response>(stream, cql_binary_opcode::RESULT, response.response_flags, std::move(response.response_body));
-    case forward_cql_status::error:
-        throw std::runtime_error("Forward CQL: error handling not yet implemented");
+    case forward_cql_status::error: {
+        _stats.requests_forwarded_failed++;
+        clogger.trace("Forwarded CQL request failed on replica: {}", target_host);
+        tracing::trace(trace_state, "Forwarded CQL request failed on replica: {}", target_host);
+        auto result = std::make_unique<cql_transport::response>(stream, cql_binary_opcode::ERROR,
+                                                    response.response_flags, std::move(response.response_body));
+        if (response.timeout) {
+            co_return co_await sleep_until_timeout_passes(*response.timeout, std::move(result));
+        }
+        co_return std::move(result);
+    }
     case forward_cql_status::prepared_not_found:
         throw std::runtime_error("Forward CQL: prepared_not_found handling not yet implemented");
     case forward_cql_status::redirect:

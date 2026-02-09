@@ -199,6 +199,7 @@ private:
         uint64_t requests_shed = 0;
         // forwarding stats
         uint64_t requests_forwarded_successfully = 0;
+        uint64_t requests_forwarded_failed = 0;
 
         std::unordered_map<exceptions::exception_code, uint64_t> errors;
     };
@@ -358,6 +359,7 @@ private:
 private:
     void init_messaging_service();
     future<> uninit_messaging_service();
+    future<forward_cql_execute_response> handle_forward_execute(service::query_state& qs, forward_cql_execute_request& req);
     future<foreign_ptr<std::unique_ptr<cql_transport::response>>> forward_cql(locator::host_id target_host, unsigned target_shard, seastar::lowres_clock::time_point timeout,
             bool is_write, uint16_t stream, tracing::trace_state_ptr trace_state, forward_cql_execute_request req);
 
