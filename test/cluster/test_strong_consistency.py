@@ -139,9 +139,6 @@ async def test_basic_write_read(manager: ManagerClient):
 
         logger.info(f"Run INSERT statement on leader {leader_host}")
         await cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES (10, 20)", host=leader_host)
-        logger.info(f"Run INSERT statement on non-leader {non_leader_host}")
-        with pytest.raises(InvalidRequest, match="Strongly consistent writes can be executed only on the leader node"):
-            await cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES (10, 30)", host=non_leader_host)
 
         logger.info(f"Run SELECT statement on leader {leader_host}")
         rows = await cql.run_async(f"SELECT * FROM {ks}.test WHERE pk = 10;", host=leader_host)
@@ -150,12 +147,15 @@ async def test_basic_write_read(manager: ManagerClient):
         assert row.pk == 10
         assert row.c == 20
 
+        logger.info(f"Run INSERT statement on non-leader {non_leader_host}")
+        await cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES (10, 30)", host=non_leader_host)
+
         logger.info(f"Run SELECT statement on non-leader {non_leader_host}")
         rows = await cql.run_async(f"SELECT * FROM {ks}.test WHERE pk = 10;", host=non_leader_host)
         assert len(rows) == 1
         row = rows[0]
         assert row.pk == 10
-        assert row.c == 20
+        assert row.c == 30
 
         # Check that we can restart a server with an active tablets raft group
         await manager.server_restart(servers[2].server_id)
@@ -194,16 +194,8 @@ async def test_multi_shard_write_read(manager: ManagerClient):
     logger.info("Creating a strongly-consistent keyspace with 4 tablets")
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} AND tablets = {'initial': 4} AND consistency = 'local'") as ks:
         async with new_test_table(manager, ks, "pk int PRIMARY KEY, c int") as table:
-            successful_writes = 0
-            for host in hosts:
-                for j in range(50):
-                    try:
-                        await cql.run_async(f"INSERT INTO {table} (pk, c) VALUES ({j}, {j})", host=host)
-                        successful_writes += 1
-                    except InvalidRequest:
-                        # Leader might be different for this specific pk
-                        pass
-            assert successful_writes == 50, f"Expected 50 successful writes, got {successful_writes}"
+            for j in range(50):
+                await cql.run_async(f"INSERT INTO {table} (pk, c) VALUES ({j}, {j})")
 
             # Read all data
             for j in range(50):

@@ -8,10 +8,13 @@
 
 #include "modification_statement.hh"
 
+#include "db/timeout_clock.hh"
 #include "transport/messages/result_message.hh"
 #include "cql3/query_processor.hh"
 #include "service/strong_consistency/coordinator.hh"
 #include "cql3/statements/strong_consistency/statement_helpers.hh"
+#include "exceptions/exceptions.hh"
+#include "utils/error_injection.hh"
 
 namespace cql3::statements::strong_consistency {
 static logging::logger logger("sc_modification_statement");
@@ -35,6 +38,7 @@ future<shared_ptr<result_message>> modification_statement::execute_without_check
         query_processor& qp, service::query_state& qs, const query_options& options,
         std::optional<service::group0_guard> guard) const
 {
+    auto timeout = db::timeout_clock::now() + _statement->get_timeout(qs.get_client_state(), options);
     auto json_cache = base_statement::json_cache_opt{};
     const auto keys = _statement->build_partition_keys(options, json_cache);
     if (keys.size() != 1 || !query::is_single_partition(keys[0])) {
@@ -65,7 +69,8 @@ future<shared_ptr<result_message>> modification_statement::execute_without_check
 
     using namespace service::strong_consistency;
     if (const auto* redirect = get_if<need_redirect>(&mutate_result)) {
-        co_return co_await redirect_statement(qp, options, redirect->target);
+        bool is_write = true;
+        co_return co_await redirect_statement(qp, options, redirect->target, timeout, is_write);
     }
 
     co_return seastar::make_shared<result_message::void_message>();
