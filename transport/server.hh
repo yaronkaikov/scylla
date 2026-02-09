@@ -201,6 +201,7 @@ private:
         uint64_t requests_forwarded_successfully = 0;
         uint64_t requests_forwarded_failed = 0;
         uint64_t requests_forwarded_redirected = 0;
+        uint64_t requests_forwarded_prepared_not_found = 0;
 
         std::unordered_map<exceptions::exception_code, uint64_t> errors;
     };

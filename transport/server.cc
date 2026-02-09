@@ -350,6 +350,9 @@ cql_server::cql_server(sharded<cql3::query_processor>& qp, auth::service& auth_s
         sm::make_counter("requests_forwarded_redirected", _stats.requests_forwarded_redirected,
                         sm::description("Counts the number of requests that were forwarded to another replica but that replica responded with a redirect to another node."
                                             "This can happen when replica has stale information about the cluster topology or when the request is handled by a node that is not a replica for the data being accessed by the request.")).set_skip_when_empty(),
+        sm::make_counter("requests_forwarded_prepared_not_found", _stats.requests_forwarded_prepared_not_found,
+                        sm::description("Counts the number of requests that were forwarded to another replica but failed there because the statement was not prepared on the target."
+                                            "When this happens, the coordinator performs an additional remote call to prepare the statement on the replica and retries the EXECUTE request afterwards.")).set_skip_when_empty(),
     };
 
     std::vector<sm::metric_definition> transport_metrics;
@@ -399,8 +402,16 @@ void cql_server::init_messaging_service() {
                 auto f = co_await coroutine::as_future(shard_svc.handle_forward_execute(qs, req));
                 if (f.failed()) {
                     auto eptr = f.get_exception();
-                    auto response = shard_svc.handle_exception(0, eptr, qs.get_trace_state(), req.cql_version, cs);
+                    if (auto* prepared_not_found_eptr = try_catch<exceptions::prepared_query_not_found_exception>(eptr)) {
+                        clogger.trace("Prepared statement not found, returning prepared_not_found status");
+                        tracing::trace(qs.get_trace_state(), "Prepared statement not found, returning prepared_not_found status");
+                        co_return forward_cql_execute_response{
+                            .status = forward_cql_status::prepared_not_found,
+                            .prepared_id = prepared_not_found_eptr->id,
+                        };
+                    }
 
+                    auto response = shard_svc.handle_exception(0, eptr, qs.get_trace_state(), req.cql_version, cs);
                     clogger.trace("Execution of forwarded request failed with an error");
                     tracing::trace(qs.get_trace_state(), "Execution of forwarded request failed with an error");
 
@@ -414,6 +425,28 @@ void cql_server::init_messaging_service() {
                 }
                 co_return f.get();
             });
+        });
+
+    ser::forward_cql_rpc_verbs::register_forward_cql_prepare(&_ms,
+        [this](const rpc::client_info& cinfo, rpc::opt_time_point timeout, forward_cql_prepare_request req) -> future<bytes> {
+            auto src_host = cinfo.retrieve_auxiliary<locator::host_id>("host_id");
+            clogger.trace("Handling forward prepare request from {}", src_host);
+
+            service::client_state cs(_auth_service, &_sl_controller, std::move(req.client_state));
+            tracing::trace_state_ptr trace_state_ptr;
+            if (req.trace_info) {
+                trace_state_ptr = tracing::tracing::get_local_tracing_instance().create_session(*req.trace_info);
+                tracing::begin(trace_state_ptr);
+            }
+            service::query_state qs(cs, trace_state_ptr, empty_service_permit());
+
+            co_await _query_processor.invoke_on_all(
+                [&] (cql3::query_processor& qp) {
+                    return qp.prepare(req.query_string, qs.get_client_state(), req.dialect).discard_result();
+                });
+            auto prepare_id = _query_processor.local().compute_id(req.query_string, qs.get_client_state().get_raw_keyspace(), req.dialect).key();
+            clogger.trace("Successfully prepared statement {} from forward request", prepare_id);
+            co_return prepare_id;
         });
 }
 
@@ -540,8 +573,33 @@ cql_server::forward_cql(
             }
             co_return std::move(result);
         }
-        case forward_cql_status::prepared_not_found:
-            throw std::runtime_error("Forward CQL: prepared_not_found handling not yet implemented");
+        case forward_cql_status::prepared_not_found: {
+            _stats.requests_forwarded_prepared_not_found++;
+            cql3::prepared_cache_key_type cache_key(std::move(response.prepared_id), req.dialect);
+
+            auto prepared = _query_processor.local().get_prepared(cache_key);
+            if (!prepared) {
+                clogger.info("Prepared statement with cache key {} not found locally for prepare request, cannot prepare on target {}", cache_key.key(), current_host);
+                co_return coroutine::exception(std::make_exception_ptr(exceptions::prepared_query_not_found_exception(cache_key.key())));
+            }
+
+            tracing::trace(trace_state, "Prepared statement not found on target, preparing query on target node");
+            clogger.trace("Prepared statement {} not found on {}, preparing query on target node", cache_key.key(), current_host);
+
+            forward_cql_prepare_request prepare_req{
+                .query_string = prepared->statement->raw_cql_statement,
+                .client_state = req.client_state,
+                .trace_info = req.trace_info,
+                .dialect = req.dialect,
+            };
+
+            auto prepared_id = co_await ser::forward_cql_rpc_verbs::send_forward_cql_prepare(&_ms, current_host, timeout, prepare_req);
+
+            if (prepared_id != cache_key.key()) {
+                on_internal_error(clogger, format("Prepared ID returned from target node does not match local prepared ID for the same query. Local ID: {}, Target ID: {}", cache_key.key(), prepared_id));
+            }
+            continue;
+        }
         case forward_cql_status::redirect:
             _stats.requests_forwarded_redirected++;
             tracing::trace(trace_state, "Target node redirecting to {} shard {}", response.target_host, response.target_shard);

@@ -43,4 +43,11 @@ struct forward_cql_execute_response {
     std::optional<seastar::lowres_clock::time_point> timeout;
 };
 
+struct forward_cql_prepare_request {
+    sstring query_string;
+    service::forwarded_client_state client_state;
+    std::optional<tracing::trace_info> trace_info;
+    cql3::dialect dialect;
+};
+
 }
