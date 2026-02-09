@@ -7,15 +7,20 @@
 from test.pylib.manager_client import ManagerClient
 from test.pylib.util import gather_safely, wait_for
 from test.cluster.util import new_test_keyspace, new_test_table, reconnect_driver
-from test.pylib.internal_types import ServerInfo
+from test.pylib.internal_types import HostID, ServerInfo
+from cassandra import ReadTimeout, WriteTimeout
+from cassandra.cluster import ConsistencyLevel
+from cassandra.policies import FallthroughRetryPolicy
 from cassandra.protocol import InvalidRequest
-from test.pylib.tablets import get_all_tablet_replicas
+from cassandra.query import SimpleStatement, BoundStatement
+from test.pylib.tablets import get_all_tablet_replicas, get_tablet_replicas
 
 import pytest
 import logging
 import time
 import uuid
 import random
+import asyncio
 
 
 logger = logging.getLogger(__name__)
@@ -124,7 +129,7 @@ async def test_basic_write_read(manager: ManagerClient):
         raise RuntimeError(f"Can't find host for host_id {host_id}")
 
     logger.info("Creating a strongly-consistent keyspace")
-    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} AND tablets = {'initial': 1} AND consistency = 'local'") as ks:
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 2} AND tablets = {'initial': 1} AND consistency = 'local'") as ks:
         logger.info("Creating a table")
         await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, c int);")
 
@@ -132,10 +137,24 @@ async def test_basic_write_read(manager: ManagerClient):
         group_id = await get_table_raft_group_id(manager, ks, 'test')
 
         logger.info(f"Get current leader for the group {group_id}")
-        leader_host_id = await wait_for_leader(manager, servers[0], group_id)
+        try:
+            leader_host_id = await wait_for_leader(manager, servers[0], group_id)
+        except:
+            # We need to wait for leader on a replica, and first server might not be one
+            leader_host_id = await wait_for_leader(manager, servers[1], group_id)
         leader_host = host_by_host_id(leader_host_id)
-        non_leader_host = next((host_by_host_id(hid) for hid in host_ids if hid != leader_host_id), None)
-        assert non_leader_host is not None
+
+        tablet_replicas = await get_tablet_replicas(manager, servers[0], ks, "test", 0)
+        assert len(tablet_replicas) == 2
+        replica_host_ids = [replica[0] for replica in tablet_replicas]
+
+        logger.info(f"Get the non-leader replica for the group {group_id}")
+        non_leader_replica_host_id = [host_id for host_id in replica_host_ids if str(host_id) != str(leader_host_id)][0]
+        non_leader_replica_host = host_by_host_id(non_leader_replica_host_id)
+
+        logger.info(f"Get the non-replica for the group {group_id}")
+        non_replica_host_id = [host_id for host_id in host_ids if str(host_id) not in replica_host_ids][0]
+        non_replica_host = host_by_host_id(non_replica_host_id)
 
         logger.info(f"Run INSERT statement on leader {leader_host}")
         await cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES (10, 20)", host=leader_host)
@@ -147,15 +166,65 @@ async def test_basic_write_read(manager: ManagerClient):
         assert row.pk == 10
         assert row.c == 20
 
-        logger.info(f"Run INSERT statement on non-leader {non_leader_host}")
-        await cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES (10, 30)", host=non_leader_host)
+        logger.info(f"Run INSERT statement on non-leader replica {non_leader_replica_host}")
+        await cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES (10, 30)", host=non_leader_replica_host)
 
-        logger.info(f"Run SELECT statement on non-leader {non_leader_host}")
-        rows = await cql.run_async(f"SELECT * FROM {ks}.test WHERE pk = 10;", host=non_leader_host)
+        logger.info(f"Run SELECT statement on non-leader replica {non_leader_replica_host}")
+        rows = await cql.run_async(f"SELECT * FROM {ks}.test WHERE pk = 10;", host=non_leader_replica_host)
         assert len(rows) == 1
         row = rows[0]
         assert row.pk == 10
         assert row.c == 30
+
+        logger.info(f"Run INSERT statement on non-replica {non_replica_host}")
+        await cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES (10, 40)", host=non_replica_host)
+
+        logger.info(f"Run SELECT statement on non-replica {non_replica_host}")
+        rows = await cql.run_async(f"SELECT * FROM {ks}.test WHERE pk = 10;", host=non_replica_host)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.pk == 10
+        assert row.c == 40
+
+        # Test with prepared statements as well
+        insert_stmt = cql.prepare(f"INSERT INTO {ks}.test (pk, c) VALUES (?, ?)")
+        bound_insert_stmt = BoundStatement(insert_stmt, consistency_level=ConsistencyLevel.ONE)
+        select_stmt = cql.prepare(f"SELECT * FROM {ks}.test WHERE pk = ?")
+        bound_select_stmt = BoundStatement(select_stmt, consistency_level=ConsistencyLevel.ONE)
+        bound_select_stmt.bind([10])
+
+        logger.info(f"Run prepared INSERT statement on leader {leader_host}")
+        bound_insert_stmt.bind([10, 50])
+        await cql.run_async(bound_insert_stmt, host=leader_host)
+
+        logger.info(f"Run prepared SELECT statement on leader {leader_host}")
+        rows = await cql.run_async(bound_select_stmt, host=leader_host)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.pk == 10
+        assert row.c == 50
+
+        logger.info(f"Run prepared INSERT statement on non-leader replica {non_leader_replica_host}")
+        bound_insert_stmt.bind([10, 60])
+        await cql.run_async(bound_insert_stmt, host=non_leader_replica_host)
+
+        logger.info(f"Run prepared SELECT statement on non-leader replica {non_leader_replica_host}")
+        rows = await cql.run_async(bound_select_stmt, host=non_leader_replica_host)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.pk == 10
+        assert row.c == 60
+
+        logger.info(f"Run prepared INSERT statement on non-replica {non_replica_host}")
+        bound_insert_stmt.bind([10, 70])
+        await cql.run_async(bound_insert_stmt, host=non_replica_host)
+
+        logger.info(f"Run prepared SELECT statement on non-replica {non_replica_host}")
+        rows = await cql.run_async(bound_select_stmt, host=non_replica_host)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.pk == 10
+        assert row.c == 70
 
         # Check that we can restart a server with an active tablets raft group
         await manager.server_restart(servers[2].server_id)
@@ -590,3 +659,153 @@ async def test_reject_user_provided_timestamps(manager: ManagerClient):
             #     INSERT INTO ... USING TIMESTAMP st;
             #     ...
             #   APPLY BATCH
+
+async def test_forward_cql_prepared_with_bound_values(manager: ManagerClient):
+    """
+    When we prepare an statement not on the leader, we should
+    still be able to forward it to the leader with bound values.
+    In this test we prepare a statement that should be forwarded to
+    the leader (so an INSERT statement) and then execute it.
+    It should correctly insert the value.
+    Then, we execute it again and check that we used the cache
+    on the leader side and that it updated the value correctly again.
+    """
+    cmdline = [
+        '--logger-log-level', 'cql_server=trace',
+        '--experimental-features', 'strongly-consistent-tables',
+    ]
+    servers = await manager.servers_add(2, cmdline=cmdline, auto_rack_dc='dc1')
+    (cql, hosts) = await manager.get_ready_cql(servers)
+
+    ks_opts = ("WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 2} AND consistency = 'local'")
+    async with new_test_keyspace(manager, ks_opts) as ks:
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, value int") as table:
+            table_name = table.split('.')[-1]
+            group_id = await get_table_raft_group_id(manager, ks, table_name)
+            leader_host_id = await wait_for_leader(manager, servers[0], group_id)
+            non_leader_host = [host for host in hosts if str(host.host_id) != str(leader_host_id)][0]
+
+            # Prepare statement
+            stmt = cql.prepare(f"INSERT INTO {table} (pk, value) VALUES (0, ?)")
+
+            # Execute prepared INSERT once to verify results and populate the cache on the leader
+            await cql.run_async(stmt, [0], host=non_leader_host)
+            res = await cql.run_async(f"SELECT value FROM {table} WHERE pk = 0")
+            assert len(res) == 1 and res[0].value == 0
+
+            # Execute prepared INSERT again to verify that we use the cache on the leader
+            traced_execute = cql.execute(stmt, (0,), host=non_leader_host, trace=True)
+            res = await cql.run_async(f"SELECT value FROM {table} WHERE pk = 0")
+            assert len(res) == 1 and res[0].value == 0
+            trace = traced_execute.get_query_trace()
+            for event in trace.events:
+                logger.info(f"Trace event: {event.description}")
+                assert "Prepared statement not found on target" not in event.description
+
+@pytest.mark.asyncio
+async def test_forward_cql_cache_invalidation(manager: ManagerClient):
+    """
+    Test that cql forwarding works after invalidation of prepared statement cache on schema changes.
+    """
+    cmdline = [
+        '--logger-log-level', 'cql_server=trace',
+        '--experimental-features', 'strongly-consistent-tables',
+    ]
+    servers = await manager.servers_add(2, cmdline=cmdline, auto_rack_dc='dc1')
+    (cql, hosts) = await manager.get_ready_cql(servers)
+
+    ks_opts = ("WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 2} AND tablets = {'initial': 1} AND consistency = 'local'")
+    async with new_test_keyspace(manager, ks_opts) as ks:
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, value int") as table:
+            table_name = table.split('.')[-1]
+            group_id = await get_table_raft_group_id(manager, ks, table_name)
+            leader_host_id = await wait_for_leader(manager, servers[0], group_id)
+            non_leader_host = [host for host in hosts if str(host.host_id) != str(leader_host_id)][0]
+
+            insert_stmt = cql.prepare(f"INSERT INTO {table} (pk, value) VALUES (?, ?)")
+            select_stmt = cql.prepare(f"SELECT pk, value FROM {table} WHERE pk = ?")
+
+            await cql.run_async(insert_stmt, [1, 100])
+            rows = await cql.run_async(select_stmt, [1])
+            assert len(rows) == 1
+            assert rows[0].value == 100
+
+            metrics_before = await manager.metrics.query(non_leader_host.address)
+            prepared_not_found_before = metrics_before.get('scylla_transport_requests_forwarded_prepared_not_found') or 0
+
+            # Altering schema invalidates prepared statement cache
+            await cql.run_async(f"ALTER TABLE {table} ADD extra_column text")
+            await cql.run_async(insert_stmt, [2, 200], host=non_leader_host)
+            rows = await cql.run_async(select_stmt, [2], host=non_leader_host)
+            assert len(rows) == 1
+            assert rows[0].value == 200
+
+            metrics_after = await manager.metrics.query(non_leader_host.address)
+            prepared_not_found_after = metrics_after.get('scylla_transport_requests_forwarded_prepared_not_found') or 0
+            assert prepared_not_found_after > prepared_not_found_before
+
+@pytest.mark.skip_mode('release', "error injections aren't enabled in release mode")
+async def test_forward_cql_exception_passthrough(manager: ManagerClient):
+    """
+    Verify that coordinator exception returned on the target replica is correctly returned to the client.
+    """
+    cmdline = [
+        '--logger-log-level', 'cql_server=trace',
+        '--experimental-features', 'strongly-consistent-tables',
+    ]
+    servers = await manager.servers_add(3, cmdline=cmdline, auto_rack_dc='dc1')
+    (cql, hosts) = await manager.get_ready_cql(servers)
+    host_ids = await gather_safely(*[manager.get_host_id(s.server_id) for s in servers])
+
+    ks_opts = ("WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 2} AND tablets = {'initial': 1} AND consistency = 'local'")
+    async with new_test_keyspace(manager, ks_opts) as ks:
+        async with new_test_table(manager, ks, "pk int PRIMARY KEY, value int") as table:
+            table_name = table.split('.')[-1]
+            group_id = await get_table_raft_group_id(manager, ks, table_name)
+
+            logger.info(f"Get current leader for the group {group_id}")
+            try:
+                leader_host_id = await wait_for_leader(manager, servers[0], group_id)
+            except:
+                # We need to wait for leader on a replica, and first server might not be one
+                leader_host_id = await wait_for_leader(manager, servers[1], group_id)
+            leader_host = [host for host in hosts if str(host.host_id) == str(leader_host_id)][0]
+
+            tablet_replicas = await get_tablet_replicas(manager, servers[0], ks, table_name, 0)
+            assert len(tablet_replicas) == 2
+            replica_host_ids = [replica[0] for replica in tablet_replicas]
+
+            logger.info(f"Get the non-leader replica for the group {group_id}")
+            non_leader_replica_host_id = [host_id for host_id in replica_host_ids if str(host_id) != str(leader_host_id)][0]
+            non_leader_replica_host = [host for host in hosts if str(host.host_id) == str(non_leader_replica_host_id)][0]
+
+            logger.info(f"Get the non-replica for the group {group_id}")
+            non_replica_host_id = [host_id for host_id in host_ids if str(host_id) not in replica_host_ids][0]
+            non_replica_host = [host for host in hosts if str(host.host_id) == str(non_replica_host_id)][0]
+
+
+            logger.info(f"Verify that timeout on the target node is returned to the client and fail metric is incremented")
+            await manager.api.enable_injection(leader_host.address, "sc_modification_statement_timeout", one_shot=False)
+            metrics = await manager.metrics.query(non_leader_replica_host.address)
+            errors_before = metrics.get('scylla_transport_requests_forwarded_failed') or 0
+
+            with pytest.raises(WriteTimeout):
+                await cql.run_async(SimpleStatement(f"INSERT INTO {table} (pk, value) VALUES (1, 1)", retry_policy=FallthroughRetryPolicy()), host=non_leader_replica_host)
+
+            metrics = await manager.metrics.query(non_leader_replica_host.address)
+            errors_after = metrics.get('scylla_transport_requests_forwarded_failed') or 0
+            assert errors_after > errors_before
+            await manager.api.disable_injection(leader_host.address, "sc_modification_statement_timeout")
+
+            # Now test that we get correct exception if the cross-node forwarding RPC times out.
+            logger.info("Verify that timeout of the forwarding RPC is returned as the correct exception to the client")
+            await manager.api.enable_injection(leader_host.address, "wait_before_handling_forwarded_request", one_shot=False)
+            with pytest.raises(WriteTimeout):
+                await cql.run_async(SimpleStatement(f"INSERT INTO {table} (pk, value) VALUES (1, 1) USING TIMEOUT 500ms", retry_policy=FallthroughRetryPolicy()), host=non_leader_replica_host)
+
+            await manager.api.enable_injection(non_leader_replica_host.address, "wait_before_handling_forwarded_request", one_shot=False)
+            with pytest.raises(ReadTimeout):
+                await cql.run_async(SimpleStatement(f"SELECT * FROM {table} WHERE pk = 1 USING TIMEOUT 500ms", retry_policy=FallthroughRetryPolicy()), host=non_replica_host)
+
+            await manager.api.message_injection(leader_host.address, "wait_before_handling_forwarded_request")
+            await manager.api.message_injection(non_leader_replica_host.address, "wait_before_handling_forwarded_request")

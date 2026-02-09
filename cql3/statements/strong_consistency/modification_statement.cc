@@ -72,6 +72,9 @@ future<shared_ptr<result_message>> modification_statement::execute_without_check
         bool is_write = true;
         co_return co_await redirect_statement(qp, options, redirect->target, timeout, is_write);
     }
+    utils::get_local_injector().inject("sc_modification_statement_timeout", [&] {
+        throw exceptions::mutation_write_timeout_exception{"", "", options.get_consistency(), 0, 0, db::write_type::SIMPLE};
+    });
 
     co_return seastar::make_shared<result_message::void_message>();
 }

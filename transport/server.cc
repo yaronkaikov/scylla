@@ -387,6 +387,8 @@ void cql_server::init_messaging_service() {
             auto src_host = cinfo.retrieve_auxiliary<locator::host_id>("host_id");
             clogger.trace("Handling forwarded CQL request from {} on shard {}", src_host, shard);
 
+            co_await utils::get_local_injector().inject("wait_before_handling_forwarded_request", utils::wait_for_message(60s));
+
             co_return co_await container().invoke_on(shard, [src_host, req = std::move(req)] (cql_server& shard_svc) mutable -> future<forward_cql_execute_response> {
                 service::client_state cs(shard_svc._auth_service,
                     &shard_svc._sl_controller,
