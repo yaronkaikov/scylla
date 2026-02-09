@@ -346,6 +346,10 @@ cql_server::cql_server(sharded<cql3::query_processor>& qp, auth::service& auth_s
 
         sm::make_counter("requests_forwarded_failed", _stats.requests_forwarded_failed,
                         sm::description("Counts the number of requests that were forwarded to another replica but failed to execute there.")).set_skip_when_empty(),
+
+        sm::make_counter("requests_forwarded_redirected", _stats.requests_forwarded_redirected,
+                        sm::description("Counts the number of requests that were forwarded to another replica but that replica responded with a redirect to another node."
+                                            "This can happen when replica has stale information about the cluster topology or when the request is handled by a node that is not a replica for the data being accessed by the request.")).set_skip_when_empty(),
     };
 
     std::vector<sm::metric_definition> transport_metrics;
@@ -490,52 +494,62 @@ cql_server::forward_cql(
     clogger.trace("Forwarding CQL request to {} shard {}", target_host, target_shard);
     tracing::trace(trace_state, "Forwarding CQL request to {} shard {}", target_host, target_shard);
 
-    auto response_fut = co_await coroutine::as_future(ser::forward_cql_rpc_verbs::send_forward_cql_execute(&_ms, target_host, timeout, target_shard, req));
+    locator::host_id current_host = target_host;
+    unsigned current_shard = target_shard;
 
-    if (response_fut.failed()) {
-        std::exception_ptr eptr = response_fut.get_exception();
-        if (try_catch<seastar::rpc::timeout_error>(eptr)) {
-            clogger.debug("Forwarding CQL request to {} shard {} failed due to RPC timeout. Will return blanket timeout exception", target_host, target_shard);
-            eptr = is_write
-                ? std::make_exception_ptr(exceptions::mutation_write_timeout_exception(
-                    format("Write request timed out while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, db::write_type::SIMPLE))
-                : std::make_exception_ptr(exceptions::read_timeout_exception(
-                    format("Read request timed out while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, false));
-        } else if (try_catch<seastar::rpc::closed_error>(eptr)) {
-            clogger.debug("Forwarding CQL request to {} shard {} failed due to RPC closed connection. Will return blanket failure exception", target_host, target_shard);
-            eptr = is_write
-                ? std::make_exception_ptr(exceptions::mutation_write_failure_exception(
-                    format("Write request failed while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, 0, db::write_type::SIMPLE))
-                : std::make_exception_ptr(exceptions::read_failure_exception(
-                    format("Read request failed while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, 0, false));
-        } else {
-            clogger.debug("Forwarding CQL request to {} shard {} failed with an unexpected error: {}. Will return this error to the client", target_host, target_shard, eptr);
-        }
-        co_return coroutine::exception(std::move(eptr));
-    }
+    while (true) {
+        auto response_fut = co_await coroutine::as_future(ser::forward_cql_rpc_verbs::send_forward_cql_execute(&_ms, current_host, timeout, current_shard, req));
 
-    auto response = response_fut.get();
-    switch (response.status) {
-    case forward_cql_status::success:
-        _stats.requests_forwarded_successfully++;
-        clogger.trace("Forwarded CQL request executed successfully on replica: {}", target_host);
-        tracing::trace(trace_state, "Forwarded CQL request executed successfully on replica: {}", target_host);
-        co_return std::make_unique<cql_transport::response>(stream, cql_binary_opcode::RESULT, response.response_flags, std::move(response.response_body));
-    case forward_cql_status::error: {
-        _stats.requests_forwarded_failed++;
-        clogger.trace("Forwarded CQL request failed on replica: {}", target_host);
-        tracing::trace(trace_state, "Forwarded CQL request failed on replica: {}", target_host);
-        auto result = std::make_unique<cql_transport::response>(stream, cql_binary_opcode::ERROR,
-                                                    response.response_flags, std::move(response.response_body));
-        if (response.timeout) {
-            co_return co_await sleep_until_timeout_passes(*response.timeout, std::move(result));
+        if (response_fut.failed()) {
+            std::exception_ptr eptr = response_fut.get_exception();
+            if (try_catch<seastar::rpc::timeout_error>(eptr)) {
+                clogger.debug("Forwarding CQL request to {} shard {} failed due to RPC timeout. Will return blanket timeout exception", target_host, target_shard);
+                eptr = is_write
+                    ? std::make_exception_ptr(exceptions::mutation_write_timeout_exception(
+                        format("Write request timed out while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, db::write_type::SIMPLE))
+                    : std::make_exception_ptr(exceptions::read_timeout_exception(
+                        format("Read request timed out while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, false));
+            } else if (try_catch<seastar::rpc::closed_error>(eptr)) {
+                clogger.debug("Forwarding CQL request to {} shard {} failed due to RPC closed connection. Will return blanket failure exception", target_host, target_shard);
+                eptr = is_write
+                    ? std::make_exception_ptr(exceptions::mutation_write_failure_exception(
+                        format("Write request failed while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, 0, db::write_type::SIMPLE))
+                    : std::make_exception_ptr(exceptions::read_failure_exception(
+                        format("Read request failed while forwarding to {}", target_host), db::consistency_level::ONE, 0, 0, 0, false));
+            } else {
+                clogger.debug("Forwarding CQL request to {} shard {} failed with an unexpected error: {}. Will return this error to the client", target_host, target_shard, eptr);
+            }
+            co_return coroutine::exception(std::move(eptr));
         }
-        co_return std::move(result);
-    }
-    case forward_cql_status::prepared_not_found:
-        throw std::runtime_error("Forward CQL: prepared_not_found handling not yet implemented");
-    case forward_cql_status::redirect:
-        throw std::runtime_error("Forward CQL: redirect handling not yet implemented");
+
+        auto response = response_fut.get();
+        switch (response.status) {
+        case forward_cql_status::success:
+            _stats.requests_forwarded_successfully++;
+            clogger.trace("Forwarded CQL request executed successfully on replica: {}", target_host);
+            tracing::trace(trace_state, "Forwarded CQL request executed successfully on replica: {}", target_host);
+            co_return std::make_unique<cql_transport::response>(stream, cql_binary_opcode::RESULT, response.response_flags, std::move(response.response_body));
+        case forward_cql_status::error: {
+            _stats.requests_forwarded_failed++;
+            clogger.trace("Forwarded CQL request failed on replica: {}", target_host);
+            tracing::trace(trace_state, "Forwarded CQL request failed on replica: {}", target_host);
+            auto result = std::make_unique<cql_transport::response>(stream, cql_binary_opcode::ERROR,
+                                                        response.response_flags, std::move(response.response_body));
+            if (response.timeout) {
+                co_return co_await sleep_until_timeout_passes(*response.timeout, std::move(result));
+            }
+            co_return std::move(result);
+        }
+        case forward_cql_status::prepared_not_found:
+            throw std::runtime_error("Forward CQL: prepared_not_found handling not yet implemented");
+        case forward_cql_status::redirect:
+            _stats.requests_forwarded_redirected++;
+            tracing::trace(trace_state, "Target node redirecting to {} shard {}", response.target_host, response.target_shard);
+            clogger.trace("Redirect from {} to {} shard {}", current_host, response.target_host, response.target_shard);
+            current_host = response.target_host;
+            current_shard = response.target_shard;
+            continue;
+        }
     }
 }
 
