@@ -145,8 +145,8 @@ future<> transitional_authenticator::ensure_superuser_is_created() const {
     return _authenticator->ensure_superuser_is_created();
 }
 
-transitional_authorizer::transitional_authorizer(cql3::query_processor& qp, ::service::raft_group0_client& g0, ::service::migration_manager& mm)
-        : transitional_authorizer(std::make_unique<default_authorizer>(qp, g0, mm)) {
+transitional_authorizer::transitional_authorizer(cql3::query_processor& qp)
+        : transitional_authorizer(std::make_unique<default_authorizer>(qp)) {
 }
 
 transitional_authorizer::transitional_authorizer(std::unique_ptr<authorizer> a)

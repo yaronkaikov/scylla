@@ -2113,7 +2113,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             if (cfg->maintenance_socket() != "ignore") {
                 checkpoint(stop_signal, "starting maintenance auth service");
                 maintenance_auth_service.start(std::ref(qp), std::ref(group0_client), std::ref(mm_notifier),
-                        auth::make_authorizer_factory(auth::allow_all_authorizer_name, qp, group0_client, mm),
+                        auth::make_authorizer_factory(auth::allow_all_authorizer_name, qp),
                         auth::make_maintenance_socket_authenticator_factory(qp, group0_client, mm, auth_cache),
                         auth::make_maintenance_socket_role_manager_factory(qp, group0_client, mm, auth_cache),
                         maintenance_socket_enabled::yes, std::ref(auth_cache)).get();
@@ -2386,7 +2386,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             checkpoint(stop_signal, "starting auth service");
             auth_service.start(std::ref(qp), std::ref(group0_client), std::ref(mm_notifier),
-                    auth::make_authorizer_factory(cfg->authorizer(), qp, group0_client, mm),
+                    auth::make_authorizer_factory(cfg->authorizer(), qp),
                     auth::make_authenticator_factory(cfg->authenticator(), qp, group0_client, mm, auth_cache),
                     auth::make_role_manager_factory(cfg->role_manager(), qp, group0_client, mm, auth_cache),
                     maintenance_socket_enabled::no, std::ref(auth_cache)).get();

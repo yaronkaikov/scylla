@@ -209,9 +209,6 @@ future<> cache::prune_all() noexcept {
 }
 
 future<> cache::load_all() {
-    if (legacy_mode(_qp)) {
-        co_return;
-    }
     SCYLLA_ASSERT(this_shard_id() == 0);
     auto units = co_await get_units(_loading_sem, 1, _as);
 
@@ -263,9 +260,6 @@ future<> cache::gather_inheriting_roles(std::unordered_set<role_name_t>& roles, 
 }
 
 future<> cache::load_roles(std::unordered_set<role_name_t> roles) {
-    if (legacy_mode(_qp)) {
-        co_return;
-    }
     SCYLLA_ASSERT(this_shard_id() == 0);
     auto units = co_await get_units(_loading_sem, 1, _as);
 
