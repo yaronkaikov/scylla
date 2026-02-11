@@ -4893,14 +4893,6 @@ future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
             // Don't access trinfo after this.
             tm = {};
 
-            co_await utils::get_local_injector().inject("stream_sstable_files", [&] (auto& handler) -> future<> {
-                slogger.info("stream_sstable_files: waiting");
-                while (!handler.poll_for_message()) {
-                    co_await sleep_abortable(std::chrono::milliseconds(5), guard.get_abort_source());
-                }
-                slogger.info("stream_sstable_files: released");
-            });
-
             for (auto src : read_from) {
                 // Use file stream for tablet to stream data
                 auto ops_id = streaming::file_stream_id::create_random_id();
@@ -5533,10 +5525,6 @@ future<locator::load_stats> storage_service::load_stats_for_tablet_based_tables(
         }
         tls.effective_capacity = si.available + sum_tablet_sizes;
     }
-
-    utils::get_local_injector().inject("clear_tablet_stats_in_load_stats", [&] {
-        load_stats.tablet_stats.erase(this_host);
-    });
 
     co_return std::move(load_stats);
 }

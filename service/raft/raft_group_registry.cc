@@ -130,9 +130,6 @@ void raft_group_registry::init_rpc_verbs() {
                     return;
                 }
             }
-            if (utils::get_local_injector().enter("raft_drop_incoming_append_entries")) {
-                return;
-            }
 
             // lw_shared_ptr (raft::log_entry_ptr) doesn't support cross-shard ref counting (see debug_shared_ptr_counter_type),
             // so we are copying entries to this shard if it isn't equal the original one.
