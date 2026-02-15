@@ -302,11 +302,6 @@ public:
      */
     std::set<locator::host_id> get_unreachable_members() const;
 
-    /**
-     * @return a list of unreachable nodes
-     */
-    std::set<locator::host_id> get_unreachable_nodes() const;
-
     int64_t get_endpoint_downtime(locator::host_id ep) const noexcept;
 
     /**
@@ -409,8 +404,6 @@ public:
     // Must be called on shard 0
     future<> reset_endpoint_state_map();
 
-    std::vector<locator::host_id> get_endpoints() const;
-
     size_t num_endpoints() const noexcept {
         return _endpoint_state_map.size();
     }
@@ -435,12 +428,6 @@ public:
     std::optional<gms::inet_address> get_node_ip(locator::host_id host_id) const;
 
     std::optional<endpoint_state> get_state_for_version_bigger_than(locator::host_id for_endpoint, version_type version) const;
-
-    /**
-     * determine which endpoint started up earlier
-     */
-    std::strong_ordering compare_endpoint_startup(locator::host_id addr1, locator::host_id addr2) const;
-
     /**
      * Return the rpc address associated with an endpoint as a string.
      * @param endpoint The endpoint to get rpc address for
@@ -611,11 +598,6 @@ public:
     bool is_shutdown(const locator::host_id& endpoint) const;
     bool is_shutdown(const endpoint_state& eps) const;
     bool is_normal(const locator::host_id& endpoint) const;
-    bool is_left(const locator::host_id& endpoint) const;
-    // Check if a node is in NORMAL or SHUTDOWN status which means the node is
-    // part of the token ring from the gossip point of view and operates in
-    // normal status or was in normal status but is shutdown.
-    bool is_normal_ring_member(const locator::host_id& endpoint) const;
     bool is_cql_ready(const locator::host_id& endpoint) const;
     bool is_silent_shutdown_state(const endpoint_state& ep_state) const;
     void force_newer_generation();
@@ -638,7 +620,6 @@ private:
     std::set<sstring> get_supported_features(locator::host_id endpoint) const;
     locator::token_metadata_ptr get_token_metadata_ptr() const noexcept;
 public:
-    void check_knows_remote_features(std::set<std::string_view>& local_features, const std::unordered_map<locator::host_id, sstring>& loaded_peer_features) const;
     // Get features supported by all the nodes this node knows about
     std::set<sstring> get_supported_features(const std::unordered_map<locator::host_id, sstring>& loaded_peer_features, ignore_features_of_local_node ignore_local_node) const;
 private:

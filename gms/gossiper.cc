@@ -1194,17 +1194,6 @@ std::set<locator::host_id> gossiper::get_live_token_owners() const {
     return token_owners;
 }
 
-std::set<locator::host_id> gossiper::get_unreachable_nodes() const {
-    std::set<locator::host_id> unreachable_nodes;
-    auto nodes = get_token_metadata_ptr()->get_topology().get_all_host_ids();
-    for (auto& node: nodes) {
-        if (!is_alive(node)) {
-            unreachable_nodes.insert(node);
-        }
-    }
-    return unreachable_nodes;
-}
-
 // Return downtime in microseconds
 int64_t gossiper::get_endpoint_downtime(locator::host_id ep) const noexcept {
     auto it = _unreachable_endpoints.find(ep);
@@ -1453,10 +1442,6 @@ future<> gossiper::reset_endpoint_state_map() {
     });
 }
 
-std::vector<locator::host_id> gossiper::get_endpoints() const {
-    return _endpoint_state_map | std::views::keys | std::ranges::to<std::vector>();
-}
-
 stop_iteration gossiper::for_each_endpoint_state_until(std::function<stop_iteration(const endpoint_state&)> func) const {
     for (const auto& [node, eps] : _endpoint_state_map) {
         if (func(*eps) == stop_iteration::yes) {
@@ -1551,17 +1536,6 @@ std::optional<endpoint_state> gossiper::get_state_for_version_bigger_than(locato
         }
     }
     return reqd_endpoint_state;
-}
-
-std::strong_ordering gossiper::compare_endpoint_startup(locator::host_id addr1, locator::host_id addr2) const {
-    auto ep1 = get_endpoint_state_ptr(addr1);
-    auto ep2 = get_endpoint_state_ptr(addr2);
-    if (!ep1 || !ep2) {
-        auto err = format("Can not get endpoint_state for {} or {}", addr1, addr2);
-        logger.warn("{}", err);
-        throw std::runtime_error(err);
-    }
-    return ep1->get_heart_beat_state().get_generation() <=> ep2->get_heart_beat_state().get_generation();
 }
 
 sstring gossiper::get_rpc_address(const locator::host_id& endpoint) const {
@@ -1770,16 +1744,6 @@ bool gossiper::is_shutdown(const endpoint_state& eps) const {
 
 bool gossiper::is_normal(const locator::host_id& endpoint) const {
     return get_gossip_status(endpoint) == versioned_value::STATUS_NORMAL;
-}
-
-bool gossiper::is_left(const locator::host_id& endpoint) const {
-    auto status = get_gossip_status(endpoint);
-    return status == versioned_value::STATUS_LEFT || status == versioned_value::REMOVED_TOKEN;
-}
-
-bool gossiper::is_normal_ring_member(const locator::host_id& endpoint) const {
-    auto status = get_gossip_status(endpoint);
-    return status == versioned_value::STATUS_NORMAL || status == versioned_value::SHUTDOWN;
 }
 
 bool gossiper::is_silent_shutdown_state(const endpoint_state& ep_state) const{
@@ -2500,17 +2464,6 @@ std::set<sstring> gossiper::get_supported_features(const std::unordered_map<loca
     }
     common_features.erase("");
     return common_features;
-}
-
-void gossiper::check_knows_remote_features(std::set<std::string_view>& local_features, const std::unordered_map<locator::host_id, sstring>& loaded_peer_features) const {
-    auto local_endpoint = get_broadcast_address();
-    auto common_features = get_supported_features(loaded_peer_features, ignore_features_of_local_node::yes);
-    if (boost::range::includes(local_features, common_features)) {
-        logger.info("Feature check passed. Local node {}/{} features = {}, Remote common_features = {}",
-                local_endpoint, my_host_id(), local_features, common_features);
-    } else {
-        throw std::runtime_error(fmt::format("Feature check failed. This node can not join the cluster because it does not understand the feature. Local node {} features = {}, Remote common_features = {}", local_endpoint, local_features, common_features));
-    }
 }
 
 void gossiper::check_snitch_name_matches(sstring local_snitch_name) const {
