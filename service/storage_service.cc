@@ -3754,47 +3754,6 @@ future<> storage_service::removenode_with_stream(locator::host_id leaving_node,
     });
 }
 
-future<> storage_service::excise(std::unordered_set<token> tokens, inet_address endpoint_ip,
-        locator::host_id endpoint_hid, gms::permit_id pid) {
-    slogger.info("Removing tokens {} for {}", tokens, endpoint_ip);
-    // FIXME: HintedHandOffManager.instance.deleteHintsForEndpoint(endpoint);
-    co_await remove_endpoint(endpoint_ip, pid);
-    auto tmlock = std::make_optional(co_await get_token_metadata_lock());
-    auto tmptr = co_await get_mutable_token_metadata_ptr();
-    tmptr->remove_endpoint(endpoint_hid);
-    tmptr->remove_bootstrap_tokens(tokens);
-
-    co_await update_topology_change_info(tmptr, ::format("excise {}", endpoint_ip));
-    co_await replicate_to_all_cores(std::move(tmptr));
-    tmlock.reset();
-
-    co_await notify_released(endpoint_hid);
-    co_await notify_left(endpoint_ip, endpoint_hid);
-}
-
-future<> storage_service::excise(std::unordered_set<token> tokens, inet_address endpoint_ip,
-        locator::host_id endpoint_hid, int64_t expire_time, gms::permit_id pid) {
-    add_expire_time_if_found(endpoint_hid, expire_time);
-    return excise(tokens, endpoint_ip, endpoint_hid, pid);
-}
-
-future<> storage_service::leave_ring() {
-    co_await _sys_ks.local().set_bootstrap_state(db::system_keyspace::bootstrap_state::NEEDS_BOOTSTRAP);
-    co_await mutate_token_metadata([this] (mutable_token_metadata_ptr tmptr) {
-        auto endpoint = get_broadcast_address();
-        const auto my_id = tmptr->get_my_id();
-        tmptr->remove_endpoint(my_id);
-        return update_topology_change_info(std::move(tmptr), ::format("leave_ring {}/{}", endpoint, my_id));
-    });
-
-    auto expire_time = _gossiper.compute_expire_time().time_since_epoch().count();
-    co_await _gossiper.add_local_application_state(gms::application_state::STATUS,
-            versioned_value::left(co_await _sys_ks.local().get_local_tokens(), expire_time));
-    auto delay = std::max(get_ring_delay(), gms::gossiper::INTERVAL);
-    slogger.info("Announcing that I have left the ring for {}ms", delay.count());
-    co_await sleep_abortable(delay, _abort_source);
-}
-
 future<>
 storage_service::stream_ranges(std::unordered_map<sstring, std::unordered_multimap<dht::token_range, locator::host_id>> ranges_to_stream_by_keyspace) {
     auto streamer = dht::range_streamer(_db, _stream_manager, get_token_metadata_ptr(), _abort_source, get_token_metadata_ptr()->get_my_id(), _snitch.local()->get_location(), "Unbootstrap", streaming::stream_reason::decommission, null_topology_guard);
@@ -3822,14 +3781,6 @@ storage_service::stream_ranges(std::unordered_map<sstring, std::unordered_multim
         auto ep = std::current_exception();
         slogger.warn("stream_ranges failed: {}", ep);
         std::rethrow_exception(std::move(ep));
-    }
-}
-
-void storage_service::add_expire_time_if_found(locator::host_id endpoint, int64_t expire_time) {
-    if (expire_time != 0L) {
-        using clk = gms::gossiper::clk;
-        auto time = clk::time_point(clk::duration(expire_time));
-        _gossiper.add_expire_time_for_endpoint(endpoint, time);
     }
 }
 
@@ -6169,26 +6120,6 @@ storage_service::get_ranges_for_endpoint(const locator::effective_replication_ma
     return erm.get_ranges(ep);
 }
 
-// Caller is responsible to hold token_metadata valid until the returned future is resolved
-future<dht::token_range_vector>
-storage_service::get_all_ranges(const std::vector<token>& sorted_tokens) const {
-    if (sorted_tokens.empty())
-        co_return dht::token_range_vector();
-    int size = sorted_tokens.size();
-    dht::token_range_vector ranges;
-    ranges.reserve(size + 1);
-    ranges.push_back(dht::token_range::make_ending_with(interval_bound<token>(sorted_tokens[0], true)));
-    co_await coroutine::maybe_yield();
-    for (int i = 1; i < size; ++i) {
-        dht::token_range r(wrapping_interval<token>::bound(sorted_tokens[i - 1], false), wrapping_interval<token>::bound(sorted_tokens[i], true));
-        ranges.push_back(r);
-        co_await coroutine::maybe_yield();
-    }
-    ranges.push_back(dht::token_range::make_starting_with(interval_bound<token>(sorted_tokens[size-1], false)));
-
-    co_return ranges;
-}
-
 inet_address_vector_replica_set
 storage_service::get_natural_endpoints(const sstring& keyspace, const sstring& cf, const sstring& key) const {
     auto& table = _db.local().find_column_family(keyspace, cf);
@@ -6348,10 +6279,6 @@ future<> storage_service::notify_cql_change(inet_address endpoint, locator::host
 
 future<> storage_service::notify_client_routes_change(const client_routes_service::client_route_keys& client_route_keys) {
     co_await _client_routes.local().notify_client_routes_change(client_route_keys);
-}
-
-bool storage_service::is_normal_state_handled_on_boot(locator::host_id node) {
-    return _normal_state_handled_on_boot.contains(node);
 }
 
 future<bool> storage_service::is_vnodes_cleanup_allowed(sstring keyspace) {

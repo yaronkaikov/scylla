@@ -31,7 +31,6 @@
 #include <seastar/core/condition-variable.hh>
 #include "dht/token_range_endpoints.hh"
 #include "gms/application_state.hh"
-#include "gms/feature.hh"
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/gate.hh>
 #include "replica/database_fwd.hh"
@@ -217,7 +216,6 @@ private:
     using client_shutdown_hook = noncopyable_function<void()>;
     std::vector<protocol_server*> _protocol_servers;
     std::vector<std::any> _listeners;
-    gms::feature::listener_registration _workload_prioritization_registration;
     named_gate _async_gate;
 
     condition_variable _tablet_split_monitor_event;
@@ -605,19 +603,9 @@ private:
     sharded<db::view::view_building_worker>& _view_building_worker;
     bool _isolated = false;
 private:
-    future<> excise(std::unordered_set<token> tokens, inet_address endpoint_ip, locator::host_id endpoint_hid,
-            gms::permit_id);
-    future<> excise(std::unordered_set<token> tokens, inet_address endpoint_ip, locator::host_id endpoint_hid,
-            long expire_time, gms::permit_id);
 
     /** unlike excise we just need this endpoint gone without going through any notifications **/
     future<> remove_endpoint(inet_address endpoint, gms::permit_id pid);
-
-    void add_expire_time_if_found(locator::host_id endpoint, int64_t expire_time);
-
-    int64_t extract_expire_time(const std::vector<sstring>& pieces) const {
-        return std::stoll(pieces[2]);
-    }
 
     /**
      * Finds living endpoints responsible for the given ranges
@@ -654,13 +642,6 @@ public:
     future<dht::token_range_vector> get_ranges_for_endpoint(const locator::effective_replication_map& erm, const locator::host_id& ep) const;
 
     /**
-     * Get all ranges that span the ring given a set
-     * of tokens. All ranges are in sorted order of
-     * ranges.
-     * @return ranges in sorted order
-    */
-    future<dht::token_range_vector> get_all_ranges(const std::vector<token>& sorted_tokens) const;
-    /**
      * This method returns the N endpoints that are responsible for storing the
      * specified key i.e for replication.
      *
@@ -688,10 +669,6 @@ public:
     future<> decommission();
 
 private:
-    /**
-     * Broadcast leaving status and update local _token_metadata accordingly
-     */
-    future<> leave_ring();
     future<> unbootstrap();
 
 public:
@@ -822,9 +799,6 @@ public:
     future<> update_fence_version(token_metadata::version_t version);
 
 private:
-    std::unordered_set<locator::host_id> _normal_state_handled_on_boot;
-    bool is_normal_state_handled_on_boot(locator::host_id);
-
     friend class group0_state_machine;
 
 private:
