@@ -1585,15 +1585,13 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
 
     std::optional<replacement_info> ri;
     std::optional<raft_group0::replace_info> raft_replace_info;
-    auto tmlock = std::make_unique<token_metadata_lock>(co_await get_token_metadata_lock());
-    auto tmptr = co_await get_mutable_token_metadata_ptr();
     if (is_replacing()) {
         if (_sys_ks.local().bootstrap_complete()) {
             throw std::runtime_error("Cannot replace address with a node that is already bootstrapped");
         }
         ri = co_await prepare_replacement_info(initial_contact_nodes);
 
-        const auto& my_location = tmptr->get_topology().get_location();
+        const auto& my_location = _snitch.local()->get_location();
         if (my_location != ri->dc_rack) {
             auto msg = fmt::format("Cannot replace node {} with a node on a different data center or rack. Current location={}/{}, new location={}/{}",
                     ri->host_id, ri->dc_rack.dc, ri->dc_rack.rack, my_location.dc, my_location.rack);
@@ -1635,11 +1633,6 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
             throw std::runtime_error("Cannot restart with join_ring=false because the node already owns tokens");
         }
         slogger.info("Restarting a node in NORMAL status");
-        // This node must know about its chosen tokens before other nodes do
-        // since they may start sending writes to this node after it gossips status = NORMAL.
-        // Therefore we update _token_metadata now, before gossip starts.
-        tmptr->update_topology(tmptr->get_my_id(), _snitch.local()->get_location(), locator::node::state::normal);
-        co_await tmptr->update_normal_tokens(my_tokens, tmptr->get_my_id());
 
         cdc_gen_id = co_await _sys_ks.local().get_cdc_generation_id();
         if (!cdc_gen_id) {
@@ -1658,12 +1651,6 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
     // (we won't be part of the storage ring though until we add a counterId to our state, below.)
     // Seed the host ID-to-endpoint map with our own ID.
     auto local_host_id = get_token_metadata().get_my_id();
-
-    // Replicate the tokens early because once gossip runs other nodes
-    // might send reads/writes to this node. Replicate it early to make
-    // sure the tokens are valid on all the shards.
-    co_await replicate_to_all_cores(std::move(tmptr));
-    tmlock.reset();
 
     utils::get_local_injector().inject("stop_after_saving_tokens",
         [] { std::raise(SIGSTOP); });
