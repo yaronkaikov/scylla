@@ -271,7 +271,7 @@ future<> migration_manager::merge_schema_from(locator::host_id src, const utils:
         mlogger.error("Error while applying schema mutations from {}: {}", src, e);
         throw std::runtime_error(fmt::format("Error while applying schema mutations: {}", e));
     }
-    co_await db::schema_tables::merge_schema(_sys_ks, proxy.container(), ss.get()->container(), _feat, std::move(mutations));
+    co_await db::schema_tables::merge_schema(_sys_ks, proxy.container(), ss.get()->container(), std::move(mutations));
 }
 
 future<> migration_manager::reload_schema() {
@@ -281,7 +281,7 @@ future<> migration_manager::reload_schema() {
         co_return;
     }
     utils::chunked_vector<mutation> mutations;
-    co_await db::schema_tables::merge_schema(_sys_ks, _storage_proxy.container(), ss.get()->container(), _feat, std::move(mutations), true);
+    co_await db::schema_tables::merge_schema(_sys_ks, _storage_proxy.container(), ss.get()->container(), std::move(mutations), true);
 }
 
 future<> migration_notifier::on_schema_change(std::function<void(migration_listener*)> notify, std::function<std::string(std::exception_ptr)> describe_error) {

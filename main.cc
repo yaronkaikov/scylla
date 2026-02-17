@@ -1915,7 +1915,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             checkpoint(stop_signal, "initializing system schema");
             db::schema_tables::save_system_schema(qp.local()).get();
-            db::schema_tables::recalculate_schema_version(sys_ks, proxy, feature_service.local()).get();
 
             // making compaction manager api available, after system keyspace has already been established.
             api::set_server_compaction_manager(ctx, cm).get();

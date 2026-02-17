@@ -1629,8 +1629,6 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
         [] { std::raise(SIGSTOP); });
 
     auto broadcast_rpc_address = get_token_metadata_ptr()->get_topology().my_cql_address();
-    // Ensure we know our own actual Schema UUID in preparation for updates
-    co_await db::schema_tables::recalculate_schema_version(_sys_ks, proxy, _feature_service);
 
     app_states.emplace(gms::application_state::NET_VERSION, versioned_value::network_version());
     app_states.emplace(gms::application_state::HOST_ID, versioned_value::host_id(local_host_id));
@@ -1772,6 +1770,8 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
     // let it know that the bootstrap is completed as well
     co_await _sys_ks.local().set_bootstrap_state(db::system_keyspace::bootstrap_state::COMPLETED);
     set_mode(mode::NORMAL);
+    // Load schema version into the database object
+    co_await db::schema_tables::update_schema_version_and_announce(_sys_ks, proxy, co_await db::schema_tables::get_group0_schema_version(_sys_ks.local()));
 
     utils::get_local_injector().inject("stop_after_setting_mode_to_normal_raft_topology",
         [] { std::raise(SIGSTOP); });
