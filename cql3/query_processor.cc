@@ -512,6 +512,32 @@ query_processor::query_processor(service::storage_proxy& proxy, data_dictionary:
                                             "i.e. attempts to set a forbidden replication strategy in a keyspace via CREATE/ALTER KEYSPACE.")).set_skip_when_empty(),
             });
 
+    std::vector<sm::metric_definition> cql_cl_group;
+    for (auto cl = size_t(clevel::MIN_VALUE); cl <= size_t(clevel::MAX_VALUE); ++cl) {
+        cql_cl_group.push_back(
+            sm::make_counter(
+                "writes_per_consistency_level",
+                _cql_stats.writes_per_consistency_level[cl],
+                sm::description("Counts the number of writes for each consistency level."),
+                {cl_label(clevel(cl)), basic_level}).set_skip_when_empty());
+    }
+    _metrics.add_group("cql", cql_cl_group);
+
+    _metrics.add_group("cql", {
+        sm::make_counter(
+            "write_consistency_levels_disallowed_violations",
+            _cql_stats.write_consistency_levels_disallowed_violations,
+            sm::description("Counts the number of write_consistency_levels_disallowed guardrail violations, "
+                            "i.e. attempts to write with a forbidden consistency level."),
+            {basic_level}),
+        sm::make_counter(
+            "write_consistency_levels_warned_violations",
+            _cql_stats.write_consistency_levels_warned_violations,
+            sm::description("Counts the number of write_consistency_levels_warned guardrail violations, "
+                            "i.e. attempts to write with a discouraged consistency level."),
+            {basic_level}),
+    });
+
     _mnotifier.register_listener(_migration_subscriber.get());
 }
 
