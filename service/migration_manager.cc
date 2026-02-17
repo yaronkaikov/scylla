@@ -971,11 +971,8 @@ static void add_committed_by_group0_flag(utils::chunked_vector<mutation>& schema
 // Returns a future on the local application of the schema
 template<typename mutation_type>
 future<> migration_manager::announce(utils::chunked_vector<mutation> schema, group0_guard guard, std::string_view description, std::optional<raft_timeout> timeout) {
-    if (_feat.group0_schema_versioning) {
-        schema.push_back(make_group0_schema_version_mutation(_storage_proxy.data_dictionary(), guard));
-        add_committed_by_group0_flag(schema, guard);
-    }
-
+    schema.push_back(make_group0_schema_version_mutation(_storage_proxy.data_dictionary(), guard));
+    add_committed_by_group0_flag(schema, guard);
     return announce_with_raft<mutation_type>(std::move(schema), std::move(guard), std::move(description), std::move(timeout));
 }
 template
