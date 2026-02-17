@@ -583,17 +583,6 @@ public:
 
     // CDC related functions
 
-    /*
-    * Save the CDC generation ID announced by this node in persistent storage.
-    */
-    future<> update_cdc_generation_id(cdc::generation_id);
-
-    /*
-    * Read the CDC generation ID announced by this node from persistent storage.
-    * Used to initialize a restarting node.
-    */
-    future<std::optional<cdc::generation_id>> get_cdc_generation_id();
-
     future<> read_cdc_streams_state(std::optional<table_id> table, noncopyable_function<future<>(table_id, db_clock::time_point, utils::chunked_vector<cdc::stream_id>)> f);
     future<> read_cdc_streams_history(table_id table, std::optional<db_clock::time_point> from, noncopyable_function<future<>(table_id, db_clock::time_point, cdc::cdc_stream_diff)> f);
 

@@ -178,7 +178,7 @@ struct topology {
 
     // The IDs of the committed CDC generations sorted by timestamps.
     // The obsolete generations may not be in this list as they are continually deleted.
-    std::vector<cdc::generation_id_v2> committed_cdc_generations;
+    std::vector<cdc::generation_id> committed_cdc_generations;
 
     // This is the time UUID used to access the data of a new CDC generation introduced
     // e.g. when a new node bootstraps, needed in `commit_cdc_generation` transition state.
@@ -195,7 +195,7 @@ struct topology {
     std::unordered_set<utils::UUID> paused_rf_change_requests;
 
     // The IDs of the committed yet unpublished CDC generations sorted by timestamps.
-    std::vector<cdc::generation_id_v2> unpublished_cdc_generations;
+    std::vector<cdc::generation_id> unpublished_cdc_generations;
 
     // Set of features that are considered to be enabled by the cluster.
     std::set<sstring> enabled_features;

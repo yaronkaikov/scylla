@@ -407,7 +407,7 @@ generation_service::~generation_service() {
     SCYLLA_ASSERT(_stopped);
 }
 
-future<> generation_service::handle_cdc_generation(cdc::generation_id_v2 gen_id) {
+future<> generation_service::handle_cdc_generation(cdc::generation_id gen_id) {
     auto ts = get_ts(gen_id);
     if (co_await container().map_reduce(and_reducer(), [ts] (generation_service& svc) {
         return !svc._cdc_metadata.prepare(ts);
@@ -430,7 +430,7 @@ future<> generation_service::handle_cdc_generation(cdc::generation_id_v2 gen_id)
 }
 
 db_clock::time_point get_ts(const generation_id& gen_id) {
-    return std::visit([] (auto& id) { return id.ts; }, gen_id);
+    return gen_id.ts;
 }
 
 future<mutation> create_table_streams_mutation(table_id table, db_clock::time_point stream_ts, const locator::tablet_map& map, api::timestamp_type ts) {

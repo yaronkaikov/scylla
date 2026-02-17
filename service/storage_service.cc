@@ -384,7 +384,7 @@ bool storage_service::should_bootstrap() {
  * in the gossiper's local application state while this function runs.
  */
 static future<> set_gossip_tokens(gms::gossiper& g,
-        const std::unordered_set<dht::token>& tokens, std::optional<cdc::generation_id> cdc_gen_id) {
+        const std::unordered_set<dht::token>& tokens) {
     return g.add_local_application_state(std::pair(gms::application_state::STATUS, gms::versioned_value::normal(tokens)));
 }
 
@@ -827,7 +827,6 @@ future<> storage_service::topology_state_load(state_change_hint hint) {
         });
         co_await _cdc_gens.local().handle_cdc_generation(gen_id);
         if (gen_id == topology.committed_cdc_generations.back()) {
-            co_await _sys_ks.local().update_cdc_generation_id(gen_id);
             rtlogger.debug("topology_state_load: the last committed CDC generation ID: {}", gen_id);
         }
     }
@@ -1568,21 +1567,6 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
         start_hint_manager start_hm,
         gms::generation_type new_generation) {
     gms::application_state_map app_states;
-    /* The timestamp of the CDC streams generation that this node has proposed when joining.
-     * This value is nullopt only when:
-     * 1. this node is being upgraded from a non-CDC version,
-     * 2. this node is starting for the first time or restarting with CDC previously disabled,
-     *    in which case the value should become populated before we leave the join_topology procedure.
-     *
-     * Important: this variable is using only during the startup procedure. It is moved out from
-     * at the end of `join_topology`; the responsibility handling of CDC generations is passed
-     * to cdc::generation_service.
-     *
-     * DO NOT use this variable after `join_topology` (i.e. after we call `generation_service::after_join`
-     * and pass it the ownership of the timestamp.
-     */
-    std::optional<cdc::generation_id> cdc_gen_id;
-
     std::optional<replacement_info> ri;
     std::optional<raft_group0::replace_info> raft_replace_info;
     if (is_replacing()) {
@@ -1633,17 +1617,6 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
             throw std::runtime_error("Cannot restart with join_ring=false because the node already owns tokens");
         }
         slogger.info("Restarting a node in NORMAL status");
-
-        cdc_gen_id = co_await _sys_ks.local().get_cdc_generation_id();
-        if (!cdc_gen_id) {
-            // We could not have completed joining if we didn't generate and persist a CDC streams timestamp,
-            // unless we are restarting after upgrading from non-CDC supported version.
-            // In that case we won't begin a CDC generation: it should be done by one of the nodes
-            // after it learns that it everyone supports the CDC feature.
-            cdc_log.warn(
-                    "Restarting node in NORMAL status with CDC enabled, but no streams timestamp was proposed"
-                    " by this node according to its local tables. Are we upgrading from a non-CDC supported version?");
-        }
     }
 
     // have to start the gossip service before we can see any info on other nodes.  this is necessary
@@ -2733,13 +2706,8 @@ future<> storage_service::start_gossiping() {
             co_await ss._gossiper.container().invoke_on_all(&gms::gossiper::start);
             bool should_stop_gossiper = false; // undo action
             try {
-                auto cdc_gen_ts = co_await ss._sys_ks.local().get_cdc_generation_id();
-                if (!cdc_gen_ts) {
-                    cdc_log.warn("CDC generation timestamp missing when starting gossip");
-                }
                 co_await set_gossip_tokens(ss._gossiper,
-                        co_await ss._sys_ks.local().get_local_tokens(),
-                        cdc_gen_ts);
+                        co_await ss._sys_ks.local().get_local_tokens());
                 ss._gossiper.force_newer_generation();
                 co_await ss._gossiper.start_gossiping(gms::get_generation_number());
             } catch (...) {
@@ -3465,7 +3433,7 @@ future<> storage_service::raft_rebuild(utils::optional_param sdc_param) {
 }
 
 future<> storage_service::raft_check_and_repair_cdc_streams() {
-    std::optional<cdc::generation_id_v2> last_committed_gen;
+    std::optional<cdc::generation_id> last_committed_gen;
     utils::UUID request_id;
 
     while (true) {

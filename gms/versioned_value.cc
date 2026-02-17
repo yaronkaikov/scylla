@@ -35,23 +35,6 @@ sstring versioned_value::make_token_string(const std::unordered_set<dht::token>&
     return tokens.begin()->to_sstring();
 }
 
-sstring versioned_value::make_cdc_generation_id_string(std::optional<cdc::generation_id> gen_id) {
-    // We assume that the db_clock epoch is the same on all receiving nodes.
-    if (!gen_id) {
-        return "";
-    }
-
-    return std::visit(make_visitor(
-    [] (const cdc::generation_id_v1& id) -> sstring {
-        return std::to_string(id.ts.time_since_epoch().count());
-    },
-    [] (const cdc::generation_id_v2& id) {
-        // v2;<timestamp>;<uuid>
-        return format("v2;{};{}", id.ts.time_since_epoch().count(), id.id);
-    }
-    ), *gen_id);
-}
-
 std::unordered_set<dht::token> versioned_value::tokens_from_string(const sstring& s) {
     if (s.size() == 0) {
         return {}; // boost::split produces one element for empty string

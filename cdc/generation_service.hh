@@ -55,7 +55,7 @@ public:
      * and start using it for CDC log writes if it's not obsolete.
      * Precondition: the generation was committed using group 0 and locally applied.
      */
-    future<> handle_cdc_generation(cdc::generation_id_v2);
+    future<> handle_cdc_generation(cdc::generation_id);
 
     future<> load_cdc_tablet_streams(std::optional<std::unordered_set<table_id>> changed_tables);
 

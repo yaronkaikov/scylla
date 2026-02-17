@@ -127,10 +127,6 @@ public:
         return versioned_value(make_full_token_string(tokens));
     }
 
-    static versioned_value cdc_generation_id(std::optional<cdc::generation_id> gen_id) {
-        return versioned_value(make_cdc_generation_id_string(gen_id));
-    }
-
     static versioned_value removed_nonlocal(const locator::host_id& host_id, int64_t expire_time) {
         return versioned_value(sstring(REMOVED_TOKEN) + sstring(DELIMITER) + host_id.to_sstring() + sstring(DELIMITER) + to_sstring(expire_time));
     }

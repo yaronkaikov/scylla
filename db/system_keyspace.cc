@@ -1697,15 +1697,15 @@ static std::unordered_set<raft::server_id> decode_nodes_ids(const set_type_impl:
     return ids_set;
 }
 
-static cdc::generation_id_v2 decode_cdc_generation_id(const data_value& gen_id) {
+static cdc::generation_id decode_cdc_generation_id(const data_value& gen_id) {
     auto native = value_cast<tuple_type_impl::native_type>(gen_id);
     auto ts = value_cast<db_clock::time_point>(native[0]);
     auto id = value_cast<utils::UUID>(native[1]);
-    return cdc::generation_id_v2{ts, id};
+    return cdc::generation_id{ts, id};
 }
 
-static std::vector<cdc::generation_id_v2> decode_cdc_generations_ids(const set_type_impl::native_type& gen_ids) {
-    std::vector<cdc::generation_id_v2> gen_ids_list;
+static std::vector<cdc::generation_id> decode_cdc_generations_ids(const set_type_impl::native_type& gen_ids) {
+    std::vector<cdc::generation_id> gen_ids_list;
     for (auto& gen_id: gen_ids) {
         gen_ids_list.push_back(decode_cdc_generation_id(gen_id));
     }
@@ -2053,45 +2053,6 @@ future<std::unordered_set<dht::token>> system_keyspace::get_local_tokens() {
         }
         return std::move(tokens);
     });
-}
-
-future<> system_keyspace::update_cdc_generation_id(cdc::generation_id gen_id) {
-    co_await std::visit(make_visitor(
-    [this] (cdc::generation_id_v1 id) -> future<> {
-        co_await execute_cql(
-                format("INSERT INTO system.{} (key, streams_timestamp) VALUES (?, ?)", CDC_LOCAL),
-                sstring(CDC_LOCAL), id.ts);
-    },
-    [this] (cdc::generation_id_v2 id) -> future<> {
-        co_await execute_cql(
-                format("INSERT INTO system.{} (key, streams_timestamp, uuid) VALUES (?, ?, ?)", CDC_LOCAL),
-                sstring(CDC_LOCAL), id.ts, id.id);
-    }
-    ), gen_id);
-}
-
-future<std::optional<cdc::generation_id>> system_keyspace::get_cdc_generation_id() {
-    auto msg = co_await execute_cql(
-            format("SELECT streams_timestamp, uuid FROM system.{} WHERE key = ?", CDC_LOCAL),
-            sstring(CDC_LOCAL));
-
-    if (msg->empty()) {
-        co_return std::nullopt;
-    }
-
-    auto& row = msg->one();
-    if (!row.has("streams_timestamp")) {
-        // should not happen but whatever
-        co_return std::nullopt;
-    }
-
-    auto ts = row.get_as<db_clock::time_point>("streams_timestamp");
-    if (!row.has("uuid")) {
-        co_return cdc::generation_id_v1{ts};
-    }
-
-    auto id = row.get_as<utils::UUID>("uuid");
-    co_return cdc::generation_id_v2{ts, id};
 }
 
 future<> system_keyspace::read_cdc_streams_state(std::optional<table_id> table,
