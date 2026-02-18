@@ -1061,11 +1061,9 @@ future<schema_ptr> migration_manager::get_schema_for_write(table_schema_version 
         s = co_await get_schema_definition(v, dst, shard, ms, _storage_proxy);
     }
 
-    if (!s->is_synced()) {
-        // Schema is synced already (through barrier above), mark it as such.
-        mlogger.trace("Mark schema {} as synced", v);
-        co_await s->registry_entry()->maybe_sync([] { return make_ready_future<>(); });
-    }
+    // Schema is synced already (through barrier above), mark it as such.
+    mlogger.trace("Mark schema {} as synced", v);
+    s->registry_entry()->mark_synced();
     co_return s;
 }
 
