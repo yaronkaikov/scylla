@@ -8,12 +8,14 @@
 #include "service/raft/raft_group_registry.hh"
 #include "raft/raft.hh"
 #include "service/raft/raft_rpc.hh"
+#include "service/raft/raft_timeout.hh"
 #include "db/system_keyspace.hh"
 #include "message/messaging_service.hh"
 #include "gms/gossiper.hh"
 #include "gms/i_endpoint_state_change_subscriber.hh"
 #include "serializer_impl.hh"
 #include "idl/raft.dist.hh"
+#include "idl/raft_util.dist.hh"
 #include "utils/composite_abort_source.hh"
 #include "utils/error_injection.hh"
 #include <seastar/core/shared_future.hh>
@@ -207,6 +209,17 @@ void raft_group_registry::init_rpc_verbs() {
         });
     });
 
+    ser::raft_util_rpc_verbs::register_raft_read_barrier(&_ms, [this] (const rpc::client_info& cinfo, rpc::opt_time_point timeout,
+            raft::group_id gid, raft::server_id from, raft::server_id dst) -> future<> {
+        if (_my_id != dst) {
+            throw raft_destination_id_not_correct{_my_id, dst};
+        }
+        co_await container().invoke_on(shard_for_group(gid),
+                [gid, timeout] (raft_group_registry& self) -> future<> {
+            co_await self.get_server_with_timeouts(gid).read_barrier(nullptr, raft_timeout{.value = timeout});
+        });
+    });
+
     ser::raft_rpc_verbs::register_direct_fd_ping(&_ms,
             [this] (const rpc::client_info&, rpc::opt_time_point timeout, raft::server_id dst) -> future<direct_fd_ping_reply> {
 
@@ -243,7 +256,8 @@ future<> raft_group_registry::uninit_rpc_verbs() {
         ser::raft_rpc_verbs::unregister_raft_execute_read_barrier_on_leader(&_ms),
         ser::raft_rpc_verbs::unregister_raft_add_entry(&_ms),
         ser::raft_rpc_verbs::unregister_raft_modify_config(&_ms),
-        ser::raft_rpc_verbs::unregister_direct_fd_ping(&_ms)
+        ser::raft_rpc_verbs::unregister_direct_fd_ping(&_ms),
+        ser::raft_util_rpc_verbs::unregister_raft_read_barrier(&_ms)
     ).discard_result();
 }
 
@@ -340,6 +354,11 @@ raft_server_with_timeouts raft_group_registry::group0_with_timeouts() {
         on_internal_error(rslog, "group0(): _group0_id not present");
     }
     return get_server_with_timeouts(*_group0_id);
+}
+
+future<> raft_group_registry::send_raft_read_barrier(raft::group_id gid, raft::server_id dst) {
+    auto timeout = raft_ticker_type::clock::now() + std::chrono::minutes(1);
+    co_await ser::raft_util_rpc_verbs::send_raft_read_barrier(&_ms, locator::host_id{dst.uuid()}, timeout, gid, _my_id, dst);
 }
 
 future<> raft_group_registry::start_server_for_group(raft_server_for_group new_grp) {

@@ -81,6 +81,7 @@
 #include "idl/paxos.dist.hh"
 #include "idl/raft_storage.dist.hh"
 #include "idl/raft.dist.hh"
+#include "idl/raft_util.dist.hh"
 #include "idl/group0.dist.hh"
 #include "idl/replica_exception.dist.hh"
 #include "idl/per_partition_rate_limit_info.dist.hh"
@@ -113,6 +114,7 @@
 #include "idl/paxos.dist.impl.hh"
 #include "idl/raft_storage.dist.impl.hh"
 #include "idl/raft.dist.impl.hh"
+#include "idl/raft_util.dist.impl.hh"
 #include "idl/group0.dist.impl.hh"
 #include "idl/view.dist.impl.hh"
 #include "idl/replica_exception.dist.impl.hh"
@@ -687,6 +689,7 @@ static constexpr unsigned do_get_rpc_client_idx(messaging_verb verb) {
     case messaging_verb::RAFT_PULL_SNAPSHOT:
     case messaging_verb::NOTIFY_BANNED:
     case messaging_verb::DIRECT_FD_PING:
+    case messaging_verb::RAFT_READ_BARRIER:
         // See comment above `TOPOLOGY_INDEPENDENT_IDX`.
         // DO NOT put any 'hot' (e.g. data path) verbs in this group,
         // only verbs which are 'rare' and 'cheap'.
