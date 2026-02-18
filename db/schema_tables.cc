@@ -1537,54 +1537,10 @@ utils::chunked_vector<mutation> make_drop_aggregate_mutations(schema_features fe
  * Table metadata serialization/deserialization.
  */
 
-/// Returns mutations which when applied to the database will cause all schema changes
-/// which create or alter the table with a given name, made with timestamps smaller than t,
-/// have no effect. Used when overriding schema to shadow concurrent conflicting schema changes.
-/// Shouldn't be needed if schema changes are serialized with RAFT.
-static schema_mutations make_table_deleting_mutations(const sstring& ks, const sstring& table, bool is_view, api::timestamp_type t) {
-    tombstone tomb;
-
-    // Generate neutral mutations if t == api::min_timestamp
-    if (t > api::min_timestamp) {
-        tomb = tombstone(t - 1, gc_clock::now());
-    }
-
-    auto tables_m_s = is_view ? views() : tables();
-    mutation tables_m{tables_m_s, partition_key::from_singular(*tables_m_s, ks)};
-    {
-        auto ckey = clustering_key::from_singular(*tables_m_s, table);
-        tables_m.partition().apply_delete(*tables_m_s, ckey, tomb);
-    }
-
-    mutation scylla_tables_m{scylla_tables(), partition_key::from_singular(*scylla_tables(), ks)};
-    {
-        auto ckey = clustering_key::from_singular(*scylla_tables(), table);
-        scylla_tables_m.partition().apply_delete(*scylla_tables(), ckey, tomb);
-    }
-
-    auto make_drop_columns = [&] (const schema_ptr& s) {
-        mutation m{s, partition_key::from_singular(*s, ks)};
-        auto ckey = clustering_key::from_exploded(*s, {utf8_type->decompose(table)});
-        m.partition().apply_delete(*s, ckey, tomb);
-        return m;
-    };
-
-    return schema_mutations(std::move(tables_m),
-                            make_drop_columns(columns()),
-                            make_drop_columns(view_virtual_columns()),
-                            make_drop_columns(computed_columns()),
-                            mutation(indexes(), partition_key::from_singular(*indexes(), ks)),
-                            make_drop_columns(dropped_columns()),
-                            std::move(scylla_tables_m)
-    );
-}
-
 utils::chunked_vector<mutation> make_create_table_mutations(schema_ptr table, api::timestamp_type timestamp)
 {
     utils::chunked_vector<mutation> mutations;
     add_table_or_view_to_schema_mutation(table, timestamp, true, mutations);
-    make_table_deleting_mutations(table->ks_name(), table->cf_name(), table->is_view(), timestamp)
-        .copy_to(mutations);
     return mutations;
 }
 
@@ -2673,8 +2629,6 @@ utils::chunked_vector<mutation> make_create_view_mutations(lw_shared_ptr<keyspac
     // a view (see `make_update_view_mutations`); we use similarly modified timestamp here for consistency.
     add_table_or_view_to_schema_mutation(base, timestamp - 1, true, mutations);
     add_table_or_view_to_schema_mutation(view, timestamp, true, mutations);
-    make_table_deleting_mutations(view->ks_name(), view->cf_name(), view->is_view(), timestamp)
-        .copy_to(mutations);
     return mutations;
 }
 
