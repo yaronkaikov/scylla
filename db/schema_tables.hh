@@ -190,10 +190,6 @@ std::vector<table_info> all_table_infos(schema_features);
 // deletes them first, so they will be effectively overwritten.
 future<> save_system_schema(cql3::query_processor& qp);
 
-future<table_schema_version> calculate_schema_digest(sharded<service::storage_proxy>& proxy, schema_features, noncopyable_function<bool(std::string_view)> accept_keyspace);
-// Calculates schema digest for all non-system keyspaces
-future<table_schema_version> calculate_schema_digest(sharded<service::storage_proxy>& proxy, schema_features);
-
 // Must be called on shard 0.
 future<semaphore_units<>> hold_merge_lock() noexcept;
 future<> with_merge_lock(noncopyable_function<future<> ()> func);
