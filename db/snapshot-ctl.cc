@@ -11,6 +11,7 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/maybe_yield.hh>
@@ -20,7 +21,10 @@
 #include "db/snapshot/backup_task.hh"
 #include "replica/database.hh"
 #include "replica/global_table_ptr.hh"
+#include "seastar/core/on_internal_error.hh"
 #include "sstables/sstables_manager.hh"
+
+using namespace std::chrono_literals;
 
 logging::logger snap_log("snapshots");
 
@@ -34,9 +38,20 @@ snapshot_ctl::snapshot_ctl(sharded<replica::database>& db, tasks::task_manager& 
     , _storage_manager(sstm)
 {
     tm.register_module("snapshot", _task_manager_module);
+    if (this_shard_id() == 0) {
+        _garbage_collector = garbage_collector();
+    }
+}
+
+void snapshot_ctl::shutdown() noexcept {
+    snap_log.debug("Shutdown");
+    _shutdown = true;
+    _gc_cond.signal();
 }
 
 future<> snapshot_ctl::stop() {
+    shutdown();
+    co_await std::exchange(_garbage_collector, make_ready_future<>());
     co_await _ops.close();
     co_await _task_manager_module->stop();
 }
@@ -106,10 +121,14 @@ future<> snapshot_ctl::take_column_family_snapshot(sstring ks_name, std::vector<
 
 future<> snapshot_ctl::do_take_column_family_snapshot(sstring ks_name, std::vector<sstring> tables, sstring tag, snapshot_options opts) {
     co_await check_snapshot_not_exist(ks_name, tag, tables);
+    snap_log.debug("take_snapshot: tag={} keyspace={} tables={}: skip_flush={} created_at={} expires_at={}",
+            tag, ks_name, fmt::join(tables, ","),
+            opts.skip_flush, opts.created_at, opts.expires_at.value_or(gc_clock::time_point::min()));
     co_await replica::database::snapshot_tables_on_all_shards(_db, ks_name, std::move(tables), std::move(tag), opts);
 }
 
 future<> snapshot_ctl::clear_snapshot(sstring tag, std::vector<sstring> keyspace_names, sstring cf_name) {
+    snap_log.debug("clear_snapshot: tag={} keyspaces={} table={}", tag, fmt::join(keyspace_names, ","), cf_name);
     return run_snapshot_modify_operation([this, tag = std::move(tag), keyspace_names = std::move(keyspace_names), cf_name = std::move(cf_name)] {
         return _db.local().clear_snapshot(tag, keyspace_names, cf_name);
     });
@@ -119,12 +138,14 @@ future<std::unordered_map<sstring, snapshot_ctl::db_snapshot_details>>
 snapshot_ctl::get_snapshot_details() {
     using snapshot_map = std::unordered_map<sstring, db_snapshot_details>;
 
+    snap_log.debug("get_snapshot_details");
     co_return co_await run_snapshot_list_operation(coroutine::lambda([this] () -> future<snapshot_map> {
         return _db.local().get_snapshot_details();
     }));
 }
 
 future<int64_t> snapshot_ctl::true_snapshots_size() {
+    snap_log.debug("true_snapshots_size");
     co_return co_await run_snapshot_list_operation(coroutine::lambda([this] () -> future<int64_t> {
         int64_t total = 0;
         for (auto& [name, details] : co_await _db.local().get_snapshot_details()) {
@@ -185,4 +206,47 @@ future<int64_t> snapshot_ctl::true_snapshots_size(sstring ks, sstring cf) {
     }));
 }
 
+future<> snapshot_ctl::garbage_collector() {
+    return async([this] {
+        while (!_shutdown) {
+            std::optional<gc_clock::time_point> next;
+            if (!_gc_queue.empty()) {
+                std::list<gc_info> next_queue;
+                auto cur_queue = std::exchange(_gc_queue, {});
+                parallel_for_each(cur_queue, [&] (auto& i) -> future<> {
+                    if (i.expires_at <= gc_clock::now()) {
+                        snap_log.info("Garbage collecting snapshot {} of table {}.{}", i.tag, i.ks_name, i.table_name);
+                        co_await clear_snapshot(i.tag, {i.ks_name}, i.table_name);
+                    } else {
+                        if (!next || i.expires_at < *next) {
+                            next = i.expires_at;
+                        }
+                        next_queue.push_back(std::move(i));
+                    }
+                }).get();
+                _gc_queue.splice(_gc_queue.end(), next_queue);
+            }
+            auto wait_duration = next ? *next - gc_clock::now() : 3600s;
+            snap_log.debug("Garbage collection waiting for {}: queued={}", wait_duration, _gc_queue.size());
+            _gc_cond.wait(wait_duration).handle_exception_type([] (const condition_variable_timed_out&) {}).get();
+        }
+    });
 }
+
+void snapshot_ctl::schedule_garbage_collection(gc_clock::time_point when, sstring ks_name, sstring table_name, sstring tag) {
+    if (this_shard_id() != 0) {
+        on_internal_error(snap_log, "schedule_garbage_collection must be called on shard 0");
+    }
+    if (!_shutdown) {
+        snap_log.info("Scheduling garbage collection of snapshot {} of table {}.{} at {}", ks_name, table_name, tag, when);
+        _gc_queue.push_back(gc_info{
+            .expires_at = when,
+            .ks_name = std::move(ks_name),
+            .table_name = std::move(table_name),
+            .tag = std::move(tag)
+        });
+        _gc_cond.signal();
+    }
+}
+
+} // namespace db
