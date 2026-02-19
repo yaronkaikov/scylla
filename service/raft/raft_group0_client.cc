@@ -11,6 +11,7 @@
 #include <optional>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/when_any.hh>
+#include <seastar/coroutine/parallel_for_each.hh>
 #include "raft_group0_client.hh"
 #include "raft_group_registry.hh"
 
@@ -466,6 +467,29 @@ template group0_command raft_group0_client::prepare_command(write_mutations chan
 template group0_command raft_group0_client::prepare_command(broadcast_table_query change, std::string_view description);
 template group0_command raft_group0_client::prepare_command(write_mutations change, std::string_view description);
 template group0_command raft_group0_client::prepare_command(mixed_change change, group0_guard& guard, std::string_view description);
+
+future<> raft_group0_client::send_group0_read_barrier_to_live_members() {
+    auto my_id = _raft_gr.get_my_raft_id();
+    auto live_members = _gossiper.get_live_members();
+
+    logger.debug("broadcast_group0_read_barrier: sending read barrier to {} live node(s)", live_members.size());
+
+    auto gid = _raft_gr.group0_id();
+    co_await coroutine::parallel_for_each(live_members, [&] (locator::host_id host) -> future<> {
+        if (host.uuid() == my_id.uuid()) {
+            co_return; // skip self, already applied locally
+        }
+        try {
+            auto dst = raft::server_id{host.uuid()};
+            co_await _raft_gr.send_raft_read_barrier(gid, dst);
+        } catch (...) {
+            static thread_local logger::rate_limit rate_limit{std::chrono::seconds(5)};
+            logger.log(log_level::warn, rate_limit,
+                "broadcast_group0_read_barrier: failed to complete read barrier on node {}: {}",
+                host, std::current_exception());
+        }
+    });
+}
 
 group0_batch::group0_batch(::service::group0_guard&& g)
         : _guard(std::move(g)) {
