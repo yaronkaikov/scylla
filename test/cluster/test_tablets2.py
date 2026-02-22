@@ -2227,3 +2227,31 @@ async def test_split_and_intranode_synchronization(manager: ManagerClient):
             return tablet_count >= expected_tablet_count or None
         # Give enough time for split to happen in debug mode
         await wait_for(finished_splitting, time.time() + 120)
+
+@pytest.mark.asyncio
+@pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
+async def test_snapshot_ttl(manager: ManagerClient):
+    cmdline = ['--smp=1']
+
+    servers = [await manager.server_add(cmdline=cmdline)]
+    await manager.disable_tablet_balancing()
+
+    cql = manager.get_cql()
+    n_tablets = 1
+    n_partitions = 1000
+    await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
+    await manager.servers_see_each_other(servers)
+    async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}} AND tablets = {{'initial': {n_tablets}}}") as ks:
+        await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY);")
+        await asyncio.gather(*[cql.run_async(f"INSERT INTO {ks}.test (pk) VALUES ({k});") for k in range(n_partitions)])
+
+        ttl = 1
+        snapshot_name = "test_snapshot"
+        table_dir = glob.glob(os.path.join(await manager.server_get_workdir(servers[0].server_id), "data", ks, "test-*"))
+        assert len(table_dir) == 1, f"Expected single table directory, got {table_dir}"
+        snapshot_dir = os.path.join(table_dir[0], "snapshots", snapshot_name)
+        await manager.api.take_snapshot(servers[0].ip_addr, ks, snapshot_name, ttl=f"{ttl}s")
+        assert os.path.exists(snapshot_dir), "Snapshots directory does not exist"
+
+        time.sleep(ttl + 1)
+        assert not os.path.exists(snapshot_dir), "Snapshots directory still exists after TTL expiration"

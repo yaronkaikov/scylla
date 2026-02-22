@@ -180,6 +180,46 @@ std::pair<sstring, std::vector<table_info>> parse_table_infos(const http_context
     return std::make_pair(std::move(keyspace), std::move(tis));
 }
 
+std::optional<uint64_t> validate_ttl(sstring value) {
+    if (value.empty()) {
+        return std::nullopt;
+    }
+
+    char* endptr;
+    int64_t res = std::strtoll(value.c_str(), &endptr, 10);
+
+    if (res < 0) {
+        throw bad_param_exception("TTL value cannot be negative");
+    }
+
+    while (*endptr && std::isspace(*endptr)) {
+        ++endptr;
+    }
+
+    switch (*endptr) {
+    case '\0':
+    case 's':
+    case 'S':
+        break;
+    case 'm':
+    case 'M':
+        res *= 60;
+        break;
+    case 'h':
+    case 'H':
+        res *= 3600;
+        break;
+    case 'd':
+    case 'D':
+        res *= 86400;
+        break;
+    default:
+        throw bad_param_exception(fmt::format("TTL value '{}' has unsupported TTL suffix", value));
+    }
+
+    return res;
+}
+
 static ss::token_range token_range_endpoints_to_json(const dht::token_range_endpoints& d) {
     ss::token_range r;
     r.start_token = d._start_token;
@@ -2028,6 +2068,9 @@ void set_snapshot(http_context& ctx, routes& r, sharded<db::snapshot_ctl>& snap_
         db::snapshot_options opts = {
             .skip_flush = strcasecmp(sfopt.c_str(), "true") == 0,
         };
+        if (auto ttl = validate_ttl(req->get_query_param("ttl"))) {
+            opts.expires_at = opts.created_at + std::chrono::seconds(*ttl);
+        }
 
         std::vector<sstring> keynames = split(req->get_query_param("kn"), ",");
         try {
