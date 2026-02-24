@@ -1133,7 +1133,7 @@ private:
             startlog.info("Verifying that all of the keyspaces are RF-rack-valid");
             _db.local().check_rf_rack_validity(_token_metadata.local().get());
 
-            _auth_service.start(std::ref(_qp), std::ref(group0_client), std::ref(_mnotifier),
+            _auth_service.start(std::ref(_qp), std::ref(group0_client),
                     auth::make_authorizer_factory(cfg->authorizer(), _qp),
                     auth::make_authenticator_factory(cfg->authenticator(), _qp, group0_client, _mm, _auth_cache),
                     auth::make_role_manager_factory(cfg->role_manager(), _qp, group0_client, _mm, _auth_cache),

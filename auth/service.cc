@@ -73,43 +73,6 @@ static const sstring superuser_col_name("super");
 
 static logging::logger log("auth_service");
 
-class auth_migration_listener final : public ::service::migration_listener {
-public:
-    explicit auth_migration_listener() {}
-
-private:
-    void on_create_keyspace(const sstring& ks_name) override {}
-    void on_create_column_family(const sstring& ks_name, const sstring& cf_name) override {}
-    void on_create_user_type(const sstring& ks_name, const sstring& type_name) override {}
-    void on_create_function(const sstring& ks_name, const sstring& function_name) override {}
-    void on_create_aggregate(const sstring& ks_name, const sstring& aggregate_name) override {}
-    void on_create_view(const sstring& ks_name, const sstring& view_name) override {}
-
-    void on_update_keyspace(const sstring& ks_name) override {}
-    void on_update_column_family(const sstring& ks_name, const sstring& cf_name, bool) override {}
-    void on_update_user_type(const sstring& ks_name, const sstring& type_name) override {}
-    void on_update_function(const sstring& ks_name, const sstring& function_name) override {}
-    void on_update_aggregate(const sstring& ks_name, const sstring& aggregate_name) override {}
-    void on_update_view(const sstring& ks_name, const sstring& view_name, bool columns_changed) override {}
-
-    void on_drop_keyspace(const sstring& ks_name) override {
-        // In auth v2, revoke is part of schema change statement execution.
-    }
-
-    void on_drop_column_family(const sstring& ks_name, const sstring& cf_name) override {
-        // In auth v2, revoke is part of schema change statement execution.
-    }
-
-    void on_drop_user_type(const sstring& ks_name, const sstring& type_name) override {}
-    void on_drop_function(const sstring& ks_name, const sstring& function_name) override {
-        // In auth v2, revoke is part of schema change statement execution.
-    }
-    void on_drop_aggregate(const sstring& ks_name, const sstring& aggregate_name) override {
-        // In auth v2, revoke is part of schema change statement execution.
-    }
-    void on_drop_view(const sstring& ks_name, const sstring& view_name) override {}
-};
-
 static future<> validate_role_exists(const service& ser, std::string_view role_name) {
     return ser.underlying_role_manager().exists(role_name).then([role_name](bool exists) {
         if (!exists) {
@@ -122,7 +85,6 @@ service::service(
         cache& cache,
         cql3::query_processor& qp,
         ::service::raft_group0_client& g0,
-        ::service::migration_notifier& mn,
         std::unique_ptr<authorizer> z,
         std::unique_ptr<authenticator> a,
         std::unique_ptr<role_manager> r,
@@ -130,17 +92,14 @@ service::service(
             : _cache(cache)
             , _qp(qp)
             , _group0_client(g0)
-            , _mnotifier(mn)
             , _authorizer(std::move(z))
             , _authenticator(std::move(a))
             , _role_manager(std::move(r))
-            , _migration_listener(std::make_unique<auth_migration_listener>())
             , _used_by_maintenance_socket(used_by_maintenance_socket) {}
 
 service::service(
         cql3::query_processor& qp,
         ::service::raft_group0_client& g0,
-        ::service::migration_notifier& mn,
         authorizer_factory authorizer_factory,
         authenticator_factory authenticator_factory,
         role_manager_factory role_manager_factory,
@@ -150,7 +109,6 @@ service::service(
                       cache,
                       qp,
                       g0,
-                      mn,
                       authorizer_factory(),
                       authenticator_factory(),
                       role_manager_factory(),
@@ -215,22 +173,12 @@ future<> service::start(::service::migration_manager& mm, db::system_keyspace& s
                 &service::get_uncached_permissions,
                 this, std::placeholders::_1, std::placeholders::_2));
     }
-    co_await once_among_shards([this] {
-        _mnotifier.register_listener(_migration_listener.get());
-        return make_ready_future<>();
-    });
 }
 
 future<> service::stop() {
     _as.request_abort();
-    // Only one of the shards has the listener registered, but let's try to
-    // unregister on each one just to make sure.
-    return _mnotifier.unregister_listener(_migration_listener.get()).then([this] {
-        _cache.set_permission_loader(nullptr);
-        return make_ready_future<>();
-    }).then([this] {
-        return when_all_succeed(_role_manager->stop(), _authorizer->stop(), _authenticator->stop()).discard_result();
-    });
+    _cache.set_permission_loader(nullptr);
+    return when_all_succeed(_role_manager->stop(), _authorizer->stop(), _authenticator->stop()).discard_result();
 }
 
 future<> service::ensure_superuser_is_created() {

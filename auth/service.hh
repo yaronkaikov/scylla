@@ -36,8 +36,6 @@ class query_processor;
 
 namespace service {
 class migration_manager;
-class migration_notifier;
-class migration_listener;
 }
 
 namespace auth {
@@ -79,16 +77,11 @@ class service final : public seastar::peering_sharded_service<service> {
 
     ::service::raft_group0_client& _group0_client;
 
-    ::service::migration_notifier& _mnotifier;
-
     authorizer::ptr_type _authorizer;
 
     authenticator::ptr_type _authenticator;
 
     role_manager::ptr_type _role_manager;
-
-    // Only one of these should be registered, so we end up with some unused instances. Not the end of the world.
-    std::unique_ptr<::service::migration_listener> _migration_listener;
 
     maintenance_socket_enabled _used_by_maintenance_socket;
 
@@ -99,7 +92,6 @@ public:
             cache& cache,
             cql3::query_processor&,
             ::service::raft_group0_client&,
-            ::service::migration_notifier&,
             std::unique_ptr<authorizer>,
             std::unique_ptr<authenticator>,
             std::unique_ptr<role_manager>,
@@ -113,7 +105,6 @@ public:
     service(
             cql3::query_processor&,
             ::service::raft_group0_client&,
-            ::service::migration_notifier&,
             authorizer_factory,
             authenticator_factory,
             role_manager_factory,
