@@ -28,7 +28,6 @@
 #include <vector>
 
 class canonical_mutation;
-class frozen_mutation;
 namespace cql3 {
 namespace functions { class user_function; class user_aggregate; }
 }
@@ -37,8 +36,6 @@ namespace netw { class messaging_service; }
 namespace gms {
 
 class gossiper;
-enum class application_state;
-class versioned_value;
 
 }
 
