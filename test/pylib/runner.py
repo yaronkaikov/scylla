@@ -19,12 +19,13 @@ from itertools import chain, count, product
 from functools import cache, cached_property
 from pathlib import Path
 from random import randint
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import pytest
 import xdist
 import yaml
 from _pytest.junitxml import xml_key
+
 
 from test import ALL_MODES, DEBUG_MODES, TEST_RUNNER, TOP_SRC_DIR, TESTPY_PREPARED_ENVIRONMENT, HOST_ID
 from test.pylib.scylla_cluster import merge_cmdline_options
@@ -36,7 +37,7 @@ from test.pylib.suite.base import (
     prepare_environment,
     init_testsuite_globals,
 )
-from test.pylib.util import get_modes_to_run
+from test.pylib.util import get_modes_to_run, scale_timeout_by_mode
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -151,6 +152,14 @@ def build_mode(request: pytest.FixtureRequest) -> str:
     if params_stash is None:
         return request.config.build_modes[0]
     return params_stash[BUILD_MODE]
+
+
+@pytest.fixture(scope=testpy_test_fixture_scope)
+def scale_timeout(build_mode: str) -> Callable[[int | float], int | float]:
+    def scale_timeout_inner(timeout: int | float) -> int | float:
+        return scale_timeout_by_mode(build_mode, timeout)
+
+    return scale_timeout_inner
 
 
 @pytest.fixture(scope=testpy_test_fixture_scope)
