@@ -889,7 +889,7 @@ select_statement::execute_without_checking_exception_message_non_aggregate_unpag
     auto timeout = db::timeout_clock::now() + get_timeout(state.get_client_state(), options);
     if (needs_post_query_ordering() && _limit) {
         return do_with(std::forward<dht::partition_range_vector>(partition_ranges), [this, &qp, &state, &options, cmd, timeout, cas_shard = std::move(cas_shard)](auto& prs) {
-            SCYLLA_ASSERT(cmd->partition_limit == query::max_partitions);
+            throwing_assert(cmd->partition_limit == query::max_partitions);
             query::result_merger merger(cmd->get_row_limit() * prs.size(), query::max_partitions);
             return utils::result_map_reduce(prs.begin(), prs.end(), [this, &qp, &state, &options, cmd, timeout, cas_shard = std::move(cas_shard)] (auto& pr) {
                 dht::partition_range_vector prange { pr };
@@ -1085,7 +1085,7 @@ view_indexed_table_select_statement::view_indexed_table_select_statement(schema_
     , _used_index_restrictions(std::move(used_index_restrictions))
     , _view_schema(view_schema)
 {
-    SCYLLA_ASSERT(_view_schema);
+    throwing_assert(_view_schema);
     if (_index.metadata().local()) {
         _get_partition_ranges_for_posting_list = [this] (const query_options& options) { return get_partition_ranges_for_local_index_posting_list(options); };
         _get_partition_slice_for_posting_list = [this] (const query_options& options) { return get_partition_slice_for_local_index_posting_list(options); };
@@ -1203,7 +1203,7 @@ view_indexed_table_select_statement::actually_do_execute(query_processor& qp,
             ? source_selector::INTERNAL : source_selector::USER;
     ++_stats.query_cnt(src_sel, _ks_sel, cond_selector::NO_CONDITIONS, statement_type::SELECT);
 
-    SCYLLA_ASSERT(_restrictions->uses_secondary_indexing());
+    throwing_assert(_restrictions->uses_secondary_indexing());
 
     _stats.unpaged_select_queries(_ks_sel) += options.get_page_size() <= 0;
 
@@ -2240,8 +2240,8 @@ future<::shared_ptr<cql_transport::messages::result_message>> vector_indexed_tab
 namespace raw {
 
 static void validate_attrs(const cql3::attributes::raw& attrs) {
-    SCYLLA_ASSERT(!attrs.timestamp.has_value());
-    SCYLLA_ASSERT(!attrs.time_to_live.has_value());
+    throwing_assert(!attrs.timestamp.has_value());
+    throwing_assert(!attrs.time_to_live.has_value());
 }
 
 audit::statement_category select_statement::category() const {
@@ -2406,7 +2406,7 @@ std::unique_ptr<prepared_statement> select_statement::prepare(data_dictionary::d
         std::visit([&](auto&& ordering) {
             using T = std::decay_t<decltype(ordering)>;
             if constexpr (!std::is_same_v<T, select_statement::ann_vector>) {
-                SCYLLA_ASSERT(!for_view);
+                throwing_assert(!for_view);
                 verify_ordering_is_allowed(*_parameters, *restrictions);
                 prepared_orderings_type prepared_orderings = prepare_orderings(*schema);
                 verify_ordering_is_valid(prepared_orderings, *schema, *restrictions);
@@ -2676,7 +2676,7 @@ select_statement::prepared_orderings_type select_statement::prepare_orderings(co
 // Then specifying ascending order would cause the results of this column to be reverse in comparison to a standard select.
 static bool are_column_select_results_reversed(const column_definition& column, select_statement::ordering_type column_ordering) {
     auto ordering = std::get_if<select_statement::ordering>(&column_ordering);
-    SCYLLA_ASSERT(ordering);
+    throwing_assert(ordering);
 
     if (*ordering == select_statement::ordering::ascending) {
         return column.type->is_reversed();

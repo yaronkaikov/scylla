@@ -368,7 +368,7 @@ std::pair<schema_ptr, std::vector<view_ptr>> alter_table_statement::prepare_sche
 
     switch (_type) {
     case alter_table_statement::type::add:
-        SCYLLA_ASSERT(_column_changes.size());
+        throwing_assert(_column_changes.size());
         if (s->is_dense()) {
             throw exceptions::invalid_request_exception("Cannot add new column to a COMPACT STORAGE table");
         }
@@ -376,12 +376,12 @@ std::pair<schema_ptr, std::vector<view_ptr>> alter_table_statement::prepare_sche
         break;
 
     case alter_table_statement::type::alter:
-        SCYLLA_ASSERT(_column_changes.size() == 1);
+        throwing_assert(_column_changes.size() == 1);
         invoke_column_change_fn(std::mem_fn(&alter_table_statement::alter_column));
         break;
 
     case alter_table_statement::type::drop:
-        SCYLLA_ASSERT(_column_changes.size());
+        throwing_assert(_column_changes.size());
         if (!s->is_cql3_table()) {
             throw exceptions::invalid_request_exception("Cannot drop columns from a non-CQL3 table");
         }
