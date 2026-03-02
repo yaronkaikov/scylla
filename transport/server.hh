@@ -351,23 +351,6 @@ private:
     process(uint16_t stream, request_reader in, service::client_state& client_state, service_permit permit, tracing::trace_state_ptr trace_state,
             cql_binary_opcode opcode, cql_protocol_version_type version, cql3::dialect dialect);
 
-    template <typename Process>
-        requires std::is_invocable_r_v<future<cql_server::process_fn_return_type>,
-                                        Process,
-                                        service::client_state&,
-                                        sharded<cql3::query_processor>&,
-                                        request_reader,
-                                        uint16_t,
-                                        cql_protocol_version_type,
-                                        service_permit,
-                                        tracing::trace_state_ptr,
-                                        bool,
-                                        cql3::computed_function_values,
-                                        cql3::dialect>
-    future<process_fn_return_type>
-    process_on_shard(shard_id shard, uint16_t stream, fragmented_temporary_buffer::istream is, service::client_state& cs,
-            tracing::trace_state_ptr trace_state, cql3::dialect dialect, cql3::computed_function_values&& cached_vals, Process process_fn, cql_protocol_version_type version);
-
     friend class type_codec;
 
 private:

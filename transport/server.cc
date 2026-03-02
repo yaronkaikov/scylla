@@ -1231,37 +1231,6 @@ std::unique_ptr<cql_server::response>
 make_result(int16_t stream, messages::result_message& msg, const tracing::trace_state_ptr& tr_state,
         cql_protocol_version_type version, cql_metadata_id_wrapper&& metadata_id, bool skip_metadata = false);
 
-template <typename Process>
-    requires std::is_invocable_r_v<future<cql_server::process_fn_return_type>,
-                                   Process,
-                                   service::client_state&,
-                                   sharded<cql3::query_processor>&,
-                                   request_reader,
-                                   uint16_t,
-                                   cql_protocol_version_type,
-                                   service_permit,
-                                   tracing::trace_state_ptr,
-                                   bool,
-                                   cql3::computed_function_values,
-                                   cql3::dialect>
-future<cql_server::process_fn_return_type>
-cql_server::process_on_shard(shard_id shard, uint16_t stream, fragmented_temporary_buffer::istream is, service::client_state& cs,
-                tracing::trace_state_ptr trace_state, cql3::dialect dialect, cql3::computed_function_values&& cached_vals, Process process_fn,
-                cql_protocol_version_type version)
-{
-    auto sg = _config.bounce_request_smp_service_group;
-    auto gcs = cs.move_to_other_shard();
-    auto gt = tracing::global_trace_state_ptr(std::move(trace_state));
-    co_return co_await container().invoke_on(shard, sg, [&, stream, dialect, version] (cql_server& server) -> future<process_fn_return_type> {
-        bytes_ostream linearization_buffer;
-        request_reader in(is, linearization_buffer);
-        auto client_state = gcs.get();
-        auto trace_state = gt.get();
-        co_return co_await process_fn(client_state, server._query_processor, in, stream, version,
-                /* FIXME */empty_service_permit(), std::move(trace_state), false, cached_vals, dialect);
-    });
-}
-
 static inline cql_server::result_with_foreign_response_ptr convert_error_message_to_coordinator_result(messages::result_message* msg) {
     return std::move(*dynamic_cast<messages::result_message::exception*>(msg)).get_exception();
 }
@@ -1603,7 +1572,17 @@ cql_server::process(uint16_t stream, request_reader in, service::client_state& c
     while (auto* bounce_msg = std::get_if<cql_server::result_with_bounce>(&msg)) {
         auto shard = (*bounce_msg)->move_to_shard().value();
         auto&& cached_vals = (*bounce_msg)->take_cached_pk_function_calls();
-        msg = co_await process_on_shard(shard, stream, is, client_state, trace_state, dialect, std::move(cached_vals), process_fn, version);
+        auto sg = _config.bounce_request_smp_service_group;
+        auto gcs = client_state.move_to_other_shard();
+        auto gt = tracing::global_trace_state_ptr(trace_state);
+        msg = co_await container().invoke_on(shard, sg, [&, stream, dialect, version] (cql_server& server) -> future<process_fn_return_type> {
+            bytes_ostream linearization_buffer;
+            request_reader in(is, linearization_buffer);
+            auto local_client_state = gcs.get();
+            auto local_trace_state = gt.get();
+            co_return co_await process_fn(local_client_state, server._query_processor, in, stream, version,
+                    /* FIXME */empty_service_permit(), std::move(local_trace_state), false, cached_vals, dialect);
+        });
     }
     co_return std::get<cql_server::result_with_foreign_response_ptr>(std::move(msg));
 }
