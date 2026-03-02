@@ -124,7 +124,7 @@ class cql3_type::raw_collection : public raw {
         } else if (_kind == abstract_type::kind::map) {
             return format("{}map<{}, {}>{}", start, _keys, _values, end);
         }
-        abort();
+        throwing_assert(0 && "invalid raw_collection kind");
     }
 public:
     raw_collection(const abstract_type::kind kind, shared_ptr<raw> keys, shared_ptr<raw> values)
@@ -198,7 +198,7 @@ private:
                                                          _values->prepare_internal(keyspace, user_types).get_type(),
                                                          !is_frozen()));
         }
-        abort();
+        throwing_assert(0 && "do_prepare invalid kind");
     }
 };
 

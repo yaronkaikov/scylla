@@ -151,7 +151,7 @@ std::unique_ptr<prepared_statement>
 create_table_statement::prepare(data_dictionary::database db, cql_stats& stats) {
     // Cannot happen; create_table_statement is never instantiated as a raw statement
     // (instead we instantiate create_table_statement::raw_statement)
-    abort();
+    throwing_assert(0 && "create_table_statement::prepare");
 }
 
 future<> create_table_statement::grant_permissions_to_creator(const service::client_state& cs, service::group0_batch& mc) const {
