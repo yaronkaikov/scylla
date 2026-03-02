@@ -16,8 +16,10 @@ import pytest
 import socket
 import ssl
 import struct
+import time
 
 from test.pylib.manager_client import ManagerClient
+from test.pylib.util import wait_for
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +271,19 @@ async def send_cql_with_proxy_header_tls(
             sock.close()
 
 
+async def wait_for_results(cql, query: str, expected_count: int, timeout: float = 30.0):
+    """
+    Waits until `expected_count` rows are returned by the given CQL query, or until timeout.
+    """
+
+    async def check_clients():
+        rows = list(await cql.run_async(query))
+        if len(rows) >= expected_count:
+            return rows
+        return None
+
+    return await wait_for(check_clients, time.time() + timeout, period=0.1)
+
 # Shared server configuration for all tests
 # We configure explicit SSL ports to keep the standard ports unencrypted
 # so the Python driver can connect without TLS.
@@ -368,9 +383,11 @@ async def test_proxy_protocol_shard_aware(proxy_server):
             await do_cql_handshake(reader, writer)
 
         # Now query system.clients to verify shard assignments
-        rows = list(cql.execute(
-            f"SELECT address, port, shard_id FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING"
-        ))
+        rows = await wait_for_results(
+            cql,
+            f"SELECT address, port, shard_id FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING",
+            expected_count=num_shards,
+        )
 
         # Build a map of port -> shard_id from the results
         port_to_shard = {row.port: row.shard_id for row in rows}
@@ -446,9 +463,11 @@ async def test_proxy_protocol_port_preserved_in_system_clients(proxy_server):
 
         # Now query system.clients using the driver to see our connection
         cql = manager.get_cql()
-        rows = list(cql.execute(
-            f"SELECT address, port FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING"
-        ))
+        rows = await wait_for_results(
+            cql,
+            f"SELECT address, port FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING",
+            expected_count=1,
+        )
 
         # We should find our connection with the fake source address and port
         assert len(rows) > 0, f"Expected to find connection from {fake_src_addr} in system.clients"
@@ -569,9 +588,11 @@ async def test_proxy_protocol_ssl_shard_aware(proxy_server):
                 ssl_sock.recv(4096)
 
         # Now query system.clients to verify shard assignments
-        rows = list(cql.execute(
-            f"SELECT address, port, shard_id, ssl_enabled FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING"
-        ))
+        rows = await wait_for_results(
+            cql,
+            f"SELECT address, port, shard_id, ssl_enabled FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING",
+            expected_count=num_shards,
+        )
 
         # Build a map of port -> (shard_id, ssl_enabled) from the results
         port_to_info = {row.port: (row.shard_id, row.ssl_enabled) for row in rows}
@@ -656,9 +677,11 @@ async def test_proxy_protocol_ssl_port_preserved(proxy_server):
 
         # Now query system.clients using the driver to see our connection
         cql = manager.get_cql()
-        rows = list(cql.execute(
-            f"SELECT address, port, ssl_enabled FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING"
-        ))
+        rows = await wait_for_results(
+            cql,
+            f"SELECT address, port, ssl_enabled FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING",
+            expected_count=1,
+        )
 
         # We should find our connection
         assert len(rows) > 0, f"Expected to find connection from {fake_src_addr} in system.clients"
