@@ -727,11 +727,13 @@ future<foreign_ptr<std::unique_ptr<cql_server::response>>>
         case cql_binary_opcode::STARTUP:       return wrap_in_foreign(process_startup(stream, std::move(in), client_state, trace_state));
         case cql_binary_opcode::AUTH_RESPONSE: return wrap_in_foreign(process_auth_response(stream, std::move(in), client_state, trace_state));
         case cql_binary_opcode::OPTIONS:       return wrap_in_foreign(process_options(stream, std::move(in), client_state, trace_state));
-        case cql_binary_opcode::QUERY:         return process_query(stream, std::move(in), client_state, std::move(permit), trace_state);
         case cql_binary_opcode::PREPARE:       return wrap_in_foreign(process_prepare(stream, std::move(in), client_state, trace_state));
-        case cql_binary_opcode::EXECUTE:       return process_execute(stream, std::move(in), client_state, std::move(permit), trace_state);
-        case cql_binary_opcode::BATCH:         return process_batch(stream, std::move(in), client_state, std::move(permit), trace_state);
         case cql_binary_opcode::REGISTER:      return wrap_in_foreign(process_register(stream, std::move(in), client_state, trace_state));
+        case cql_binary_opcode::QUERY:
+        case cql_binary_opcode::EXECUTE:
+        case cql_binary_opcode::BATCH:
+            return _server.process(stream, std::move(in), client_state, std::move(permit), trace_state, cqlop,
+                                            _version, get_dialect());
         default:                               return make_exception_future<result_with_foreign_response_ptr>(exceptions::protocol_exception(format("Unknown opcode {:d}", int(cqlop))));
         }
     }).then_wrapped([this, cqlop, &cql_stats, stream, &client_state, linearization_buffer = std::move(linearization_buffer), trace_state] (future<result_with_foreign_response_ptr> f) {
@@ -1279,12 +1281,6 @@ process_query_internal(service::client_state& client_state, sharded<cql3::query_
     });
 }
 
-future<cql_server::result_with_foreign_response_ptr>
-cql_server::connection::process_query(uint16_t stream, request_reader in, service::client_state& client_state, service_permit permit, tracing::trace_state_ptr trace_state) {
-    return _server.process(stream, in, client_state, std::move(permit), std::move(trace_state), cql_binary_opcode::QUERY,
-                           _version, get_dialect());
-}
-
 future<std::unique_ptr<cql_server::response>> cql_server::connection::process_prepare(uint16_t stream, request_reader in, service::client_state& client_state,
         tracing::trace_state_ptr trace_state) {
 
@@ -1400,12 +1396,6 @@ process_execute_internal(service::client_state& client_state, sharded<cql3::quer
             return cql_server::process_fn_return_type(make_foreign(make_result(stream, *msg, q_state->query_state.get_trace_state(), version, std::move(metadata_id), skip_metadata)));
         }
     });
-}
-
-future<cql_server::result_with_foreign_response_ptr> cql_server::connection::process_execute(uint16_t stream, request_reader in,
-        service::client_state& client_state, service_permit permit, tracing::trace_state_ptr trace_state) {
-    return _server.process(stream, in, client_state, std::move(permit), std::move(trace_state), cql_binary_opcode::EXECUTE,
-                           _version, get_dialect());
 }
 
 static future<cql_server::process_fn_return_type>
@@ -1592,13 +1582,6 @@ cql_server::connection::get_dialect() const {
     return cql3::dialect{
         .duplicate_bind_variable_names_refer_to_same_variable = _server._config.cql_duplicate_bind_variable_names_refer_to_same_variable,
     };
-}
-
-future<cql_server::result_with_foreign_response_ptr>
-cql_server::connection::process_batch(uint16_t stream, request_reader in, service::client_state& client_state, service_permit permit,
-        tracing::trace_state_ptr trace_state) {
-    return _server.process(stream, in, client_state, std::move(permit), std::move(trace_state), cql_binary_opcode::BATCH,
-                           _version, get_dialect());
 }
 
 future<std::unique_ptr<cql_server::response>>
