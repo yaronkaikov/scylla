@@ -717,7 +717,7 @@ async def test_restore_with_streaming_scopes(build_mode: str, manager: ManagerCl
         await asyncio.gather(*(cql.run_async(insert_stmt, (str(i), i)) for i in range(num_keys)))
 
         # validate replicas assertions hold on fresh dataset
-        await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test', expected_replicas = None)
+        await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test')
 
         snap_name, sstables = await take_snapshot(ks, servers, manager, logger)
         prefix = f'test/{snap_name}'

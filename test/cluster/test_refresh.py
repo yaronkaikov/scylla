@@ -66,7 +66,7 @@ async def test_refresh_with_streaming_scopes(build_mode: str, manager: ManagerCl
     _, keys, _ = await create_dataset(manager, ks, cf, topology, logger, num_keys=10, min_tablet_count=5)
 
     # validate replicas assertions hold on fresh dataset
-    await check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf, expected_replicas = None)
+    await check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf)
 
     _, sstables = await take_snapshot(ks, servers, manager, logger)
 
