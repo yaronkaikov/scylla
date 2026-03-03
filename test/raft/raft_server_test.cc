@@ -105,7 +105,7 @@ SEASTAR_THREAD_TEST_CASE(test_aborting_wait_for_state_change) {
 
 static void test_func_on_aborted_server_aux(
     std::function<future<>(raft::server&, abort_source*)> func,
-    const raft::server::configuration& config)
+    const raft::server::configuration& config = raft::server::configuration{})
 {
     const size_t node_count = 2;
     auto test_config = test_case {
@@ -186,4 +186,20 @@ SEASTAR_THREAD_TEST_CASE(test_modify_config_on_aborted_server_disabled_forwardin
 }
 SEASTAR_THREAD_TEST_CASE(test_modify_config_on_aborted_server_enabled_forwarding) {
     test_modify_config_on_aborted_server_aux(true);
+}
+
+// A call to raft::server::wait_for_leader should complete with
+// raft::stopped_error if the server has been aborted, regardless
+// of the state of the passed abort_source.
+// Reproducer of SCYLLADB-841.
+SEASTAR_THREAD_TEST_CASE(test_wait_for_leader_on_aborted_server) {
+    test_func_on_aborted_server_aux(&raft::server::wait_for_leader);
+}
+
+// A call to raft::server::wait_for_state_change should complete with
+// raft::stopped_error if the server has been aborted, regardless
+// of the state of the passed abort_source.
+// Reproducer of SCYLLADB-841.
+SEASTAR_THREAD_TEST_CASE(test_wait_for_state_change_on_aborted_server) {
+    test_func_on_aborted_server_aux(&raft::server::wait_for_state_change);
 }

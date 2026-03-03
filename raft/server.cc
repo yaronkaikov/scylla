@@ -436,6 +436,8 @@ future<> server_impl::wait_for_next_tick(seastar::abort_source* as) {
 }
 
 future<> server_impl::wait_for_leader(seastar::abort_source* as) {
+    check_not_aborted();
+
     if (_fsm->current_leader()) {
         co_return;
     }
@@ -454,6 +456,8 @@ future<> server_impl::wait_for_leader(seastar::abort_source* as) {
 }
 
 future<> server_impl::wait_for_state_change(seastar::abort_source* as) {
+    check_not_aborted();
+
     if (!_state_change_promise) {
         _state_change_promise.emplace();
     }
