@@ -69,6 +69,10 @@ async def take_snapshot(ks, servers, manager, logger):
 
     return snap_name,sstables
 
+async def take_snapshot_on_one_server(ks, server, manager, logger):
+    snap_name, sstables = await take_snapshot(ks, [server], manager, logger)
+    return snap_name, sstables[server]
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("move_files", [False, True])
