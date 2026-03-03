@@ -11,6 +11,18 @@
 const auto tick_delay = 100ms;
 #endif
 
+// The word "default" means "usually used by the tests here".
+template <typename clock_type = std::chrono::steady_clock>
+static raft_cluster<clock_type> get_default_cluster(test_case test_config) {
+    return raft_cluster<clock_type>{
+        std::move(test_config),
+        ::apply_changes,
+        0,
+        0,
+        0, false, tick_delay, rpc_config{}
+    };
+}
+
 SEASTAR_THREAD_TEST_CASE(test_check_abort_on_client_api) {
     raft_cluster<std::chrono::steady_clock> cluster(
             test_case { .nodes = 1 },
@@ -38,22 +50,18 @@ SEASTAR_THREAD_TEST_CASE(test_release_memory_if_add_entry_throws) {
     std::cerr << "Skipping test as it depends on error injection. Please run in mode where it's enabled (debug,dev).\n";
 #else
     const size_t command_size = sizeof(size_t);
-    raft_cluster<std::chrono::steady_clock> cluster(
-            test_case {
-                .nodes = 1,
-                .config = std::vector<raft::server::configuration>({
-                    raft::server::configuration {
-                        .snapshot_threshold_log_size = 0,
-                        .snapshot_trailing_size = 0,
-                        .max_log_size = command_size,
-                        .max_command_size = command_size
-                    }
-                })
-            },
-            ::apply_changes,
-            0,
-            0,
-            0, false, tick_delay, rpc_config{});
+    test_case test_config {
+        .nodes = 1,
+        .config = std::vector<raft::server::configuration>({
+            raft::server::configuration {
+                .snapshot_threshold_log_size = 0,
+                .snapshot_trailing_size = 0,
+                .max_log_size = command_size,
+                .max_command_size = command_size
+            }
+        })
+    };
+    auto cluster = get_default_cluster(std::move(test_config));
     cluster.start_all().get();
     auto stop = defer([&cluster] { cluster.stop_all().get(); });
 
@@ -76,23 +84,7 @@ SEASTAR_THREAD_TEST_CASE(test_release_memory_if_add_entry_throws) {
 // * The future will contain an exception, and its type will be `raft::request_aborted`.
 // Reproduces SCYLLADB-665.
 SEASTAR_THREAD_TEST_CASE(test_aborting_wait_for_state_change) {
-    const size_t command_size = sizeof(size_t);
-    raft_cluster<std::chrono::steady_clock> cluster(
-            test_case {
-                .nodes = 1,
-                .config = std::vector<raft::server::configuration>({
-                    raft::server::configuration {
-                        .snapshot_threshold_log_size = 0,
-                        .snapshot_trailing_size = 0,
-                        .max_log_size = command_size,
-                        .max_command_size = command_size
-                    }
-                })
-            },
-            ::apply_changes,
-            0,
-            0,
-            0, false, tick_delay, rpc_config{});
+    auto cluster = get_default_cluster(test_case{ .nodes = 1 });
     cluster.start_all().get();
     auto stop = defer([&cluster] { cluster.stop_all().get(); });
 
