@@ -263,8 +263,8 @@ public:
     void enable_schema_commitlog() {
         _static_props.enable_schema_commitlog();
     }
-    void set_is_group0_table(bool enabled = true) {
-        _static_props.is_group0_table = enabled;
+    void set_is_group0_table() {
+        _static_props.is_group0_table = true;
     }
 
     class default_names {

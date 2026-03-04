@@ -143,7 +143,7 @@ namespace {
                 system_keyspace::REPAIR_TASKS,
             };
             if (builder.ks_name() == system_keyspace::NAME && tables.contains(builder.cf_name())) {
-                builder.set_is_group0_table(true);
+                builder.set_is_group0_table();
             }
         });
 }

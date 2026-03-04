@@ -252,7 +252,7 @@ SEASTAR_TEST_CASE(test_group0_batch) {
         // (group0 mutations are not allowed on non-group0 tables)
         schema_builder::register_schema_initializer([](schema_builder& builder) {
             if (builder.cf_name() == "test_group0_batch") {
-                builder.set_is_group0_table(true);
+                builder.set_is_group0_table();
             }
         });
 
