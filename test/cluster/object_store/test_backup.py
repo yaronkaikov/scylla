@@ -677,8 +677,11 @@ def create_schema(ks, cf, min_tablet_count=None):
         (topo(rf = 3, nodes = 6, racks = 2, dcs = 1), False),
         (topo(rf = 2, nodes = 8, racks = 4, dcs = 2), True)
     ])
-
 async def test_restore_with_streaming_scopes(build_mode: str, manager: ManagerClient, object_storage, topology_rf_validity):
+    await do_test_streaming_scopes(build_mode, manager, topology_rf_validity, object_storage)
+
+
+async def do_test_streaming_scopes(build_mode: str, manager: ManagerClient, topology_rf_validity, object_storage):
     '''Check that restoring of a cluster with stream scopes works'''
 
     topology, rf_rack_valid_keyspaces = topology_rf_validity
