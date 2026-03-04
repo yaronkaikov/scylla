@@ -19,7 +19,7 @@ from collections import defaultdict
 from test.pylib.minio_server import MinioServer
 from test.pylib.manager_client import ManagerClient
 from test.cluster.object_store.conftest import format_tuples
-from test.cluster.object_store.test_backup import topo, create_cluster, take_snapshot, create_dataset, do_load_sstables, mark_all_logs, check_mutation_replicas, check_streaming_directions
+from test.cluster.object_store.test_backup import topo, create_cluster, take_snapshot, create_dataset, check_mutation_replicas, do_test_streaming_scopes
 from test.cluster.util import wait_for_cql_and_get_hosts
 from test.pylib.rest_client import read_barrier
 from test.pylib.util import unique_name
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 class SSTablesOnLocalStorage:
     def __init__(self):
         self.tmpdir = f'tmpbackup-{str(uuid.uuid4())}'
+        self.object_storage = None
 
     async def save_one(self, manager, s, ks, cf):
         workdir = await manager.server_get_workdir(s.server_id)
@@ -66,6 +67,13 @@ class SSTablesOnLocalStorage:
         logger.info(f'Refresh {s.ip_addr} with {toc_names}, scope={scope}')
         await manager.api.load_new_sstables(s.ip_addr, ks, cf, scope=scope, primary_replica=primary_replica_only, load_and_stream=True)
 
+    async def save(self, manager, servers, snap_name, prefix, ks, cf, logger):
+        for s in servers:
+            await self.save_one(manager, s, ks, cf)
+
+    async def restore(self, manager, sstables_per_server, prefix, ks, cf, scope, primary_replica_only, logger):
+        await asyncio.gather(*(self.refresh_one(manager, s, ks, cf, sstables, scope, primary_replica_only) for s, sstables in sstables_per_server.items()))
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("topology_rf_validity", [
         (topo(rf = 1, nodes = 3, racks = 1, dcs = 1), True),
@@ -91,52 +99,7 @@ async def test_refresh_with_streaming_scopes(build_mode: str, manager: ManagerCl
     2) Check that the streaming communication between nodes is as expected according to the scope parameter of the test.
     This stage parses the logs and checks that the data was streamed to nodes within the configured scope.
     '''
- 
-    topology, rf_rack_valid_keyspaces = topology_rf_validity
-
-    servers, host_ids = await create_cluster(topology, rf_rack_valid_keyspaces, manager, logger)
-
-    cql = manager.get_cql()
-
-    await manager.disable_tablet_balancing()
-
-    ks = 'ks'
-    cf = 'cf'
-    _, keys, _ = await create_dataset(manager, ks, cf, topology, logger, num_keys=10, min_tablet_count=5)
-
-    # validate replicas assertions hold on fresh dataset
-    await check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf)
-
-    _, sstables = await take_snapshot(ks, servers, manager, logger)
-
-    logger.info(f'Move sstables to tmp dir')
-    local_storage = SSTablesOnLocalStorage()
-    for s in servers:
-        await local_storage.save_one(manager, s, ks, cf)
-
-    logger.info(f'Refresh')
-    async def do_refresh(manager, logger, ks, cf, s, toc_names, scope, primary_replica_only, _prefix=None, _object_storage=None):
-        await local_storage.refresh_one(manager, s, ks, cf, toc_names, scope, primary_replica_only)
-
-    scopes = ['rack', 'dc'] if build_mode == 'debug' else ['all', 'dc', 'rack', 'node']
-    for scope in scopes:
-        # We can support rack-aware restore with rack lists, if we restore the rack-list per dc as it was at backup time.
-        # Otherwise, with numeric replication_factor we'd pick arbitrary subset of the racks when the keyspace
-        # is initially created and an arbitrary subset or the rack at restore time.
-        if scope == 'rack' and topology.rf != topology.racks:
-            logger.info(f'Skipping scope={scope} test since rf={topology.rf} != racks={topology.racks} and it cannot be supported with numeric replication_factor')
-            continue
-        pros = [False] if scope == 'node' else [False, True]
-        for pro in pros:
-            logger.info(f'Clear data by truncating, make sure the tablets map stays intact')
-            cql.execute(f'TRUNCATE TABLE {ks}.{cf};')
-
-            log_marks = await mark_all_logs(manager, servers)
-
-            await do_load_sstables(ks, cf, servers, topology, sstables, scope, manager, logger, primary_replica_only=pro, load_fn=do_refresh)
-
-            await check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf)
-            await check_streaming_directions(logger, servers, topology, host_ids, scope, pro, log_marks)
+    await do_test_streaming_scopes(build_mode, manager, topology_rf_validity, SSTablesOnLocalStorage())
 
 
 async def test_refresh_deletes_uploaded_sstables(manager: ManagerClient):
