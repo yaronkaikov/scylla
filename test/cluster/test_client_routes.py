@@ -107,7 +107,7 @@ async def test_client_routes_upgrade(request, manager: ManagerClient):
     servers = await manager.servers_add(num_servers, config={'error_injections_at_startup': config})
     cql, hosts = await manager.get_ready_cql(servers)
     # Empty `system.client_routes` is there even if the feature is disabled.
-    wait_for_expected_client_routes_size(cql, 0)
+    await wait_for_expected_client_routes_size(cql, 0)
 
     with pytest.raises(HTTPError) as exc:
         await manager.api.client.post("/v2/client-routes", host=servers[0].ip_addr, json=[generate_client_routes_entry(0)])
@@ -132,7 +132,7 @@ async def test_client_routes_upgrade(request, manager: ManagerClient):
                 raise exc
         return None
 
-    wait_for(client_routes_ready, time.time() + 10)
+    await wait_for(client_routes_ready, time.time() + 10)
 
 
 @pytest.mark.asyncio
