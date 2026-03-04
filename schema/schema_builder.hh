@@ -265,6 +265,7 @@ public:
     }
     void set_is_group0_table() {
         _static_props.is_group0_table = true;
+        enable_schema_commitlog();
     }
 
     class default_names {
