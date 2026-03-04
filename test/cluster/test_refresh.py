@@ -83,22 +83,7 @@ class SSTablesOnLocalStorage:
         (topo(rf = 2, nodes = 8, racks = 4, dcs = 2), True)
     ])
 async def test_refresh_with_streaming_scopes(build_mode: str, manager: ManagerClient, topology_rf_validity):
-    '''
-    Check that refreshing a cluster with stream scopes works
-
-    This test creates a cluster specified by the topology parameter above,
-    configurable number of nodes, tacks, datacenters, and replication factor.
-
-    It creates a dataset, takes a snapshot and copies the sstables of all nodes to a temporary
-    location. It then truncates the table so all sstables are gone, copies all the sstables into
-    each node's upload directory, and refreshes the nodes given the scope passed as the test parameter.
-
-    The test then performs two types of checks:
-    1) Check that the data is back in the table by getting all mutations from the nodes and checking
-    that a random sample of them contains the expected key and that they are replicated according to RF * DCS factor.
-    2) Check that the streaming communication between nodes is as expected according to the scope parameter of the test.
-    This stage parses the logs and checks that the data was streamed to nodes within the configured scope.
-    '''
+    '''Check that refreshing of a cluster with stream scopes works'''
     await do_test_streaming_scopes(build_mode, manager, topology_rf_validity, SSTablesOnLocalStorage())
 
 
