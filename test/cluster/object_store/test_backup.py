@@ -576,8 +576,7 @@ async def check_streaming_directions(logger, servers, topology, host_ids, scope,
 
             assert max_deviation < 0.1 * mean_count, f'node {s.ip_addr} streaming to primary replicas was unbalanced: {streamed_to}'
 
-async def do_load_sstables(ks, cf, servers, topology, sstables, scope, manager, logger, prefix = None, sstables_storage = None, primary_replica_only = False):
-    logger.info(f'Loading {servers=} with {sstables=} scope={scope}')
+def distribute_sstables(sstables, servers, topology, scope):
     sstables_per_server = defaultdict(list)
     # rf_rack_valid can be True also with rack lists
     rf_rack_valid = topology.rf == topology.racks
@@ -615,11 +614,9 @@ async def do_load_sstables(ks, cf, servers, topology, sstables, scope, manager, 
                     for s in servers_per_dc_rack[dc][rack]:
                         sstables_per_server[s] = sstables_in_rack
     else:
-        raise f"do_load_sstables: {scope=} not supported"
+        raise f"distribute_sstables: {scope=} not supported"
+    return sstables_per_server
 
-    await sstables_storage.restore(manager, sstables_per_server, prefix, ks, cf, scope, primary_replica_only, logger)
-    if primary_replica_only:
-        await manager.api.tablet_repair(servers[0].ip_addr, ks, cf, 'all', timeout=600)
 
 async def do_backup(s, snap_name, prefix, ks, cf, object_storage, manager, logger):
     logger.info(f'Backup to {snap_name}')
@@ -739,7 +736,11 @@ async def do_test_streaming_scopes(build_mode: str, manager: ManagerClient, topo
 
             log_marks = await mark_all_logs(manager, servers)
 
-            await do_load_sstables(ks, 'test', servers, topology, sstables, scope, manager, logger, prefix=prefix, object_storage=sstables_storage, primary_replica_only=pro)
+            logger.info(f'Loading {servers=} with {sstables=} scope={scope}')
+            sstables_per_server = distribute_sstables(sstables, servers, topology, scope)
+            await sstables_storage.restore(manager, sstables_per_server, prefix, ks, 'test', scope, pro, logger)
+            if pro:
+                await manager.api.tablet_repair(servers[0].ip_addr, ks, 'test', 'all', timeout=600)
             await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test')
             if restored_min_tablet_count == original_min_tablet_count:
                 await check_streaming_directions(logger, servers, topology, host_ids, scope, pro, log_marks)
