@@ -576,7 +576,7 @@ async def check_streaming_directions(logger, servers, topology, host_ids, scope,
 
             assert max_deviation < 0.1 * mean_count, f'node {s.ip_addr} streaming to primary replicas was unbalanced: {streamed_to}'
 
-async def do_load_sstables(ks, cf, servers, topology, sstables, scope, manager, logger, prefix = None, sstables_storage = None, primary_replica_only = False, load_fn=do_restore_server):
+async def do_load_sstables(ks, cf, servers, topology, sstables, scope, manager, logger, prefix = None, sstables_storage = None, primary_replica_only = False):
     logger.info(f'Loading {servers=} with {sstables=} scope={scope}')
     sstables_per_server = defaultdict(list)
     # rf_rack_valid can be True also with rack lists
@@ -617,10 +617,7 @@ async def do_load_sstables(ks, cf, servers, topology, sstables, scope, manager, 
     else:
         raise f"do_load_sstables: {scope=} not supported"
 
-    if sstables_storage is not None:
-        await sstables_storage.restore(manager, sstables_per_server, prefix, ks, cf, scope, primary_replica_only, logger)
-    else:
-        await asyncio.gather(*(load_fn(manager, logger, ks, cf, s, sstables, scope, primary_replica_only, prefix, sstables_storage) for s, sstables in sstables_per_server.items()))
+    await sstables_storage.restore(manager, sstables_per_server, prefix, ks, cf, scope, primary_replica_only, logger)
     if primary_replica_only:
         await manager.api.tablet_repair(servers[0].ip_addr, ks, cf, 'all', timeout=600)
 
