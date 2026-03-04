@@ -26,6 +26,45 @@ from test.pylib.util import unique_name
 
 logger = logging.getLogger(__name__)
 
+class SSTablesOnLocalStorage:
+    def __init__(self):
+        self.tmpdir = f'tmpbackup-{str(uuid.uuid4())}'
+
+    async def save_one(self, manager, s, ks, cf):
+        workdir = await manager.server_get_workdir(s.server_id)
+        cf_dir = os.listdir(f'{workdir}/data/{ks}')[0]
+        tmpbackup = os.path.join(workdir, f'../{self.tmpdir}')
+        os.makedirs(tmpbackup, exist_ok=True)
+
+        snapshots_dir = os.path.join(f'{workdir}/data/{ks}', cf_dir, 'snapshots')
+        snapshots_dir = os.path.join(snapshots_dir, os.listdir(snapshots_dir)[0])
+        exclude_list = ['manifest.json', 'schema.cql']
+
+        for item in os.listdir(snapshots_dir):
+            src_path = os.path.join(snapshots_dir, item)
+            dst_path = os.path.join(tmpbackup, item)
+            if item not in exclude_list:
+                shutil.copy2(src_path, dst_path)
+
+    async def refresh_one(self, manager, s, ks, cf, toc_names, scope, primary_replica_only):
+        # Get the list of toc_names that this node needs to load and find all sstables
+        # that correspond to these toc_names, copy them to the upload directory and then
+        # call refresh
+        workdir = await manager.server_get_workdir(s.server_id)
+        cf_dir = os.listdir(f'{workdir}/data/{ks}')[0]
+        upload_dir = os.path.join(f'{workdir}/data/{ks}', cf_dir, 'upload')
+        os.makedirs(upload_dir, exist_ok=True)
+        tmpbackup = os.path.join(workdir, f'../{self.tmpdir}')
+        for toc in toc_names:
+            basename = toc.removesuffix('-TOC.txt')
+            for item in os.listdir(tmpbackup):
+                if item.startswith(basename):
+                    src_path = os.path.join(tmpbackup, item)
+                    dst_path = os.path.join(upload_dir, item)
+                    shutil.copy2(src_path, dst_path)
+
+        logger.info(f'Refresh {s.ip_addr} with {toc_names}, scope={scope}')
+        await manager.api.load_new_sstables(s.ip_addr, ks, cf, scope=scope, primary_replica=primary_replica_only, load_and_stream=True)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("topology_rf_validity", [
@@ -71,43 +110,13 @@ async def test_refresh_with_streaming_scopes(build_mode: str, manager: ManagerCl
     _, sstables = await take_snapshot(ks, servers, manager, logger)
 
     logger.info(f'Move sstables to tmp dir')
-    tmpdir = f'tmpbackup-{str(uuid.uuid4())}'
+    local_storage = SSTablesOnLocalStorage()
     for s in servers:
-        workdir = await manager.server_get_workdir(s.server_id)
-        cf_dir = os.listdir(f'{workdir}/data/{ks}')[0]
-        tmpbackup = os.path.join(workdir, f'../{tmpdir}')
-        os.makedirs(tmpbackup, exist_ok=True)
-
-        snapshots_dir = os.path.join(f'{workdir}/data/{ks}', cf_dir, 'snapshots')
-        snapshots_dir = os.path.join(snapshots_dir, os.listdir(snapshots_dir)[0])
-        exclude_list = ['manifest.json', 'schema.cql']
-
-        for item in os.listdir(snapshots_dir):
-            src_path = os.path.join(snapshots_dir, item)
-            dst_path = os.path.join(tmpbackup, item)
-            if item not in exclude_list:
-                shutil.copy2(src_path, dst_path)
+        await local_storage.save_one(manager, s, ks, cf)
 
     logger.info(f'Refresh')
     async def do_refresh(manager, logger, ks, cf, s, toc_names, scope, primary_replica_only, _prefix=None, _object_storage=None):
-        # Get the list of toc_names that this node needs to load and find all sstables
-        # that correspond to these toc_names, copy them to the upload directory and then
-        # call refresh
-        workdir = await manager.server_get_workdir(s.server_id)
-        cf_dir = os.listdir(f'{workdir}/data/{ks}')[0]
-        upload_dir = os.path.join(f'{workdir}/data/{ks}', cf_dir, 'upload')
-        os.makedirs(upload_dir, exist_ok=True)
-        tmpbackup = os.path.join(workdir, f'../{tmpdir}')
-        for toc in toc_names:
-            basename = toc.removesuffix('-TOC.txt')
-            for item in os.listdir(tmpbackup):
-                if item.startswith(basename):
-                    src_path = os.path.join(tmpbackup, item)
-                    dst_path = os.path.join(upload_dir, item)
-                    shutil.copy2(src_path, dst_path)
-
-        logger.info(f'Refresh {s.ip_addr} with {toc_names}, scope={scope}')
-        await manager.api.load_new_sstables(s.ip_addr, ks, cf, scope=scope, primary_replica=primary_replica_only, load_and_stream=True)
+        await local_storage.refresh_one(manager, s, ks, cf, toc_names, scope, primary_replica_only)
 
     scopes = ['rack', 'dc'] if build_mode == 'debug' else ['all', 'dc', 'rack', 'node']
     for scope in scopes:
@@ -129,7 +138,6 @@ async def test_refresh_with_streaming_scopes(build_mode: str, manager: ManagerCl
             await check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf)
             await check_streaming_directions(logger, servers, topology, host_ids, scope, pro, log_marks)
 
-    shutil.rmtree(tmpbackup)
 
 async def test_refresh_deletes_uploaded_sstables(manager: ManagerClient):
     '''
