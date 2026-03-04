@@ -33,6 +33,24 @@ class database;
 
 namespace service {
 
+class client_state;
+struct forwarded_client_state {
+    sstring keyspace;
+    std::optional<sstring> username;
+    timeout_config timeout_config;
+    uint64_t protocol_extensions_mask;
+    gms::inet_address remote_address;
+    uint16_t remote_port;
+
+    forwarded_client_state(sstring keyspace,
+                           std::optional<sstring> username,
+                           ::timeout_config timeout_config,
+                           uint64_t protocol_extensions_mask,
+                           gms::inet_address remote_address,
+                           uint16_t remote_port);
+    forwarded_client_state(const client_state& cs);
+};
+
 /**
  * State related to a client connection.
  */
@@ -246,6 +264,23 @@ public:
         , _sl_controller(&sl_controller)
     {}
 
+    client_state(auth::service& auth_service,
+                 qos::service_level_controller* sl_controller,
+                 forwarded_client_state&& forwarded_state)
+            : _keyspace(std::move(forwarded_state.keyspace))
+            , _user(forwarded_state.username ? auth::authenticated_user(*forwarded_state.username) : auth::authenticated_user{})
+            , _auth_state(auth_state::READY)
+            , _is_internal(false)
+            , _bypass_auth_checks(false)
+            , _remote_address(socket_address(forwarded_state.remote_address, forwarded_state.remote_port))
+            , _auth_service(&auth_service)
+            , _sl_controller(sl_controller)
+            , _default_timeout_config(forwarded_state.timeout_config)
+            , _timeout_config(std::move(forwarded_state.timeout_config))
+            , _enabled_protocol_extensions(cql_transport::cql_protocol_extension_enum_set::from_mask(
+                    forwarded_state.protocol_extensions_mask))
+    {}
+
     client_state(const client_state&) = delete;
     client_state(client_state&&) = default;
 
@@ -452,6 +487,10 @@ public:
 
     bool is_protocol_extension_set(cql_transport::cql_protocol_extension ext) const {
         return _enabled_protocol_extensions.contains(ext);
+    }
+
+    cql_transport::cql_protocol_extension_enum_set get_protocol_extensions() const {
+        return _enabled_protocol_extensions;
     }
 
     void set_protocol_extensions(cql_transport::cql_protocol_extension_enum_set exts) {

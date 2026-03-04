@@ -68,6 +68,7 @@ set(idl_headers
   migration_manager.idl.hh
   node_ops.idl.hh
   tasks.idl.hh
+  client_state.idl.hh
   )
 
 foreach(idl_header ${idl_headers})
