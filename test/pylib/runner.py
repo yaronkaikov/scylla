@@ -473,3 +473,7 @@ def modify_pytest_item(item: pytest.Item) -> None:
     if (any(mark.name == "xfail" for mark in item.iter_markers("xfail"))
             and not any(mark.name == "nightly" for mark in item.iter_markers("nightly"))):
         item.add_marker(pytest.mark.nightly)
+
+    if (any(mark.name in ("perf", "manual", "unstable") for mark in item.iter_markers())
+            and not any(mark.name == "non_gating" for mark in item.iter_markers("non_gating"))):
+        item.add_marker(pytest.mark.non_gating)
