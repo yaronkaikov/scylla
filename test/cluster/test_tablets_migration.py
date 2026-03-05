@@ -409,8 +409,7 @@ async def test_staging_backlog_is_preserved_with_file_based_streaming(manager: M
         logger.info(f"SSTable count in staging dir of server 1: {s1_sstables_in_staging}")
 
         logger.info("Allowing view update generator to progress again")
-        for server in servers:
-            manager.api.disable_injection(server.ip_addr, 'view_update_generator_consume_staging_sstable')
+        await asyncio.gather(*[manager.api.disable_injection(server.ip_addr, 'view_update_generator_consume_staging_sstable') for server in servers])
 
         assert s0_sstables_in_staging > 0
         assert s0_sstables_in_staging == s1_sstables_in_staging
