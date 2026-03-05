@@ -2348,12 +2348,6 @@ future<> cql_server::update_connections_scheduling_group() {
 }
 
 future<> cql_server::update_connections_service_level_params() {
-    if (!_sl_controller.is_v2()) {
-        // Auto update of connections' service level params requires
-        // service levels in v2.
-        return make_ready_future<>();
-    }
-
     return for_each_gently([this] (generic_server::connection& conn) {
         connection& cql_conn = dynamic_cast<connection&>(conn);
         auto& cs = cql_conn.get_client_state();

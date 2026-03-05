@@ -15,7 +15,6 @@ target_sources(service
     paxos/proposal.cc
     qos/qos_common.cc
     qos/service_level_controller.cc
-    qos/standard_service_level_distributed_data_accessor.cc
     qos/raft_service_level_distributed_data_accessor.cc
     strong_consistency/groups_manager.cc
     strong_consistency/state_machine.cc

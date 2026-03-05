@@ -117,12 +117,9 @@ public:
         virtual future<> drop_service_level(sstring service_level_name, service::group0_batch& mc) const = 0;
         virtual future<> commit_mutations(service::group0_batch&& mc, abort_source& as) const = 0;
 
-        virtual bool is_v2() const = 0;
         // Returns whether effective service level cache can be populated and used.
         // This is equivalent to checking whether auth + raft have been migrated to raft.
         virtual bool can_use_effective_service_level_cache() const = 0;
-        // Returns v2(raft) data accessor. If data accessor is already a raft one, returns nullptr.
-        virtual ::shared_ptr<service_level_distributed_data_accessor> upgrade_to_v2(cql3::query_processor& qp, service::raft_group0_client& group0_client) const = 0;
     };
     using service_level_distributed_data_accessor_ptr = ::shared_ptr<service_level_distributed_data_accessor>;
 
@@ -252,7 +249,7 @@ public:
      * Reloads data accessor, this is used to align it with service level version
      * stored in scylla_local table.
      */
-    future<> reload_distributed_data_accessor(cql3::query_processor&, service::raft_group0_client&, db::system_keyspace&, db::system_distributed_keyspace&);
+    void reload_distributed_data_accessor(cql3::query_processor&, service::raft_group0_client&);
 
     /**
      *  Adds a service level configuration if it doesn't exists, and updates
@@ -424,23 +421,9 @@ public:
     future<std::vector<cql3::description>> describe_service_levels();
 
     future<> commit_mutations(::service::group0_batch&& mc) {
-        if (_sl_data_accessor->is_v2()) {
-            return _sl_data_accessor->commit_mutations(std::move(mc), _global_controller_db->group0_aborter);
-        }
-        return make_ready_future();
+        return _sl_data_accessor->commit_mutations(std::move(mc), _global_controller_db->group0_aborter);
     }
 
-    /**
-     * Returns true if service levels module is running under raft
-     */
-    bool is_v2() const;
-
-    void upgrade_to_v2(cql3::query_processor& qp, service::raft_group0_client& group0_client);
-
-    /**
-     * Migrate data from `system_distributed.service_levels` to `system.service_levels_v2`
-     */
-    static future<> migrate_to_v2(size_t nodes_count, db::system_keyspace& sys_ks, cql3::query_processor& qp, service::raft_group0_client& group0_client, abort_source& as);
 private:
     /**
      *  Adds a service level configuration if it doesn't exists, and updates
@@ -507,12 +490,5 @@ public:
 
     virtual void on_leave_cluster(const gms::inet_address& endpoint, const locator::host_id& hid) override;
 };
-
-future<shared_ptr<service_level_controller::service_level_distributed_data_accessor>> 
-get_service_level_distributed_data_accessor_for_current_version(
-    db::system_keyspace& sys_ks,
-    db::system_distributed_keyspace& sys_dist_ks,
-    cql3::query_processor& qp, service::raft_group0_client& group0_client
-);
 
 }

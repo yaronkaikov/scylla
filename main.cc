@@ -99,7 +99,6 @@
 
 #include "cdc/log.hh"
 #include "cdc/generation_service.hh"
-#include "service/qos/standard_service_level_distributed_data_accessor.hh"
 #include "service/storage_proxy.hh"
 #include "service/mapreduce_service.hh"
 #include "alternator/controller.hh"
@@ -1484,6 +1483,11 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                         "Cannot start - cluster is not yet upgraded to use auth v2 and this version does not support legacy auth. "
                         "If you are trying to upgrade the node then first upgrade the cluster to use auth v2.");
                 }
+                if (sys_ks.local().get_service_levels_version().get() != 2) {
+                    throw std::runtime_error(
+                        "Cannot start - cluster is not yet upgraded to use service levels v2 and this version does not support legacy service levels. "
+                        "If you are trying to upgrade the node then first upgrade the cluster to use service levels v2.");
+                }
             }
 
             const auto listen_address = utils::resolve(cfg->listen_address, family).get();
@@ -2351,9 +2355,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // with raft leader elected as only then service level mutation is put
             // into scylla_local table. Calling it here avoids starting new cluster with
             // older version only to immediately migrate it to the latest in the background.
-            sl_controller.invoke_on_all([&qp, &group0_client] (qos::service_level_controller& controller) -> future<> {
-                return controller.reload_distributed_data_accessor(
-                        qp.local(), group0_client, sys_ks.local(), sys_dist_ks.local());
+            sl_controller.invoke_on_all([&qp, &group0_client] (qos::service_level_controller& controller) {
+                controller.reload_distributed_data_accessor(qp.local(), group0_client);
             }).get();
 
             // Initialize virtual table in system_distributed keyspace after joining the cluster, so
@@ -2403,9 +2406,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             // update the service level cache after the SL data accessor and auth service are initialized.
-            if (sl_controller.local().is_v2()) {
-                sl_controller.local().update_cache(qos::update_both_cache_levels::yes).get();
-            }
+            sl_controller.local().update_cache(qos::update_both_cache_levels::yes).get();
 
             sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {
                 lifecycle_notifier.local().register_subscriber(&controller);
