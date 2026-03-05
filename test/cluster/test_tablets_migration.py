@@ -5,6 +5,7 @@
 #
 from collections import defaultdict
 from typing import Optional, Type
+from aiohttp.client_exceptions import ServerDisconnectedError
 
 from test.pylib.manager_client import ManagerClient
 from test.pylib.rest_client import HTTPError, read_barrier
@@ -551,5 +552,7 @@ async def test_restart_in_cleanup_stage_after_cleanup(manager: ManagerClient):
         await wait_for_cql_and_get_hosts(manager.get_cql(), servers, time.time() + 30)
 
         await asyncio.gather(*[manager.api.message_injection(s.ip_addr, "wait_after_tablet_cleanup") for s in servers])
+
+        await await_api_task(move_task, allowed_exception=ServerDisconnectedError)
 
         await manager.api.quiesce_topology(servers[0].ip_addr)
