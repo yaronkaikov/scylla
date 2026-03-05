@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 from collections import defaultdict
+from typing import Optional, Type
 
 from test.pylib.manager_client import ManagerClient
 from test.pylib.rest_client import HTTPError, read_barrier
@@ -16,8 +17,16 @@ import logging
 import asyncio
 import os
 import glob
+import re
 
 logger = logging.getLogger(__name__)
+
+async def await_api_task(task, allowed_exception: Optional[Type[Exception]]=None, allowed_error: Optional[str]=None):
+    try:
+        await task
+    except allowed_exception as e:
+        if allowed_error and not re.search(allowed_error, str(e)):
+            raise
 
 
 @pytest.mark.parametrize("action", ['move', 'add_replica', 'del_replica'])
@@ -470,6 +479,8 @@ async def test_restart_leaving_replica_during_cleanup(manager: ManagerClient, mi
         await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
 
         await asyncio.gather(*[manager.api.disable_injection(s.ip_addr, injection) for s in servers])
+
+        await await_api_task(move_task, allowed_exception=HTTPError, allowed_error="abort_requested_exception")
 
         await manager.enable_tablet_balancing()
 
