@@ -116,14 +116,6 @@ public:
     gms::feature secondary_indexes_on_static_columns { *this, "SECONDARY_INDEXES_ON_STATIC_COLUMNS"sv };
     gms::feature tablets { *this, "TABLETS"sv };
     gms::feature table_digest_insensitive_to_expiry { *this, "TABLE_DIGEST_INSENSITIVE_TO_EXPIRY"sv };
-    // If this feature is enabled, schema versions are persisted by the group 0 command
-    // that modifies schema instead of being calculated as a digest (hash) by each node separately.
-    // The feature controls both the 'global' schema version (the one gossiped as application_state::SCHEMA)
-    // and the per-table schema versions (schema::version()).
-    // The feature affects non-Raft mode as well (e.g. during RECOVERY), where we send additional
-    // tombstones and flags to schema tables when performing schema changes, allowing us to
-    // revert to the digest method when necessary (if we must perform a schema change during RECOVERY).
-    gms::feature group0_schema_versioning { *this, "GROUP0_SCHEMA_VERSIONING"sv };
     gms::feature supports_consistent_topology_changes { *this, "SUPPORTS_CONSISTENT_TOPOLOGY_CHANGES"sv };
     gms::feature host_id_based_hinted_handoff { *this, "HOST_ID_BASED_HINTED_HANDOFF"sv };
     gms::feature topology_requests_type_column { *this, "TOPOLOGY_REQUESTS_TYPE_COLUMN"sv };

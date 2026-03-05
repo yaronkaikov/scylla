@@ -106,6 +106,7 @@ std::set<std::string_view> feature_service::supported_feature_set() const {
         "DIGEST_FOR_NULL_VALUES"sv,
         "CORRECT_IDX_TOKEN_IN_SECONDARY_INDEX"sv,
         "UUID_SSTABLE_IDENTIFIERS"sv,
+        "GROUP0_SCHEMA_VERSIONING"sv,
     };
 
     if (is_test_only_feature_deprecated()) {
@@ -174,7 +175,7 @@ db::schema_features feature_service::cluster_schema_features() const {
     f.set_if<db::schema_feature::SCYLLA_KEYSPACES>(tablets);
     f.set_if<db::schema_feature::SCYLLA_AGGREGATES>(aggregate_storage_options);
     f.set_if<db::schema_feature::TABLE_DIGEST_INSENSITIVE_TO_EXPIRY>(table_digest_insensitive_to_expiry);
-    f.set_if<db::schema_feature::GROUP0_SCHEMA_VERSIONING>(group0_schema_versioning);
+    f.set<db::schema_feature::GROUP0_SCHEMA_VERSIONING>();
     f.set_if<db::schema_feature::IN_MEMORY_TABLES>(bool(in_memory_tables));
     f.set_if<db::schema_feature::TABLET_OPTIONS>(bool(tablet_options));
     return f;
