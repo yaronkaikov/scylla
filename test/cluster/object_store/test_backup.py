@@ -635,7 +635,7 @@ async def collect_mutations(cql, server, manager, ks, cf):
         ret[frag.pk].append({'mutation_source': frag.mutation_source, 'partition_region': frag.partition_region, 'node': server.ip_addr})
     return ret
 
-async def check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf, scope=None, primary_replica_only=None, expected_replicas = None):
+async def check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf, expected_replicas = None):
     '''Check that each mutation is replicated to the expected number of replicas'''
     if expected_replicas is None:
         expected_replicas = topology.rf * topology.dcs
@@ -649,7 +649,7 @@ async def check_mutation_replicas(cql, manager, servers, keys, topology, logger,
     for k in random.sample(keys, 10):
         if not str(k) in mutations:
             logger.info(f'Mutations: {mutations}')
-            assert False, f"Key '{k}' not found in mutations. {topology=} {scope=} {primary_replica_only=}"
+            assert False, f"Key '{k}' not found in mutations. {topology=}"
 
         if len(mutations[str(k)]) != expected_replicas:
             logger.info(f'Mutations: {mutations}')
@@ -702,7 +702,7 @@ async def test_restore_with_streaming_scopes(build_mode: str, manager: ManagerCl
         await asyncio.gather(*(cql.run_async(insert_stmt, (str(i), i)) for i in range(num_keys)))
 
         # validate replicas assertions hold on fresh dataset
-        await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test', scope=None, primary_replica_only=False, expected_replicas = None)
+        await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test')
 
         snap_name, sstables = await take_snapshot(ks, servers, manager, logger)
         prefix = f'test/{snap_name}'
@@ -725,7 +725,7 @@ async def test_restore_with_streaming_scopes(build_mode: str, manager: ManagerCl
             log_marks = await mark_all_logs(manager, servers)
 
             await do_load_sstables(ks, 'test', servers, topology, sstables, scope, manager, logger, prefix=prefix, object_storage=object_storage, primary_replica_only=pro)
-            await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test', scope, primary_replica_only=pro)
+            await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test')
             if restored_min_tablet_count == original_min_tablet_count:
                 await check_streaming_directions(logger, servers, topology, host_ids, scope, pro, log_marks)
 
@@ -870,7 +870,7 @@ async def test_restore_primary_replica_same_domain(manager: ManagerClient, objec
 
     await asyncio.gather(*(do_restore_server(manager, logger, ks, cf, s, sstables[s], scope, True, prefix, object_storage) for s in servers))
 
-    await check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf, scope, primary_replica_only=True, expected_replicas=2)
+    await check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf, expected_replicas=2)
 
     logger.info(f'Validate streaming directions')
     for i, s in enumerate(servers):
@@ -932,7 +932,7 @@ async def test_restore_primary_replica_different_domain(manager: ManagerClient, 
 
     await asyncio.gather(*(do_restore_server(manager, logger, ks, cf, s, sstables[s], scope, True, prefix, object_storage) for s in servers))
 
-    await check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf, scope, primary_replica_only=True, expected_replicas=1)
+    await check_mutation_replicas(cql, manager, servers, keys, topology, logger, ks, cf, expected_replicas=1)
 
     logger.info(f'Validate streaming directions')
     for i, s in enumerate(servers):
