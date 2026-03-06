@@ -77,7 +77,7 @@ public:
     // committed locally means simply that the commit index is beyond this entry's index.
     //
     // The caller may pass a pointer to an abort_source to make the operation abortable.
-    // It it passes nullptr, the operation is unabortable.
+    // If it passes nullptr, the operation is unabortable.
     //
     // Successful `add_entry` with `wait_type::committed` does not guarantee that `state_machine::apply` will be called
     // locally for this entry. Between the commit and the application we may receive a snapshot containing this entry,
@@ -125,7 +125,7 @@ public:
     // returned even in case of a successful config change.
     //
     // The caller may pass a pointer to an abort_source to make the operation abortable.
-    // It it passes nullptr, the operation is unabortable.
+    // If it passes nullptr, the operation is unabortable.
     //
     // Exceptions:
     // raft::conf_change_in_progress
@@ -206,7 +206,7 @@ public:
     // future has resolved successfully.
     //
     // The caller may pass a pointer to an abort_source to make the operation abortable.
-    // It it passes nullptr, the operation is unabortable.
+    // If it passes nullptr, the operation is unabortable.
     //
     // Exceptions:
     // raft::request_aborted
@@ -251,7 +251,7 @@ public:
     // the call as before, but term should be different.
     //
     // The caller may pass a pointer to an abort_source to make the function abortable.
-    // It it passes nullptr, the function is unabortable.
+    // If it passes nullptr, the function is unabortable.
     //
     // Exceptions:
     // raft::stopped_error
@@ -267,7 +267,7 @@ public:
     // `raft::server_id`.
     //
     // The caller may pass a pointer to an abort_source to make the function abortable.
-    // It it passes nullptr, the function is unabortable.
+    // If it passes nullptr, the function is unabortable.
     //
     // Exceptions:
     // raft::stopped_error
