@@ -1238,9 +1238,13 @@ future<uint32_t> sstable::compute_component_file_digest(file f, size_t size) con
 void sstable::validate_component_digest(component_type type, uint32_t computed_digest) const {
     auto expected = get_component_digest(type);
     if (expected && *expected != computed_digest) {
-        throw malformed_sstable_exception(
-            fmt::format("{} digest mismatch in {}: expected {}, computed {}",
-                        type, get_filename(), *expected, computed_digest));
+        auto msg = fmt::format("{} digest mismatch in {}: expected {}, computed {}",
+                               type, get_filename(), *expected, computed_digest);
+        if (_ignore_component_digest_mismatch) {
+            sstlog.warn("{}", msg);
+        } else {
+            throw malformed_sstable_exception(msg);
+        }
     }
 }
 
@@ -2010,6 +2014,7 @@ future<> sstable::load_metadata(sstable_open_config cfg) noexcept {
 // This interface is only used during tests, snapshot loading and early initialization.
 // No need to set tunable priorities for it.
 future<> sstable::load(const dht::sharder& sharder, sstable_open_config cfg) noexcept {
+    _ignore_component_digest_mismatch = cfg.ignore_component_digest_mismatch;
     co_await load_metadata(cfg);
     validate_min_max_metadata();
     validate_max_local_deletion_time();
