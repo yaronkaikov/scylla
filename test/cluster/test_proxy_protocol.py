@@ -271,18 +271,27 @@ async def send_cql_with_proxy_header_tls(
             sock.close()
 
 
-async def wait_for_results(cql, query: str, expected_count: int, timeout: float = 30.0):
+async def wait_for_results(cql, query: str, expected_count: int, timeout: float = 30.0, filter_fn=None):
     """
-    Waits until `expected_count` rows are returned by the given CQL query, or until timeout.
+    Polls `query` until at least `expected_count` rows satisfy `filter_fn` (all rows if no filter is given).
+    On timeout, logs the full result set from the last poll to aid debugging.
     """
+    last_rows: list = []
 
-    async def check_clients():
-        rows = list(await cql.run_async(query))
-        if len(rows) >= expected_count:
-            return rows
+    async def check_resultset():
+        nonlocal last_rows
+        last_rows = list(await cql.run_async(query))
+        matching = filter_fn(last_rows) if filter_fn is not None else last_rows
+        if len(matching) >= expected_count:
+            return matching
         return None
 
-    return await wait_for(check_clients, time.time() + timeout, period=0.1)
+    try:
+        return await wait_for(check_resultset, time.time() + timeout, period=0.1)
+    except Exception:
+        logger.error('Timed out waiting for %d matching rows in system.clients. Last poll returned %d total rows:\n%s',
+                     expected_count, len(last_rows),'\n'.join(str(r) for r in last_rows))
+        raise
 
 # Shared server configuration for all tests
 # We configure explicit SSL ports to keep the standard ports unencrypted
@@ -385,8 +394,9 @@ async def test_proxy_protocol_shard_aware(proxy_server):
         # Now query system.clients to verify shard assignments
         rows = await wait_for_results(
             cql,
-            f"SELECT address, port, shard_id FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING",
+            'SELECT address, port, shard_id FROM system.clients',
             expected_count=num_shards,
+            filter_fn=lambda all_rows: [r for r in all_rows if str(r.address) == fake_src_addr],
         )
 
         # Build a map of port -> shard_id from the results
@@ -465,8 +475,9 @@ async def test_proxy_protocol_port_preserved_in_system_clients(proxy_server):
         cql = manager.get_cql()
         rows = await wait_for_results(
             cql,
-            f"SELECT address, port FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING",
+            'SELECT address, port FROM system.clients',
             expected_count=1,
+            filter_fn=lambda all_rows: [r for r in all_rows if str(r.address) == fake_src_addr],
         )
 
         # We should find our connection with the fake source address and port
@@ -590,8 +601,9 @@ async def test_proxy_protocol_ssl_shard_aware(proxy_server):
         # Now query system.clients to verify shard assignments
         rows = await wait_for_results(
             cql,
-            f"SELECT address, port, shard_id, ssl_enabled FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING",
+            'SELECT address, port, shard_id, ssl_enabled FROM system.clients',
             expected_count=num_shards,
+            filter_fn=lambda all_rows: [r for r in all_rows if str(r.address) == fake_src_addr],
         )
 
         # Build a map of port -> (shard_id, ssl_enabled) from the results
@@ -679,8 +691,9 @@ async def test_proxy_protocol_ssl_port_preserved(proxy_server):
         cql = manager.get_cql()
         rows = await wait_for_results(
             cql,
-            f"SELECT address, port, ssl_enabled FROM system.clients WHERE address = '{fake_src_addr}' ALLOW FILTERING",
+            'SELECT address, port, ssl_enabled FROM system.clients',
             expected_count=1,
+            filter_fn=lambda all_rows: [r for r in all_rows if str(r.address) == fake_src_addr],
         )
 
         # We should find our connection
