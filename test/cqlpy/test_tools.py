@@ -2079,6 +2079,33 @@ def test_scylla_sstable_upgrade(cql, test_keyspace, scylla_path, scylla_data_dir
                 assert line.startswith(f"Nothing to do for sstable {sst}, skipping (use --all to force upgrade all sstables).")
 
 
+def test_scylla_sstable_upgrade_ignore_digest_mismatch(cql, test_keyspace, scylla_path, scylla_data_dir):
+    """Test that --ignore-component-digest-mismatch allows loading sstables with corrupted component digests."""
+    with scylla_sstable(simple_no_clustering_table, cql, test_keyspace, scylla_data_dir) as (table, schema_file, sstables):
+        assert len(sstables) >= 1
+        sst = sstables[0]
+
+        stats_file = sst.replace("-Data.db", "-Statistics.db")
+        assert os.path.exists(stats_file), f"Statistics file not found: {stats_file}"
+        with open(stats_file, "ab") as f:
+            f.write(b'\x00')
+
+        base_args = [scylla_path, "sstable", "upgrade", "--schema-file", schema_file, "--all",
+                     "--logger-log-level", "scylla-sstable=debug"]
+
+        # # Without --ignore-component-digest-mismatch, loading should fail due to digest mismatch
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = subprocess.run(base_args + ["--output-dir", tmp_dir, sst],
+                                    capture_output=True, text=True)
+            assert result.returncode != 0, "Expected failure due to digest mismatch"
+
+        # With --ignore-component-digest-mismatch, loading should succeed
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = subprocess.run(base_args + ["--ignore-component-digest-mismatch", "--output-dir", tmp_dir, sst],
+                                    capture_output=True, text=True)
+            assert result.returncode == 0, f"Expected success with --ignore-component-digest-mismatch, stderr: {result.stderr}"
+
+
 def test_scylla_sstable_dump_schema(cql, test_keyspace, scylla_path, scylla_data_dir):
     def query_system_schema(schema_table: str, table_name: str) -> list:
         q = f"SELECT * FROM system_schema.{schema_table} WHERE keyspace_name = '{test_keyspace}' AND table_name = '{table_name}'"
