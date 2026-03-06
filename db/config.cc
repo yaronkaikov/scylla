@@ -1338,6 +1338,9 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         " Performance is affected to some extent as a result. Useful to help debugging problems that may arise at another layers.")
     , enable_sstable_key_validation(this, "enable_sstable_key_validation", value_status::Used, ENABLE_SSTABLE_KEY_VALIDATION, "Enable validation of partition and clustering keys monotonicity"
         " Performance is affected to some extent as a result. Useful to help debugging problems that may arise at another layers.")
+    , ignore_component_digest_mismatch(this, "ignore_component_digest_mismatch", value_status::Used, false,
+        "When set, log a warning instead of refusing to load sstables with component digest mismatches."
+        " Useful for recovering from corrupted non-vital components or working around bugs in digest calculation.")
     , cpu_scheduler(this, "cpu_scheduler", value_status::Unused, true, "Enable cpu scheduling.")
     , view_building(this, "view_building", value_status::Used, true, "Enable view building; should only be set to false when the node is experience issues due to view building.")
     , enable_sstables_mc_format(this, "enable_sstables_mc_format", value_status::Unused, true, "Enable SSTables 'mc' format to be used as the default file format.  Deprecated, please use \"sstable_format\" instead.")
