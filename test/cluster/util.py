@@ -359,6 +359,7 @@ async def start_writes(cql: Session, rf: int, cl: ConsistencyLevel, concurrency:
             except Exception as e:
                 logging.error(f"Write started {time.time() - start_time}s ago failed: {e}")
                 raise
+            await asyncio.sleep(0.01)
         logging.info(f"Worker #{worker_id} did {write_count} successful writes")
 
     tasks = [asyncio.create_task(do_writes(worker_id)) for worker_id in range(concurrency)]
