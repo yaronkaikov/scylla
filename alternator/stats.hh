@@ -16,6 +16,7 @@
 #include "cql3/stats.hh"
 
 namespace alternator {
+using batch_histogram = utils::estimated_histogram_with_max<128>;
 
 // Object holding per-shard statistics related to Alternator.
 // While this object is alive, these metrics are also registered to be
@@ -76,8 +77,8 @@ public:
         utils::timed_rate_moving_average_summary_and_histogram batch_get_item_latency;
         utils::timed_rate_moving_average_summary_and_histogram get_records_latency;
 
-        utils::estimated_histogram batch_get_item_histogram{22}; // a histogram that covers the range 1 - 100
-        utils::estimated_histogram batch_write_item_histogram{22}; // a histogram that covers the range 1 - 100
+        batch_histogram batch_get_item_histogram;
+        batch_histogram batch_write_item_histogram;
     } api_operations;
     // Operation size metrics
     struct {
