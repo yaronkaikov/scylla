@@ -149,39 +149,39 @@ future<std::optional<tasks::task_status>> tablet_virtual_task::wait(tasks::task_
 
     tasks::tmlogger.info("tablet_virtual_task: wait until tablet operation is finished");
     co_await utils::get_local_injector().inject("tablet_virtual_task_wait", utils::wait_for_message(60s));
-  while (true) {
-    co_await _ss._topology_state_machine.event.wait([&] {
+    while (true) {
+        co_await _ss._topology_state_machine.event.wait([&] {
+            if (!_ss.get_token_metadata().tablets().has_tablet_map(table)) {
+                return true;
+            }
+            auto& tmap = _ss.get_token_metadata().tablets().get_tablet_map(table);
+            if (is_resize_task(task_type)) {    // Resize task.
+                return tmap.resize_task_info().tablet_task_id.uuid() != id.uuid();
+            } else if (tablet_id_opt.has_value()) {    // Migration task.
+                return tmap.get_tablet_info(tablet_id_opt.value()).migration_task_info.tablet_task_id.uuid() != id.uuid();
+            } else {    // Repair task.
+                return true;
+            }
+        });
+
+        if (!is_repair_task(task_type)) {
+            break;
+        }
+
+        auto tmptr = _ss.get_token_metadata_ptr();
         if (!_ss.get_token_metadata().tablets().has_tablet_map(table)) {
-            return true;
+            break;
         }
-        auto& tmap = _ss.get_token_metadata().tablets().get_tablet_map(table);
-        if (is_resize_task(task_type)) {    // Resize task.
-            return tmap.resize_task_info().tablet_task_id.uuid() != id.uuid();
-        } else if (tablet_id_opt.has_value()) {    // Migration task.
-            return tmap.get_tablet_info(tablet_id_opt.value()).migration_task_info.tablet_task_id.uuid() != id.uuid();
-        } else {    // Repair task.
-            return true;
+        auto& tmap = tmptr->tablets().get_tablet_map(table);
+        bool repair_still_running = false;
+        co_await tmap.for_each_tablet([&] (locator::tablet_id tid, const locator::tablet_info& info) {
+            repair_still_running = repair_still_running || (info.repair_task_info.is_valid() && info.repair_task_info.tablet_task_id.uuid() == id.uuid());
+            return make_ready_future();
+        });
+        if (!repair_still_running) {
+            break;
         }
-    });
-
-    if (!is_repair_task(task_type)) {
-        break;
     }
-
-    auto tmptr = _ss.get_token_metadata_ptr();
-    if (!_ss.get_token_metadata().tablets().has_tablet_map(table)) {
-        break;
-    }
-    auto& tmap = tmptr->tablets().get_tablet_map(table);
-    bool repair_still_running = false;
-    co_await tmap.for_each_tablet([&] (locator::tablet_id tid, const locator::tablet_info& info) {
-        repair_still_running = repair_still_running || (info.repair_task_info.is_valid() && info.repair_task_info.tablet_task_id.uuid() == id.uuid());
-        return make_ready_future();
-    });
-    if (!repair_still_running) {
-        break;
-    }
-  }
 
     res->status.state = tasks::task_manager::task_state::done; // Failed repair task is retried.
     if (!_ss.get_token_metadata().tablets().has_tablet_map(table)) {
