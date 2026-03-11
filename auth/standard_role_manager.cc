@@ -36,7 +36,6 @@
 #include <seastar/coroutine/maybe_yield.hh>
 #include "service/raft/raft_group0_client.hh"
 #include "service/migration_manager.hh"
-#include "password_authenticator.hh"
 #include "utils/managed_string.hh"
 
 namespace auth {
@@ -93,7 +92,7 @@ const resource_set& standard_role_manager::protected_resources() const {
 }
 
 future<> standard_role_manager::maybe_create_default_role() {
-    if (_superuser.empty()) {
+    if (default_superuser(_qp).empty()) {
         co_return;
     }
     auto has_superuser = [this] () -> future<bool> {
@@ -124,9 +123,9 @@ future<> standard_role_manager::maybe_create_default_role() {
             db::system_keyspace::NAME,
             meta::roles_table::name,
             meta::roles_table::role_col_name);
-    co_await collect_mutations(_qp, batch, insert_query, {_superuser});
+    co_await collect_mutations(_qp, batch, insert_query, {default_superuser(_qp)});
     co_await std::move(batch).commit(_group0_client, _as, get_raft_timeout());
-    log.info("Created default superuser role '{}'.", _superuser);
+    log.info("Created default superuser role '{}'.", default_superuser(_qp));
 }
 
 future<> standard_role_manager::maybe_create_default_role_with_retries() {
@@ -151,8 +150,6 @@ future<> standard_role_manager::maybe_create_default_role_with_retries() {
 
 future<> standard_role_manager::start() {
     return once_among_shards([this] () -> future<> {
-        _superuser = password_authenticator::default_superuser(_qp);
-
         auto handler = [this] () -> future<> {
             co_await maybe_create_default_role_with_retries();
             if (!_superuser_created_promise.available()) {
