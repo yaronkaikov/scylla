@@ -20,6 +20,7 @@
 #include "cql3/column_specification.hh"
 #include "cql3/column_identifier.hh"
 #include "cql3/query_processor.hh"
+#include "db/system_keyspace.hh"
 #include "cql3/statements/alter_role_statement.hh"
 #include "cql3/statements/create_role_statement.hh"
 #include "cql3/statements/drop_role_statement.hh"
@@ -378,9 +379,9 @@ future<result_message_ptr>
 list_roles_statement::execute(query_processor& qp, service::query_state& state, const query_options&, std::optional<service::group0_guard> guard) const {
     static const sstring virtual_table_name("roles");
 
-    const auto make_column_spec = [auth_ks = auth::get_auth_ks_name(qp)](const sstring& name, const ::shared_ptr<const abstract_type>& ty) {
+    const auto make_column_spec = [](const sstring& name, const ::shared_ptr<const abstract_type>& ty) {
         return make_lw_shared<column_specification>(
-                auth_ks,
+                db::system_keyspace::NAME,
                 virtual_table_name,
                 ::make_shared<column_identifier>(name, true),
                 ty);

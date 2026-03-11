@@ -28,6 +28,7 @@
 #include "service/migration_manager.hh"
 #include "cql3/query_processor.hh"
 #include "db/config.hh"
+#include "db/system_keyspace.hh"
 
 namespace auth {
 
@@ -62,7 +63,7 @@ static bool has_salted_hash(const cql3::untyped_result_set_row& row) {
 
 sstring password_authenticator::update_row_query() const {
     return seastar::format("UPDATE {}.{} SET {} = ? WHERE {} = ?",
-            get_auth_ks_name(_qp),
+            db::system_keyspace::NAME,
             meta::roles_table::name,
             SALTED_HASH,
             meta::roles_table::role_col_name);
@@ -73,7 +74,7 @@ future<> password_authenticator::maybe_create_default_password() {
         if (_superuser.empty()) {
             co_return false;
         }
-        const sstring query = seastar::format("SELECT * FROM {}.{} WHERE is_superuser = true ALLOW FILTERING", get_auth_ks_name(_qp), meta::roles_table::name);
+        const sstring query = seastar::format("SELECT * FROM {}.{} WHERE is_superuser = true ALLOW FILTERING", db::system_keyspace::NAME, meta::roles_table::name);
         auto results = co_await _qp.execute_internal(query,
                 db::consistency_level::LOCAL_ONE,
                 internal_distributed_query_state(), cql3::query_processor::cache_internal::yes);
@@ -254,7 +255,7 @@ future<> password_authenticator::alter(std::string_view role_name, const authent
     const auto password = std::get<password_option>(*options.credentials).password;
 
     const sstring query = seastar::format("UPDATE {}.{} SET {} = ? WHERE {} = ?",
-            get_auth_ks_name(_qp),
+            db::system_keyspace::NAME,
             meta::roles_table::name,
             SALTED_HASH,
             meta::roles_table::role_col_name);
@@ -265,7 +266,7 @@ future<> password_authenticator::alter(std::string_view role_name, const authent
 future<> password_authenticator::drop(std::string_view name, ::service::group0_batch& mc) {
     const sstring query = seastar::format("DELETE {} FROM {}.{} WHERE {} = ?",
             SALTED_HASH,
-            get_auth_ks_name(_qp),
+            db::system_keyspace::NAME,
             meta::roles_table::name,
             meta::roles_table::role_col_name);
     co_await collect_mutations(_qp, mc, query, {sstring(name)});
@@ -287,7 +288,7 @@ future<std::optional<sstring>> password_authenticator::get_password_hash(std::st
     // that a map lookup string->statement is not gonna kill us much.
     const sstring query = seastar::format("SELECT {} FROM {}.{} WHERE {} = ?",
                 SALTED_HASH,
-                get_auth_ks_name(_qp),
+                db::system_keyspace::NAME,
                 meta::roles_table::name,
                 meta::roles_table::role_col_name);
 

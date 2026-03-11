@@ -19,7 +19,6 @@
 #include "cql3/query_processor.hh"
 #include "service/raft/group0_state_machine.hh"
 #include "timeout_config.hh"
-#include "db/system_keyspace.hh"
 
 namespace auth {
 
@@ -32,10 +31,6 @@ constinit const std::string_view AUTH_PACKAGE_NAME("org.apache.cassandra.auth.")
 } // namespace meta
 
 static logging::logger auth_log("auth");
-
-std::string_view get_auth_ks_name(cql3::query_processor&) {
-    return db::system_keyspace::NAME;
-}
 
 // Func must support being invoked more than once.
 future<> do_after_system_ready(seastar::abort_source& as, seastar::noncopyable_function<future<>()> func) {
