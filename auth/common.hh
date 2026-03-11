@@ -37,7 +37,6 @@ namespace legacy {
 extern constinit const std::string_view AUTH_KS;
 } // namespace legacy
 
-constexpr std::string_view DEFAULT_SUPERUSER_NAME("cassandra");
 extern constinit const std::string_view AUTH_PACKAGE_NAME;
 
 } // namespace meta
