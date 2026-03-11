@@ -576,8 +576,7 @@ async def check_streaming_directions(logger, servers, topology, host_ids, scope,
 
             assert max_deviation < 0.1 * mean_count, f'node {s.ip_addr} streaming to primary replicas was unbalanced: {streamed_to}'
 
-async def do_load_sstables(ks, cf, servers, topology, sstables, scope, manager, logger, prefix = None, object_storage = None, primary_replica_only = False, load_fn=do_restore_server):
-    logger.info(f'Loading {servers=} with {sstables=} scope={scope}')
+def distribute_sstables(sstables, servers, topology, scope):
     sstables_per_server = defaultdict(list)
     # rf_rack_valid can be True also with rack lists
     rf_rack_valid = topology.rf == topology.racks
@@ -615,11 +614,9 @@ async def do_load_sstables(ks, cf, servers, topology, sstables, scope, manager, 
                     for s in servers_per_dc_rack[dc][rack]:
                         sstables_per_server[s] = sstables_in_rack
     else:
-        raise f"do_load_sstables: {scope=} not supported"
+        raise f"distribute_sstables: {scope=} not supported"
+    return sstables_per_server
 
-    await asyncio.gather(*(load_fn(manager, logger, ks, cf, s, sstables, scope, primary_replica_only, prefix, object_storage) for s, sstables in sstables_per_server.items()))
-    if primary_replica_only:
-        await manager.api.tablet_repair(servers[0].ip_addr, ks, cf, 'all', timeout=600)
 
 async def do_backup(s, snap_name, prefix, ks, cf, object_storage, manager, logger):
     logger.info(f'Backup to {snap_name}')
@@ -669,6 +666,18 @@ def create_schema(ks, cf, min_tablet_count=None):
     schema += ';'
     return schema
 
+
+class SSTablesOnObjectStorage:
+    def __init__(self, object_storage):
+        self.object_storage = object_storage
+
+    async def save(self, manager, servers, snap_name, prefix, ks, cf, logger):
+        await asyncio.gather(*(do_backup(s, snap_name, prefix, ks, cf, self.object_storage, manager, logger) for s in servers))
+
+    async def restore(self, manager, sstables_per_server, prefix, ks, cf, scope, primary_replica_only, logger):
+        await asyncio.gather(*(do_restore_server(manager, logger, ks, cf, s, sstables, scope, primary_replica_only, prefix, self.object_storage) for s, sstables in sstables_per_server.items()))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("topology_rf_validity", [
         (topo(rf = 1, nodes = 3, racks = 1, dcs = 1), True),
@@ -677,13 +686,30 @@ def create_schema(ks, cf, min_tablet_count=None):
         (topo(rf = 3, nodes = 6, racks = 2, dcs = 1), False),
         (topo(rf = 2, nodes = 8, racks = 4, dcs = 2), True)
     ])
-
 async def test_restore_with_streaming_scopes(build_mode: str, manager: ManagerClient, object_storage, topology_rf_validity):
     '''Check that restoring of a cluster with stream scopes works'''
+    await do_test_streaming_scopes(build_mode, manager, topology_rf_validity, SSTablesOnObjectStorage(object_storage))
+
+
+async def do_test_streaming_scopes(build_mode: str, manager: ManagerClient, topology_rf_validity, sstables_storage):
+    '''
+    This test creates a cluster specified by the topology parameter above,
+    configurable number of nodes, tacks, datacenters, and replication factor.
+
+    It creates a dataset, takes a snapshot and copies the sstables of all nodes to a temporary
+    location. It then truncates the table so all sstables are gone, copies all the sstables into
+    each node's upload directory, and refreshes the nodes given the scope passed as the test parameter.
+
+    The test then performs two types of checks:
+    1) Check that the data is back in the table by getting all mutations from the nodes and checking
+    that a random sample of them contains the expected key and that they are replicated according to RF * DCS factor.
+    2) Check that the streaming communication between nodes is as expected according to the scope parameter of the test.
+    This stage parses the logs and checks that the data was streamed to nodes within the configured scope.
+    '''
 
     topology, rf_rack_valid_keyspaces = topology_rf_validity
 
-    servers, host_ids = await create_cluster(topology, rf_rack_valid_keyspaces, manager, logger, object_storage)
+    servers, host_ids = await create_cluster(topology, rf_rack_valid_keyspaces, manager, logger, sstables_storage.object_storage)
 
     await manager.disable_tablet_balancing()
     cql = manager.get_cql()
@@ -693,7 +719,7 @@ async def test_restore_with_streaming_scopes(build_mode: str, manager: ManagerCl
 
     scopes = ['rack', 'dc'] if build_mode == 'debug' else ['all', 'dc', 'rack', 'node']
     pros = [ True, False ] # Primary Replica Only
-    restored_min_tablet_counts = [original_min_tablet_count] if build_mode == 'debug' else [2, original_min_tablet_count, 10]
+    restored_min_tablet_counts = [original_min_tablet_count] if (build_mode == 'debug' or sstables_storage.object_storage is None) else [2, original_min_tablet_count, 10]
     
     async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': {topology.rf}}}") as ks:
         await cql.run_async(create_schema(ks, 'test', min_tablet_count=original_min_tablet_count))
@@ -707,7 +733,7 @@ async def test_restore_with_streaming_scopes(build_mode: str, manager: ManagerCl
         snap_name, sstables = await take_snapshot(ks, servers, manager, logger)
         prefix = f'test/{snap_name}'
 
-        await asyncio.gather(*(do_backup(s, snap_name, prefix, ks, 'test', object_storage, manager, logger) for s in servers))
+        await sstables_storage.save(manager, servers, snap_name, prefix, ks, 'test', logger)
 
     for scope, pro, restored_min_tablet_count in itertools.product(scopes, pros, restored_min_tablet_counts):
         if scope == 'node' and pro == True:
@@ -724,7 +750,11 @@ async def test_restore_with_streaming_scopes(build_mode: str, manager: ManagerCl
 
             log_marks = await mark_all_logs(manager, servers)
 
-            await do_load_sstables(ks, 'test', servers, topology, sstables, scope, manager, logger, prefix=prefix, object_storage=object_storage, primary_replica_only=pro)
+            logger.info(f'Loading {servers=} with {sstables=} scope={scope}')
+            sstables_per_server = distribute_sstables(sstables, servers, topology, scope)
+            await sstables_storage.restore(manager, sstables_per_server, prefix, ks, 'test', scope, pro, logger)
+            if pro:
+                await manager.api.tablet_repair(servers[0].ip_addr, ks, 'test', 'all', timeout=600)
             await check_mutation_replicas(cql, manager, servers, range(num_keys), topology, logger, ks, 'test')
             if restored_min_tablet_count == original_min_tablet_count:
                 await check_streaming_directions(logger, servers, topology, host_ids, scope, pro, log_marks)
