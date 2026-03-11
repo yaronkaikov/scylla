@@ -174,6 +174,7 @@ public:
     // Return an instance of group 0. Valid only on shard 0,
     // after boot/upgrade is complete
     raft::server& group0();
+    raft::group_id group0_id() const;
 
     // Return an instance of group 0 server with timeouts support. Valid only on shard 0,
     // after boot/upgrade is complete
@@ -188,6 +189,11 @@ public:
     bool is_group0_alive() const {
         return _group0_is_alive;
     }
+
+    // Send a read barrier RPC to a remote node, asking it to perform
+    // a local read barrier on the given raft group, ensuring it has
+    // applied all committed entries.
+    future<> send_raft_read_barrier(raft::group_id, raft::server_id dst);
 };
 
 // Implementation of `direct_failure_detector::pinger` which uses DIRECT_FD_PING verb for pinging.
