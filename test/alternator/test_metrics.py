@@ -168,23 +168,71 @@ def histogram_bucket_offsets(size, ratio=1.2):
         last = current
     return bucket_offsets
 
-def bucket_idx(size_in_kb, bucket_count=30, ratio=1.2):
-    buckets = histogram_bucket_offsets(bucket_count, ratio)
+def expo_estimated_histogram_bucket_offsets(max=512, precision=2):
+    """
+    Generate deduplicated Prometheus ``le`` boundaries for
+    ``estimated_histogram_with_max<max>``.
+
+    This mirrors ``approx_exponential_histogram<1, max, 2**precision>`` and
+    the deduplication done by ``to_metrics_histogram()``.
+
+    Args:
+        max (int): Histogram max value (must be a power of two and > 1).
+        precision (int): Precision bits (schema). ``2`` means 4 buckets per
+            exponential range.
+
+    Returns:
+        list[int]: Monotonically increasing bucket upper bounds (``le`` labels,
+            excluding ``+Inf``).
+    """
+    if max <= 1 or (max & (max - 1)) != 0:
+        raise ValueError(f"max must be a power of two greater than 1, got {max}")
+    if precision < 0:
+        raise ValueError(f"precision must be >= 0, got {precision}")
+
+    min_value = 1
+    buckets_per_range = 1 << precision
+
+    min_bits = (min_value.bit_length() - 1)
+    shift = precision - min_bits if precision > min_bits else 0
+    scaled_min = min_value << shift
+    scaled_max = max << shift
+
+    num_exp_ranges = (scaled_max // scaled_min).bit_length() - 1
+    num_buckets = num_exp_ranges * buckets_per_range + 1
+    base_shift = scaled_min.bit_length() - 1
+    lower_bits_mask = buckets_per_range - 1
+
+    def get_bucket_lower_limit(bucket_id):
+        if bucket_id == num_buckets - 1:
+            return max
+        exp_range = bucket_id >> precision
+        limit = (scaled_min << exp_range) + ((bucket_id & lower_bits_mask) << (exp_range + base_shift - precision))
+        return limit >> shift
+
+    bounds = []
+    for i in range(num_buckets - 1):
+        upper_bound = get_bucket_lower_limit(i + 1)
+        if not bounds or bounds[-1] != upper_bound:
+            bounds.append(upper_bound)
+    return bounds
+def bucket_idx(size_in_kb, max=512, precision=2):
+    buckets = expo_estimated_histogram_bucket_offsets(max, precision)
     return bisect_left(buckets, size_in_kb)
 
-def bucket(size_in_kb, bucket_count=30, ratio=1.2):
-    buckets = histogram_bucket_offsets(bucket_count, ratio)
-    idx = bucket_idx(size_in_kb, bucket_count, ratio)
+def bucket(size_in_kb, max=512, precision=2):
+    buckets = expo_estimated_histogram_bucket_offsets(max, precision)
+    idx = bucket_idx(size_in_kb, max, precision)
     return str(buckets[idx]) + '.000000' if size_in_kb <= buckets[-1] else '+Inf'
 
-def next_bucket(size_in_kb, bucket_count=30, ratio=1.2):
-    buckets = histogram_bucket_offsets(bucket_count, ratio)
-    idx = bucket_idx(size_in_kb, bucket_count, ratio)
-    return str(buckets[idx + 1]) + '.000000' if idx + 1 < bucket_count else None
+def next_bucket(size_in_kb, max=512, precision=2):
+    buckets = expo_estimated_histogram_bucket_offsets(max, precision)
+    idx = bucket_idx(size_in_kb, max, precision)
+    return str(buckets[idx + 1]) + '.000000' if idx + 1 < len(buckets) else None
 
-def prev_bucket(size_in_kb, bucket_count=30, ratio=1.2):
-    buckets = histogram_bucket_offsets(bucket_count, ratio)
-    idx = bucket_idx(size_in_kb, bucket_count, ratio)
+def prev_bucket(size_in_kb, max=512, precision=2):
+    buckets = expo_estimated_histogram_bucket_offsets(max, precision)
+    idx = bucket_idx(size_in_kb, max, precision)
     return str(buckets[idx - 1]) + '.000000' if idx > 0 else None
 
 ###### Test for metrics that count DynamoDB API operations:
@@ -510,7 +558,7 @@ def test_get_item_size_item_falls_into_appropriate_bucket(dynamodb, test_table_s
         test_table_s.put_item(Item={'p': pk, 'a': 'a' * 7 * KB, 'b': 'b' * 10 * KB})
         def do_test():
             test_table_s.get_item(Key={'p': pk})
-        check_histogram_metric_increases('GetItem', 'operation_size_kb', metrics, do_test, [(0, bucket(17)), (1, bucket(17.1)), (1, bucket(INF))])
+        check_histogram_metric_increases('GetItem', 'operation_size_kb', metrics, do_test, [(0, bucket(16)), (1, bucket(16.1)), (1, bucket(INF))])
 
 def test_put_item_many_items_fall_into_appropriate_buckets(test_table_s, metrics):
     def do_test():
