@@ -163,9 +163,6 @@ SEASTAR_THREAD_TEST_CASE(too_many_service_levels) {
             }
             return make_ready_future<>();
         }    
-        virtual bool can_use_effective_service_level_cache() const override {
-            return true;
-        }
         virtual future<> commit_mutations(service::group0_batch&& mc, abort_source& as) const override {
             return make_ready_future<>();
         }

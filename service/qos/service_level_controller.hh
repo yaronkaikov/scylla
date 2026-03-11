@@ -117,9 +117,6 @@ public:
         virtual future<> drop_service_level(sstring service_level_name, service::group0_batch& mc) const = 0;
         virtual future<> commit_mutations(service::group0_batch&& mc, abort_source& as) const = 0;
 
-        // Returns whether effective service level cache can be populated and used.
-        // This is equivalent to checking whether auth + raft have been migrated to raft.
-        virtual bool can_use_effective_service_level_cache() const = 0;
     };
     using service_level_distributed_data_accessor_ptr = ::shared_ptr<service_level_distributed_data_accessor>;
 
@@ -380,13 +377,6 @@ public:
     future<service_levels_info> get_distributed_service_levels(qos::query_context ctx);
     future<service_levels_info> get_distributed_service_level(sstring service_level_name);
 
-    /*
-    * Returns whether effective service level cache can be populated and used.
-    * This is equivalent to checking whether auth + raft have been migrated to raft.
-    */
-    bool can_use_effective_service_level_cache() const;
-    
-    
     /**
      * Returns the service level options **in effect** for a user having the given
      * collection of roles.

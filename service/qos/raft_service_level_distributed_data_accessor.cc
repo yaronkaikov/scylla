@@ -97,9 +97,5 @@ future<> raft_service_level_distributed_data_accessor::commit_mutations(service:
     co_await _group0_client.send_group0_read_barrier_to_live_members();
 }
 
-bool raft_service_level_distributed_data_accessor::can_use_effective_service_level_cache() const {
-    return true;
-}
-
 }
 

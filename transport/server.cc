@@ -1023,15 +1023,7 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_st
     co_return res;
 }
 
-void cql_server::connection::update_user_scheduling_group_v1(const std::optional<auth::authenticated_user>& usr) {
-    switch_tenant([this, usr] (this auto self, noncopyable_function<future<> ()> process_loop) -> future<> {
-        auto shg = co_await _server._sl_controller.get_user_scheduling_group(usr);
-        _current_scheduling_group = shg;
-        co_return co_await _server._sl_controller.with_user_service_level(usr, std::move(process_loop));
-    });
-}
-
-void cql_server::connection::update_user_scheduling_group_v2(const std::optional<auth::authenticated_user>& usr) {
+void cql_server::connection::update_user_scheduling_group(const std::optional<auth::authenticated_user>& usr) {
     auto shg_grp = _server._sl_controller.get_cached_user_scheduling_group(usr);
     _current_scheduling_group = shg_grp;
     switch_tenant([this, usr] (this auto self, noncopyable_function<future<> ()> process_loop) -> future<> {
@@ -1050,10 +1042,8 @@ void cql_server::connection::update_control_connection_scheduling_group() {
 void cql_server::connection::update_scheduling_group() {
     if (_client_state.is_control_connection()) {
         update_control_connection_scheduling_group();
-    } else if (_server._sl_controller.can_use_effective_service_level_cache()) {
-        update_user_scheduling_group_v2(_client_state.user());
     } else {
-        update_user_scheduling_group_v1(_client_state.user());
+        update_user_scheduling_group(_client_state.user());
     }
 }
 

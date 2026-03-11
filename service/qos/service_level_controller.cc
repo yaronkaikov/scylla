@@ -321,17 +321,6 @@ future<> service_level_controller::auth_integration::reload_cache(qos::query_con
     SCYLLA_ASSERT(this_shard_id() == global_controller);
     const auto _ = _stop_gate.hold();
 
-    if (!_sl_controller._sl_data_accessor || !_sl_controller._sl_data_accessor->can_use_effective_service_level_cache()) {
-        // Don't populate the effective service level cache until auth is migrated to raft.
-        // Otherwise, executing the code that follows would read roles data
-        // from system_auth tables; that would be bad because reading from
-        // those tables is prone to timeouts, and `reload_cache`
-        // is called from the group0 context - a timeout like that would render
-        // group0 non-functional on the node until restart.
-        //
-        // See scylladb/scylladb#24963 for more details.
-        co_return;
-    }
     auto units = co_await get_units(_sl_controller._global_controller_db->notifications_serializer, 1);
 
     auto& qs = qos_query_state(ctx);
@@ -457,47 +446,10 @@ future<std::optional<service::group0_guard>> service_level_controller::migrate_t
 future<std::optional<service_level_options>> service_level_controller::auth_integration::find_effective_service_level(const sstring& role_name) {
     const auto _ = _stop_gate.hold();
 
-    if (_sl_controller._sl_data_accessor->can_use_effective_service_level_cache()) {
-        auto effective_sl_it = _cache.find(role_name);
-        co_return effective_sl_it != _cache.end() 
-            ? std::optional<service_level_options>(effective_sl_it->second)
-            : std::nullopt;
-    } else {
-        auto& role_manager = _auth_service.underlying_role_manager();
-        auto roles = co_await role_manager.query_granted(role_name, auth::recursive_role_query::yes);
-
-        // converts a list of roles into the chosen service level.
-        co_return co_await ::map_reduce(roles.begin(), roles.end(), [&role_manager, this] (const sstring& role) {
-            return role_manager.get_attribute(role, "service_level").then_wrapped([this, role] (future<std::optional<sstring>> sl_name_fut) -> std::optional<service_level_options> {
-                try {
-                    std::optional<sstring> sl_name = sl_name_fut.get();
-                    if (!sl_name) {
-                        return std::nullopt;
-                    }
-                    auto sl_it = _sl_controller._service_levels_db.find(*sl_name);
-                    if ( sl_it == _sl_controller._service_levels_db.end()) {
-                        return std::nullopt;
-                    }
-
-                    sl_it->second.slo.init_effective_names(*sl_name);
-                    auto slo = sl_it->second.slo;
-                    slo.shares_name = sl_name;
-                    return slo;
-                } catch (...) { // when we fail, we act as if the attribute does not exist so the node
-                            // will not be brought down.
-                    return std::nullopt;
-                }
-            });
-        }, std::optional<service_level_options>{}, [] (std::optional<service_level_options> first, std::optional<service_level_options> second) -> std::optional<service_level_options> {
-            if (!second) {
-                return first;
-            } else if (!first) {
-                return second;
-            } else {
-                return first->merge_with(*second);
-            }
-        });
-    }
+    auto effective_sl_it = _cache.find(role_name);
+    co_return effective_sl_it != _cache.end()
+        ? std::optional<service_level_options>(effective_sl_it->second)
+        : std::nullopt;
 }
 
 future<std::optional<service_level_options>> service_level_controller::find_effective_service_level(const sstring& role_name) {
@@ -713,10 +665,6 @@ future<service_levels_info> service_level_controller::get_distributed_service_le
 
 future<service_levels_info> service_level_controller::get_distributed_service_level(sstring service_level_name) {
     return _sl_data_accessor ? _sl_data_accessor->get_service_level(service_level_name) : make_ready_future<service_levels_info>();
-}
-
-bool service_level_controller::can_use_effective_service_level_cache() const{
-    return _sl_data_accessor && _sl_data_accessor->can_use_effective_service_level_cache();
 }
 
 future<bool> service_level_controller::validate_before_service_level_add() {
