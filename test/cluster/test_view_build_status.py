@@ -11,8 +11,7 @@ from test.pylib.util import wait_for_cql_and_get_hosts, wait_for_view, wait_for_
 from test.pylib.manager_client import ManagerClient
 from test.pylib.scylla_cluster import ReplaceConfig
 from test.pylib.internal_types import ServerInfo
-from test.cluster.util import trigger_snapshot, wait_until_topology_upgrade_finishes, enter_recovery_state, reconnect_driver, \
-        delete_raft_topology_state, delete_raft_data_and_upgrade_state, wait_until_upgrade_finishes, wait_for, create_new_test_keyspace
+from test.cluster.util import trigger_snapshot, wait_for, create_new_test_keyspace
 from cassandra import ConsistencyLevel
 from cassandra.query import SimpleStatement
 from cassandra.protocol import InvalidRequest

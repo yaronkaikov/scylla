@@ -689,7 +689,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             }
         }
 
-        std::optional<std::vector<cdc::generation_id_v2>::const_iterator> first_nonobsolete_gen_it;
+        std::optional<std::vector<cdc::generation_id>::const_iterator> first_nonobsolete_gen_it;
         for (auto it = committed_gens.begin(); it != committed_gens.end() && it->ts <= ts_upper_bound; it++) {
             if (it + 1 == committed_gens.end() || (it + 1)->ts > ts_upper_bound) {
                 first_nonobsolete_gen_it = it;
@@ -711,7 +711,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         m.partition().apply_delete(*s, range_tombstone{bv.first, bv.second, tombstone{mut_ts, gc_clock::now()}});
         updates.push_back(canonical_mutation(m));
 
-        std::vector<cdc::generation_id_v2> new_committed_gens(*first_nonobsolete_gen_it, committed_gens.end());
+        std::vector<cdc::generation_id> new_committed_gens(*first_nonobsolete_gen_it, committed_gens.end());
         topology_mutation_builder builder(guard.write_timestamp());
         builder.set_committed_cdc_generations(std::move(new_committed_gens));
         updates.push_back(builder.build());
@@ -740,7 +740,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         co_await _sys_dist_ks.local().create_cdc_desc(
                 gen_id.ts, gen_data, { get_token_metadata().count_normal_token_owners() });
 
-        std::vector<cdc::generation_id_v2> new_unpublished_gens(unpublished_gens.begin() + 1, unpublished_gens.end());
+        std::vector<cdc::generation_id> new_unpublished_gens(unpublished_gens.begin() + 1, unpublished_gens.end());
         topology_mutation_builder builder(guard.write_timestamp());
         builder.set_unpublished_cdc_generations(std::move(new_unpublished_gens));
         updates.push_back(builder.build());
@@ -2155,11 +2155,6 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
     }
 
     future<> handle_tablet_resize_finalization(group0_guard g) {
-        co_await utils::get_local_injector().inject("handle_tablet_resize_finalization_wait", [] (auto& handler) -> future<> {
-            rtlogger.info("handle_tablet_resize_finalization: waiting");
-            co_await handler.wait_for_message(std::chrono::steady_clock::now() + std::chrono::seconds{60});
-        });
-
         // Executes a global barrier to guarantee that any process (e.g. repair) holding stale version
         // of token metadata will complete before we update topology.
         auto guard = co_await global_tablet_token_metadata_barrier(std::move(g));
@@ -2778,7 +2773,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                         "new CDC generation data UUID missing in `commit_cdc_generation` state");
                 }
 
-                cdc::generation_id_v2 cdc_gen_id {
+                cdc::generation_id cdc_gen_id {
                     .ts = cdc_gen_ts,
                     .id = *cdc_gen_uuid,
                 };
@@ -2835,7 +2830,6 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             }
                 break;
             case topology::transition_state::tablet_draining:
-                co_await utils::get_local_injector().inject("suspend_decommission", utils::wait_for_message(1min));
                 try {
                     co_await handle_tablet_migration(std::move(guard), true);
                 } catch (term_changed_error&) {
@@ -3883,7 +3877,7 @@ future<std::optional<group0_guard>> topology_coordinator::maybe_migrate_system_t
         co_return std::nullopt;
     }
 
-    if (_sl_controller.is_v2() && _feature_service.driver_service_level) {
+    if (_feature_service.driver_service_level) {
         const auto sl_driver_created = co_await _sys_ks.get_service_level_driver_created();
         if (!sl_driver_created.value_or(false)) {
             co_return co_await _sl_controller.migrate_to_driver_service_level(std::move(guard), _sys_ks);

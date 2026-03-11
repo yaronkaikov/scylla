@@ -31,7 +31,6 @@
 #include <seastar/core/condition-variable.hh>
 #include "dht/token_range_endpoints.hh"
 #include "gms/application_state.hh"
-#include "gms/feature.hh"
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/gate.hh>
 #include "replica/database_fwd.hh"
@@ -217,7 +216,6 @@ private:
     using client_shutdown_hook = noncopyable_function<void()>;
     std::vector<protocol_server*> _protocol_servers;
     std::vector<std::any> _listeners;
-    gms::feature::listener_registration _workload_prioritization_registration;
     named_gate _async_gate;
 
     condition_variable _tablet_split_monitor_event;
@@ -447,19 +445,14 @@ private:
     future<> shutdown_protocol_servers();
 
     struct replacement_info {
-        std::unordered_set<token> tokens;
         locator::endpoint_dc_rack dc_rack;
         locator::host_id host_id;
-        gms::inet_address address;
-        std::unordered_map<locator::host_id, gms::loaded_endpoint_state> ignore_nodes;
     };
-    future<replacement_info> prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes,
-            const std::unordered_map<locator::host_id, sstring>& loaded_peer_features);
+    future<replacement_info> prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes);
 
 public:
 
-    future<> check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes,
-            const std::unordered_map<locator::host_id, sstring>& loaded_peer_features);
+    future<> check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes);
 
     future<> join_cluster(sharded<service::storage_proxy>& proxy,
             start_hint_manager start_hm, gms::generation_type new_generation);
@@ -484,8 +477,6 @@ private:
     future<> join_topology(sharded<service::storage_proxy>& proxy,
             std::unordered_set<gms::inet_address> initial_contact_nodes,
             std::unordered_map<locator::host_id, gms::loaded_endpoint_state> loaded_endpoints,
-            std::unordered_map<locator::host_id, sstring> loaded_peer_features,
-            std::chrono::milliseconds,
             start_hint_manager start_hm,
             gms::generation_type new_generation);
 public:
@@ -598,7 +589,6 @@ private:
     // return an engaged value iff app_state_map has changes to the peer info
     std::optional<db::system_keyspace::peer_info> get_peer_info_for_update(locator::host_id endpoint, const gms::application_state_map& app_state_map);
 
-    std::unordered_set<token> get_tokens_for(locator::host_id endpoint);
     std::optional<locator::endpoint_dc_rack> get_dc_rack_for(const gms::endpoint_state& ep_state);
     std::optional<locator::endpoint_dc_rack> get_dc_rack_for(locator::host_id endpoint);
 private:
@@ -613,19 +603,9 @@ private:
     sharded<db::view::view_building_worker>& _view_building_worker;
     bool _isolated = false;
 private:
-    future<> excise(std::unordered_set<token> tokens, inet_address endpoint_ip, locator::host_id endpoint_hid,
-            gms::permit_id);
-    future<> excise(std::unordered_set<token> tokens, inet_address endpoint_ip, locator::host_id endpoint_hid,
-            long expire_time, gms::permit_id);
 
     /** unlike excise we just need this endpoint gone without going through any notifications **/
     future<> remove_endpoint(inet_address endpoint, gms::permit_id pid);
-
-    void add_expire_time_if_found(locator::host_id endpoint, int64_t expire_time);
-
-    int64_t extract_expire_time(const std::vector<sstring>& pieces) const {
-        return std::stoll(pieces[2]);
-    }
 
     /**
      * Finds living endpoints responsible for the given ranges
@@ -662,13 +642,6 @@ public:
     future<dht::token_range_vector> get_ranges_for_endpoint(const locator::effective_replication_map& erm, const locator::host_id& ep) const;
 
     /**
-     * Get all ranges that span the ring given a set
-     * of tokens. All ranges are in sorted order of
-     * ranges.
-     * @return ranges in sorted order
-    */
-    future<dht::token_range_vector> get_all_ranges(const std::vector<token>& sorted_tokens) const;
-    /**
      * This method returns the N endpoints that are responsible for storing the
      * specified key i.e for replication.
      *
@@ -696,10 +669,6 @@ public:
     future<> decommission();
 
 private:
-    /**
-     * Broadcast leaving status and update local _token_metadata accordingly
-     */
-    future<> leave_ring();
     future<> unbootstrap();
 
 public:
@@ -830,37 +799,7 @@ public:
     future<> update_fence_version(token_metadata::version_t version);
 
 private:
-    std::unordered_set<locator::host_id> _normal_state_handled_on_boot;
-    bool is_normal_state_handled_on_boot(locator::host_id);
-
     friend class group0_state_machine;
-
-    enum class topology_change_kind {
-        // The node is still starting and didn't determine yet which ops kind to use
-        unknown,
-        // The node uses legacy, gossip-based topology operations
-        legacy,
-        // The node is in the process of upgrading to raft-based topology operations
-        upgrading_to_raft,
-        // The node uses raft-based topology operations
-        raft
-    };
-    // The _topology_change_kind_enabled variable is first initialized in `join_cluster`.
-    // After the node successfully joins, the control over the variable is yielded
-    // to `topology_state_load`, so that it can control it during the upgrade from gossiper
-    // based topology to raft-based topology.
-    topology_change_kind _topology_change_kind_enabled = topology_change_kind::unknown;
-
-    // Throws an exception if the node is either starting and didn't determine which
-    // topology operations to use, or if it is in the process of upgrade to topology
-    // on raft. The name only serves for display purposes (i.e. it will be included
-    // in the exception, if one is thrown).
-    void check_ability_to_perform_topology_operation(std::string_view operation_name) const;
-
-    topology_change_kind upgrade_state_to_topology_op_kind(topology::upgrade_state_type upgrade_state) const;
-
-public:
-    bool raft_topology_change_enabled() const;
 
 private:
     future<> _raft_state_monitor = make_ready_future<>();
@@ -912,7 +851,6 @@ private:
     future<> raft_rebuild(utils::optional_param source_dc);
     future<> raft_check_and_repair_cdc_streams();
     future<> update_topology_with_local_metadata(raft::server&);
-    void set_topology_change_kind(topology_change_kind kind);
 
     struct state_change_hint {
         std::optional<locator::tablet_metadata_change_hint> tablets_hint;
@@ -956,9 +894,6 @@ public:
 
     future<> do_clusterwide_vnodes_cleanup();
     future<> reset_cleanup_needed();
-
-    // Must be called on shard 0.
-    topology::upgrade_state_type get_topology_upgrade_state() const;
 
     node_state get_node_state(locator::host_id id);
 

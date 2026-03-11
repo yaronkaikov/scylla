@@ -25,7 +25,6 @@
 #include <seastar/core/shard_id.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 #include "service/qos/raft_service_level_distributed_data_accessor.hh"
-#include "service/qos/standard_service_level_distributed_data_accessor.hh"
 #include "service_level_controller.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "cql3/query_processor.hh"
@@ -124,12 +123,9 @@ void service_level_controller::set_distributed_data_accessor(service_level_distr
     }
 }
 
-future<> service_level_controller::reload_distributed_data_accessor(cql3::query_processor& qp, service::raft_group0_client& g0, db::system_keyspace& sys_ks, db::system_distributed_keyspace& sys_dist_ks) {
-    auto accessor = co_await qos::get_service_level_distributed_data_accessor_for_current_version(
-            sys_ks,
-            sys_dist_ks,
-            qp,
-            g0);
+void service_level_controller::reload_distributed_data_accessor(cql3::query_processor& qp, service::raft_group0_client& g0) {
+    auto accessor = static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
+        make_shared<qos::raft_service_level_distributed_data_accessor>(qp, g0));
     set_distributed_data_accessor(std::move(accessor));
 }
 
@@ -457,14 +453,6 @@ future<std::optional<service::group0_guard>> service_level_controller::migrate_t
     co_return std::move(guard); // return guard untouched
 }
 
-void service_level_controller::stop_legacy_update_from_distributed_data() {
-    SCYLLA_ASSERT(this_shard_id() == global_controller);
-
-    if (_global_controller_db->dist_data_update_aborter.abort_requested()) {
-        return;
-    }
-    _global_controller_db->dist_data_update_aborter.request_abort();
-}
 
 future<std::optional<service_level_options>> service_level_controller::auth_integration::find_effective_service_level(const sstring& role_name) {
     const auto _ = _stop_gate.hold();
@@ -518,10 +506,6 @@ future<std::optional<service_level_options>> service_level_controller::find_effe
 }
 
 std::optional<service_level_options> service_level_controller::auth_integration::find_cached_effective_service_level(const sstring& role_name) {
-    if (!_sl_controller._sl_data_accessor->is_v2()) {
-        return std::nullopt;
-    }
-
     auto effective_sl_it = _cache.find(role_name);
     return effective_sl_it != _cache.end() 
         ? std::optional<service_level_options>(effective_sl_it->second)
@@ -687,65 +671,6 @@ future<> service_level_controller::notify_effective_service_levels_cache_reloade
     });
 }
 
-void service_level_controller::maybe_start_legacy_update_from_distributed_data(std::function<steady_clock_type::duration()> interval_f, service::storage_service& storage_service, service::raft_group0_client& group0_client) {
-    if (this_shard_id() != global_controller) {
-        throw std::runtime_error(format("Service level updates from distributed data can only be activated on shard {}", global_controller));
-    }
-    if (storage_service.get_topology_upgrade_state() == service::topology::upgrade_state_type::done && !group0_client.in_recovery()) {
-        // Falling into this branch means service levels were migrated to raft and legacy update loop is not needed.
-        return;
-    }
-
-    if (_global_controller_db->distributed_data_update.available()) {
-        sl_logger.info("start_legacy_update_from_distributed_data: starting configuration polling loop");
-        _logged_intervals = 0;
-        _global_controller_db->distributed_data_update = repeat([this, interval_f = std::move(interval_f), &storage_service] {
-            return sleep_abortable<steady_clock_type>(interval_f(),
-                    _global_controller_db->dist_data_update_aborter).then_wrapped([this, &storage_service] (future<>&& f) {
-                try {
-                    f.get();
-                    
-                    if (storage_service.get_topology_upgrade_state() == service::topology::upgrade_state_type::done) {
-                        stop_legacy_update_from_distributed_data();
-                        sl_logger.info("update_from_distributed_data: Update loop has been shutdown. Now service levels cache will be updated immediately while applying raft group0 log.");
-                        return make_ready_future<stop_iteration>(stop_iteration::yes);
-                    }
-
-                    return update_service_levels_cache().then_wrapped([this] (future<>&& f){
-                        try {
-                            f.get();
-                            _last_successful_config_update = seastar::lowres_clock::now();
-                            _logged_intervals = 0;
-                        } catch (...) {
-                            using namespace std::literals::chrono_literals;
-                            constexpr auto age_resolution = 90s;
-                            constexpr unsigned error_threshold = 10; // Change the logging level to error after 10 age_resolution intervals.
-                            unsigned configuration_age = (seastar::lowres_clock::now() - _last_successful_config_update) / age_resolution;
-                            if (configuration_age > _logged_intervals) {
-                                log_level ll = configuration_age >= error_threshold ? log_level::error : log_level::warn;
-                                sl_logger.log(ll, "start_legacy_update_from_distributed_data: failed to update configuration for more than  {} seconds : {}",
-                                        (age_resolution*configuration_age).count(), std::current_exception());
-                                _logged_intervals++;
-                            }
-                        }
-                        return stop_iteration::no;
-                    });
-                } catch (const sleep_aborted& e) {
-                    sl_logger.info("start_legacy_update_from_distributed_data: configuration polling loop aborted");
-                    return make_ready_future<seastar::bool_class<seastar::stop_iteration_tag>>(stop_iteration::yes);
-                }
-            });
-        }).then_wrapped([] (future<>&& f) {
-            try {
-                f.get();
-            } catch (...) {
-                sl_logger.error("start_legacy_update_from_distributed_data: polling loop stopped unexpectedly by: {}",
-                        std::current_exception());
-            }
-        });
-    }
-}
-
 future<> service_level_controller::add_distributed_service_level(sstring name, service_level_options slo, bool if_not_exists, service::group0_batch& mc) {
     set_service_level_op_type add_type = if_not_exists ? set_service_level_op_type::add_if_not_exists : set_service_level_op_type::add;
     return set_distributed_service_level(name, slo, add_type, mc);
@@ -902,99 +827,6 @@ future<> service_level_controller::do_add_service_level(sstring name, service_le
         });
     }
     return make_ready_future();
-}
-
-bool service_level_controller::is_v2() const {
-    return _sl_data_accessor && _sl_data_accessor->is_v2();
-}
-
-void service_level_controller::upgrade_to_v2(cql3::query_processor& qp, service::raft_group0_client& group0_client) {
-    if (!_sl_data_accessor) {
-        return;
-    }
-
-    auto v2_data_accessor = _sl_data_accessor->upgrade_to_v2(qp, group0_client);
-    if (v2_data_accessor) {
-        _sl_data_accessor = v2_data_accessor;
-    }
-}
-
-future<> service_level_controller::migrate_to_v2(size_t nodes_count, db::system_keyspace& sys_ks, cql3::query_processor& qp, service::raft_group0_client& group0_client, abort_source& as) {
-    //TODO:
-    //Now we trust the administrator to not make changes to service levels during the migration.
-    //Ideally, during the migration we should set migration data accessor(on all nodes, on all shards) that allows to read but forbids writes
-    using namespace std::chrono_literals;
-
-    auto schema = qp.db().find_schema(db::system_distributed_keyspace::NAME, db::system_distributed_keyspace::SERVICE_LEVELS);
-
-    const auto t = 5min;
-    const timeout_config tc{t, t, t, t, t, t, t};
-    service::client_state cs(::service::client_state::internal_tag{}, tc);
-    service::query_state qs(cs, empty_service_permit());
-    
-    // `system_distributed` keyspace has RF=3 and we need to scan it with CL=ALL
-    // To support migration on cluster with 1 or 2 nodes, set appropriate CL
-    auto cl = db::consistency_level::ALL;
-    if (nodes_count == 1) {
-        cl = db::consistency_level::ONE;
-    } else if (nodes_count == 2) {
-        cl = db::consistency_level::TWO;
-    }
-    
-    auto rows = co_await qp.execute_internal(
-        format("SELECT * FROM {}.{}", db::system_distributed_keyspace::NAME, db::system_distributed_keyspace::SERVICE_LEVELS),
-        cl,
-        qs,
-        {},
-        cql3::query_processor::cache_internal::no);
-    if (rows->empty()) {
-        co_return;
-    }
-    
-
-    auto col_names = schema->all_columns() | std::views::transform([] (const auto& col) {return col.name_as_cql_string(); }) | std::ranges::to<std::vector<sstring>>();
-    auto col_names_str = fmt::to_string(fmt::join(col_names, ", "));
-    sstring val_binders_str = "?";
-    for (size_t i = 1; i < col_names.size(); ++i) {
-        val_binders_str += ", ?";
-    }
-    
-    auto guard = co_await group0_client.start_operation(as);
-
-    utils::chunked_vector<mutation> migration_muts;
-    for (const auto& row: *rows) {
-        std::vector<data_value_or_unset> values;
-        for (const auto& col: schema->all_columns()) {
-            if (row.has(col.name_as_text())) {
-                values.push_back(col.type->deserialize(row.get_blob_unfragmented(col.name_as_text())));
-            } else {
-                values.push_back(unset_value{});
-            }
-        }
-
-        auto muts = co_await qp.get_mutations_internal(
-            seastar::format("INSERT INTO {}.{} ({}) VALUES ({})",
-                db::system_keyspace::NAME,
-                db::system_keyspace::SERVICE_LEVELS_V2,
-                col_names_str,
-                val_binders_str), 
-            qos_query_state(),
-            guard.write_timestamp(),
-            std::move(values));
-        if (muts.size() != 1) {
-            on_internal_error(sl_logger, format("expecting single insert mutation, got {}", muts.size()));
-        }
-        migration_muts.push_back(std::move(muts[0]));
-    }
-
-    auto status_mut = co_await sys_ks.make_service_levels_version_mutation(2, guard.write_timestamp());
-    migration_muts.push_back(std::move(status_mut));
-
-    service::write_mutations change {
-        .mutations{migration_muts.begin(), migration_muts.end()},
-    };
-    auto group0_cmd = group0_client.prepare_command(change, guard, "migrate service levels to v2");
-    co_await group0_client.add_entry(std::move(group0_cmd), std::move(guard), as);
 }
 
 future<> service_level_controller::do_remove_service_level(sstring name, bool remove_static) {
@@ -1236,23 +1068,6 @@ future<> service_level_controller::unregister_auth_integration() {
     auto tmp = std::exchange(_auth_integration, nullptr);
     // Now we can stop it.
     co_await tmp->stop();
-}
-
-future<shared_ptr<service_level_controller::service_level_distributed_data_accessor>> 
-get_service_level_distributed_data_accessor_for_current_version(
-    db::system_keyspace& sys_ks,
-    db::system_distributed_keyspace& sys_dist_ks,
-    cql3::query_processor& qp, service::raft_group0_client& group0_client
-) {
-    auto sl_version = co_await sys_ks.get_service_levels_version();
-
-    if (sl_version && *sl_version == 2) {
-        co_return static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
-            make_shared<qos::raft_service_level_distributed_data_accessor>(qp, group0_client));
-    } else {
-        co_return static_pointer_cast<qos::service_level_controller::service_level_distributed_data_accessor>(
-            make_shared<qos::standard_service_level_distributed_data_accessor>(sys_dist_ks));
-    }
 }
 
 } // namespace qos

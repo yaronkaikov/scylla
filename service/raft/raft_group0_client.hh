@@ -14,7 +14,6 @@
 #include <optional>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/abort_source.hh>
-#include <seastar/core/rwlock.hh>
 #include <seastar/core/condition-variable.hh>
 #include <seastar/coroutine/generator.hh>
 
@@ -65,11 +64,6 @@ public:
     // Use this timestamp when creating group 0 mutations.
     api::timestamp_type write_timestamp() const;
 
-    // Are we *actually* using group 0 yet?
-    // Until the upgrade procedure finishes, we will perform operations such as schema changes using the old way,
-    // but still pass the guard around to synchronize operations with the upgrade procedure.
-    bool with_raft() const;
-
     explicit operator bool() const { return bool(_impl); }
 };
 
@@ -93,9 +87,6 @@ class raft_group0_client {
     semaphore _operation_mutex = semaphore(1);
 
     gc_clock::duration _history_gc_duration = gc_clock::duration{std::chrono::duration_cast<gc_clock::duration>(std::chrono::weeks{1})};
-
-    // `_upgrade_state` is a cached (perhaps outdated) version of the upgrade state stored on disk.
-    group0_upgrade_state _upgrade_state{group0_upgrade_state::recovery}; // loaded from disk in `init()`
 
     std::unordered_map<utils::UUID, std::optional<service::broadcast_tables::query_result>> _results;
 
@@ -124,9 +115,6 @@ class raft_group0_client {
 
 public:
     raft_group0_client(service::raft_group_registry&, db::system_keyspace&, locator::shared_token_metadata&, maintenance_mode_enabled);
-
-    // Call after `system_keyspace` is initialized.
-    future<> init();
 
     future<> add_entry(group0_command group0_cmd, group0_guard guard, seastar::abort_source& as, std::optional<raft_timeout> timeout = std::nullopt);
 
@@ -163,28 +151,14 @@ public:
     // Checks maximum allowed serialized command size, server rejects bigger commands with command_is_too_big_error exception
     size_t max_command_size() const;
 
-    // Returns the current group 0 upgrade state.
-    //
-    //
-    // Possible values now are: recovery (maintenance mode only) and use_post_raft_procedures
-    // Other value are no longer supported and if discovered during boot the boot will fail
-    group0_upgrade_state get_group0_upgrade_state();
-
-    // Ensures that nobody holds any `rwlock::holder`s returned from `get_group0_upgrade_state()`
-    // then changes the state to `s`.
-    //
-    // Should only be called either by the upgrade algorithm or the bootstrap procedure
-    // and follow the correct sequence of states.
-    future<> set_group0_upgrade_state(group0_upgrade_state s);
-
     future<semaphore_units<>> hold_read_apply_mutex(abort_source&);
-
-    bool in_recovery() const;
 
     gc_clock::duration get_history_gc_duration() const;
     // for test only
     void set_history_gc_duration(gc_clock::duration d);
     semaphore& operation_mutex();
+
+    bool maintenance_mode() const;
 
     query_result_guard create_result_guard(utils::UUID query_id);
     void set_query_result(utils::UUID query_id, service::broadcast_tables::query_result qr);

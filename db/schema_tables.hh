@@ -190,24 +190,13 @@ std::vector<table_info> all_table_infos(schema_features);
 // deletes them first, so they will be effectively overwritten.
 future<> save_system_schema(cql3::query_processor& qp);
 
-future<table_schema_version> calculate_schema_digest(sharded<service::storage_proxy>& proxy, schema_features, noncopyable_function<bool(std::string_view)> accept_keyspace);
-// Calculates schema digest for all non-system keyspaces
-future<table_schema_version> calculate_schema_digest(sharded<service::storage_proxy>& proxy, schema_features);
-
 // Must be called on shard 0.
 future<semaphore_units<>> hold_merge_lock() noexcept;
 future<> with_merge_lock(noncopyable_function<future<> ()> func);
 
-future<> update_schema_version_and_announce(sharded<db::system_keyspace>& sys_ks, sharded<service::storage_proxy>& proxy, schema_features features, std::optional<table_schema_version> version_from_group0);
+future<> update_schema_version_and_announce(sharded<db::system_keyspace>& sys_ks, sharded<service::storage_proxy>& proxy, table_schema_version version);
 
-future<std::optional<table_schema_version>> get_group0_schema_version(db::system_keyspace& sys_ks);
-
-// Recalculates the local schema version.
-//
-// It is safe to call concurrently with recalculate_schema_version() and merge_schema() in which case it
-// is guaranteed that the schema version we end up with after all calls will reflect the most recent state
-// of feature_service and schema tables.
-future<> recalculate_schema_version(sharded<db::system_keyspace>& sys_ks, sharded<service::storage_proxy>& proxy, gms::feature_service& feat);
+future<table_schema_version> get_group0_schema_version(db::system_keyspace& sys_ks);
 
 future<utils::chunked_vector<canonical_mutation>> convert_schema_to_mutations(sharded<service::storage_proxy>& proxy, schema_features);
 utils::chunked_vector<mutation> adjust_schema_for_schema_features(utils::chunked_vector<mutation> schema, schema_features features);

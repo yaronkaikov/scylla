@@ -90,9 +90,6 @@ using namespace db;
 using namespace std::chrono_literals;
 
 
-static logging::logger diff_logger("schema_diff");
-
-
 /** system.schema_* tables used to store keyspace/table/type attributes prior to C* 3.0 */
 namespace db {
 namespace {
@@ -303,12 +300,11 @@ schema_ptr tables() {
 
 // Holds Scylla-specific table metadata.
 schema_ptr scylla_tables(schema_features features) {
-    static thread_local schema_ptr schemas[2][2]{};
+    static thread_local schema_ptr schemas[2]{};
 
-    bool has_group0_schema_versioning = features.contains(schema_feature::GROUP0_SCHEMA_VERSIONING);
     bool has_in_memory = features.contains(schema_feature::IN_MEMORY_TABLES);
 
-    schema_ptr& s = schemas[has_in_memory][has_group0_schema_versioning];
+    schema_ptr& s = schemas[has_in_memory];
     if (!s) {
         auto id = generate_legacy_id(NAME, SCYLLA_TABLES);
         auto sb = schema_builder(NAME, SCYLLA_TABLES, std::make_optional(id))
@@ -325,18 +321,16 @@ schema_ptr scylla_tables(schema_features features) {
             sb.with_column("in_memory", boolean_type);
         }
 
-        if (has_group0_schema_versioning) {
-            // If true, this table's latest schema was committed by group 0.
-            // In this case `version` column is non-null and will be used for `schema::version()` instead of calculating a hash.
-            //
-            // If false, this table's latest schema was committed outside group 0 (e.g. during RECOVERY mode).
-            // In this case `version` is null and `schema::version()` will be a hash.
-            //
-            // If null, this is either a system table, or the latest schema was committed
-            // before the GROUP0_SCHEMA_VERSIONING feature was enabled (either inside or outside group 0).
-            // In this case, for non-system tables, `version` is null and `schema::version()` will be a hash.
-            sb.with_column("committed_by_group0", boolean_type);
-        }
+        // If true, this table's latest schema was committed by group 0.
+        // In this case `version` column is non-null and will be used for `schema::version()` instead of calculating a hash.
+        //
+        // If false, this table's latest schema was committed outside group 0 (e.g. during RECOVERY mode).
+        // In this case `version` is null and `schema::version()` will be a hash.
+        //
+        // If null, this is either a system table, or the latest schema was committed
+        // before the GROUP0_SCHEMA_VERSIONING feature was enabled (either inside or outside group 0).
+        // In this case, for non-system tables, `version` is null and `schema::version()` will be a hash.
+        sb.with_column("committed_by_group0", boolean_type);
 
         // It is safe to add the `tablets` column unconditionally,
         // since it is written to only after the cluster feature is enabled.
@@ -706,51 +700,6 @@ redact_columns_for_missing_features(mutation&& m, schema_features features) {
 #endif
 }
 
-/**
- * Read schema from system keyspace and calculate MD5 digest of every row, resulting digest
- * will be converted into UUID which would act as content-based version of the schema.
- */
-future<table_schema_version> calculate_schema_digest(sharded<service::storage_proxy>& proxy, schema_features features, noncopyable_function<bool(std::string_view)> accept_keyspace)
-{
-    using mutations_generator = coroutine::experimental::generator<mutation>;
-
-    auto map = [&proxy, features, accept_keyspace = std::move(accept_keyspace)] (table_info table) mutable -> mutations_generator {
-        auto& db = proxy.local().get_db();
-        auto s = db.local().find_schema(table.id);
-        auto rs = co_await db::system_keyspace::query_mutations(db, s);
-        for (auto&& p : rs->partitions()) {
-            auto partition_key = value_cast<sstring>(utf8_type->deserialize(::partition_key(p.mut().key()).get_component(*s, 0)));
-            if (!accept_keyspace(partition_key)) {
-                continue;
-            }
-            auto mut = co_await unfreeze_gently(p.mut(), s);
-            co_yield redact_columns_for_missing_features(std::move(mut), features);
-        }
-    };
-    auto hash = md5_hasher();
-    auto tables = all_table_infos(features);
-    {
-        for (auto& table: tables) {
-            auto gen_mutations = map(table);
-            while (auto mut_opt = co_await gen_mutations()) {
-                auto& m = *mut_opt;
-                feed_hash_for_schema_digest(hash, m, features);
-                if (diff_logger.is_enabled(logging::log_level::trace)) {
-                    md5_hasher h;
-                    feed_hash_for_schema_digest(h, m, features);
-                    diff_logger.trace("Digest {} for {}, compacted={}", h.finalize(), m, compact_for_schema_digest(m));
-                }
-            }
-        }
-        co_return utils::UUID_gen::get_name_UUID(hash.finalize());
-    }
-}
-
-future<table_schema_version> calculate_schema_digest(sharded<service::storage_proxy>& proxy, schema_features features)
-{
-    return calculate_schema_digest(proxy, features, std::not_fn(&is_system_keyspace));
-}
-
 static thread_local semaphore the_merge_lock {1};
 
 future<> merge_lock() {
@@ -790,28 +739,20 @@ future<> with_merge_lock(noncopyable_function<future<> ()> func) {
     }
 }
 
-future<> update_schema_version_and_announce(sharded<db::system_keyspace>& sys_ks, sharded<service::storage_proxy>& proxy, schema_features features, std::optional<table_schema_version> version_from_group0) {
-    auto uuid = version_from_group0 ? *version_from_group0 : co_await calculate_schema_digest(proxy, features);
-    co_await sys_ks.local().update_schema_version(uuid);
-    co_await proxy.local().get_db().invoke_on_all([uuid] (replica::database& db) {
-        db.update_version(uuid);
+future<> update_schema_version_and_announce(sharded<db::system_keyspace>& sys_ks, sharded<service::storage_proxy>& proxy, table_schema_version version) {
+    co_await sys_ks.local().update_schema_version(version);
+    co_await proxy.local().get_db().invoke_on_all([version] (replica::database& db) {
+        db.update_version(version);
     });
-    slogger.info("Schema version changed to {}", uuid);
+    slogger.info("Schema version changed to {}", version);
 }
 
-future<std::optional<table_schema_version>> get_group0_schema_version(db::system_keyspace& sys_ks) {
+future<table_schema_version> get_group0_schema_version(db::system_keyspace& sys_ks) {
     auto version = co_await sys_ks.get_scylla_local_param_as<utils::UUID>("group0_schema_version");
     if (!version) {
-        co_return std::nullopt;
+        throw std::runtime_error("group0_schema_version not found in system.scylla_local");
     }
     co_return table_schema_version{*version};
-}
-
-future<> recalculate_schema_version(sharded<db::system_keyspace>& sys_ks, sharded<service::storage_proxy>& proxy, gms::feature_service& feat) {
-    co_await with_merge_lock([&] () -> future<> {
-        auto version_from_group0 = co_await get_group0_schema_version(sys_ks.local());
-        co_await update_schema_version_and_announce(sys_ks, proxy, feat.cluster_schema_features(), version_from_group0);
-    });
 }
 
 future<utils::chunked_vector<canonical_mutation>> convert_schema_to_mutations(sharded<service::storage_proxy>& proxy, schema_features features)
@@ -1593,54 +1534,10 @@ utils::chunked_vector<mutation> make_drop_aggregate_mutations(schema_features fe
  * Table metadata serialization/deserialization.
  */
 
-/// Returns mutations which when applied to the database will cause all schema changes
-/// which create or alter the table with a given name, made with timestamps smaller than t,
-/// have no effect. Used when overriding schema to shadow concurrent conflicting schema changes.
-/// Shouldn't be needed if schema changes are serialized with RAFT.
-static schema_mutations make_table_deleting_mutations(const sstring& ks, const sstring& table, bool is_view, api::timestamp_type t) {
-    tombstone tomb;
-
-    // Generate neutral mutations if t == api::min_timestamp
-    if (t > api::min_timestamp) {
-        tomb = tombstone(t - 1, gc_clock::now());
-    }
-
-    auto tables_m_s = is_view ? views() : tables();
-    mutation tables_m{tables_m_s, partition_key::from_singular(*tables_m_s, ks)};
-    {
-        auto ckey = clustering_key::from_singular(*tables_m_s, table);
-        tables_m.partition().apply_delete(*tables_m_s, ckey, tomb);
-    }
-
-    mutation scylla_tables_m{scylla_tables(), partition_key::from_singular(*scylla_tables(), ks)};
-    {
-        auto ckey = clustering_key::from_singular(*scylla_tables(), table);
-        scylla_tables_m.partition().apply_delete(*scylla_tables(), ckey, tomb);
-    }
-
-    auto make_drop_columns = [&] (const schema_ptr& s) {
-        mutation m{s, partition_key::from_singular(*s, ks)};
-        auto ckey = clustering_key::from_exploded(*s, {utf8_type->decompose(table)});
-        m.partition().apply_delete(*s, ckey, tomb);
-        return m;
-    };
-
-    return schema_mutations(std::move(tables_m),
-                            make_drop_columns(columns()),
-                            make_drop_columns(view_virtual_columns()),
-                            make_drop_columns(computed_columns()),
-                            mutation(indexes(), partition_key::from_singular(*indexes(), ks)),
-                            make_drop_columns(dropped_columns()),
-                            std::move(scylla_tables_m)
-    );
-}
-
 utils::chunked_vector<mutation> make_create_table_mutations(schema_ptr table, api::timestamp_type timestamp)
 {
     utils::chunked_vector<mutation> mutations;
     add_table_or_view_to_schema_mutation(table, timestamp, true, mutations);
-    make_table_deleting_mutations(table->ks_name(), table->cf_name(), table->is_view(), timestamp)
-        .copy_to(mutations);
     return mutations;
 }
 
@@ -2730,8 +2627,6 @@ utils::chunked_vector<mutation> make_create_view_mutations(lw_shared_ptr<keyspac
     // a view (see `make_update_view_mutations`); we use similarly modified timestamp here for consistency.
     add_table_or_view_to_schema_mutation(base, timestamp - 1, true, mutations);
     add_table_or_view_to_schema_mutation(view, timestamp, true, mutations);
-    make_table_deleting_mutations(view->ks_name(), view->cf_name(), view->is_view(), timestamp)
-        .copy_to(mutations);
     return mutations;
 }
 

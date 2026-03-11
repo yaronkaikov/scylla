@@ -24,7 +24,6 @@
 #include <seastar/core/sleep.hh>
 #include "service/qos/raft_service_level_distributed_data_accessor.hh"
 #include "service/qos/service_level_controller.hh"
-#include "service/qos/standard_service_level_distributed_data_accessor.hh"
 #include "locator/token_metadata.hh"
 #include "service/topology_guard.hh"
 #include "service/session.hh"
@@ -120,7 +119,6 @@
 #include "service/topology_mutation.hh"
 #include "cql3/query_processor.hh"
 #include "service/qos/service_level_controller.hh"
-#include "service/qos/standard_service_level_distributed_data_accessor.hh"
 #include <csignal>
 #include "utils/labels.hh"
 #include "view_info.hh"
@@ -163,10 +161,6 @@ namespace {
         }
     }
     return resulting_node_list;
-}
-
-[[nodiscard]] locator::host_id_or_endpoint_list parse_node_list(const std::string_view comma_separated_list) {
-    return string_list_to_endpoint_list(utils::split_comma_separated_list(comma_separated_list));
 }
 
 void check_raft_rpc_scheduling_group(const replica::database& db, const gms::feature_service& feature_service, const std::string_view rpc_name) {
@@ -388,13 +382,8 @@ bool storage_service::should_bootstrap() {
  * in the gossiper's local application state while this function runs.
  */
 static future<> set_gossip_tokens(gms::gossiper& g,
-        const std::unordered_set<dht::token>& tokens, std::optional<cdc::generation_id> cdc_gen_id) {
-    // Order is important: both the CDC streams timestamp and tokens must be known when a node handles our status.
-    return g.add_local_application_state(
-        std::pair(gms::application_state::TOKENS, gms::versioned_value::tokens(tokens)),
-        std::pair(gms::application_state::CDC_GENERATION_ID, gms::versioned_value::cdc_generation_id(cdc_gen_id)),
-        std::pair(gms::application_state::STATUS, gms::versioned_value::normal(tokens))
-    );
+        const std::unordered_set<dht::token>& tokens) {
+    return g.add_local_application_state(std::pair(gms::application_state::STATUS, gms::versioned_value::normal(tokens)));
 }
 
 static locator::node::state to_topology_node_state(node_state ns) {
@@ -536,11 +525,7 @@ future<storage_service::nodes_to_notify_after_sync> storage_service::sync_raft_t
         // Also ip -> id mapping is needed for address map recreation on reboot
         if (is_me(host_id)) {
             sys_ks_futures.push_back(_sys_ks.local().update_tokens(rs.ring.value().tokens));
-            co_await _gossiper.add_local_application_state(
-                std::pair(gms::application_state::TOKENS, gms::versioned_value::tokens(rs.ring.value().tokens)),
-                std::pair(gms::application_state::CDC_GENERATION_ID, gms::versioned_value::cdc_generation_id(_topology_state_machine._topology.committed_cdc_generations.back())),
-                std::pair(gms::application_state::STATUS, gms::versioned_value::normal(rs.ring.value().tokens))
-            );
+            co_await _gossiper.add_local_application_state(std::pair(gms::application_state::STATUS, gms::versioned_value::normal(rs.ring.value().tokens)));
         }
         update_topology(host_id, rs);
         co_await tmptr->update_normal_tokens(rs.ring.value().tokens, host_id);
@@ -709,28 +694,6 @@ future<> storage_service::topology_state_load(state_change_hint hint) {
     _topology_state_machine.reload_count++;
     auto& topology = _topology_state_machine._topology;
 
-    set_topology_change_kind(upgrade_state_to_topology_op_kind(topology.upgrade_state));
-
-    if (topology.upgrade_state != topology::upgrade_state_type::done) {
-        co_return;
-    }
-
-    if (_qp.auth_version < db::system_keyspace::auth_version_t::v2) {
-        // auth-v2 gets enabled when consistent topology changes are enabled
-        // (see topology::upgrade_state_type::done above) as we use the same migration procedure
-        co_await _qp.container().invoke_on_all([] (cql3::query_processor& qp) {
-            qp.auth_version = db::system_keyspace::auth_version_t::v2;
-        });
-        co_await auth_cache().load_all();
-    }
-
-    if (!_sl_controller.local().is_v2()) {
-        co_await _sl_controller.invoke_on_all([this] (qos::service_level_controller& sl_controller) {
-            sl_controller.upgrade_to_v2(_qp, _group0->client());
-        });
-        co_await _sl_controller.local().update_cache(qos::update_both_cache_levels::yes, qos::query_context::group0);
-    }
-
     // the view_builder is migrated to v2 in view_builder::migrate_to_v2.
     // it writes a v2 version mutation as topology_change, then we get here
     // to update the service to start using the v2 table.
@@ -855,7 +818,6 @@ future<> storage_service::topology_state_load(state_change_hint hint) {
         });
         co_await _cdc_gens.local().handle_cdc_generation(gen_id);
         if (gen_id == topology.committed_cdc_generations.back()) {
-            co_await _sys_ks.local().update_cdc_generation_id(gen_id);
             rtlogger.debug("topology_state_load: the last committed CDC generation ID: {}", gen_id);
         }
     }
@@ -982,10 +944,7 @@ future<> storage_service::merge_topology_snapshot(raft_snapshot snp) {
 
 future<> storage_service::update_service_levels_cache(qos::update_both_cache_levels update_only_effective_cache, qos::query_context ctx) {
     SCYLLA_ASSERT(this_shard_id() == 0);
-    if (_sl_controller.local().is_v2()) {
-        // Skip cache update unless the topology upgrade is done
-        co_await _sl_controller.local().update_cache(update_only_effective_cache, ctx);
-    }
+    co_await _sl_controller.local().update_cache(update_only_effective_cache, ctx);
 }
 
 future<> storage_service::compression_dictionary_updated_callback_all() {
@@ -1448,7 +1407,7 @@ future<> storage_service::raft_initialize_discovery_leader(const join_node_reque
     // Set the enabled_features field to our features.
     topology_mutation_builder builder(write_timestamp);
     builder.add_enabled_features(params.supported_features | std::ranges::to<std::set<sstring>>())
-            .set_upgrade_state(topology::upgrade_state_type::done); // Skip upgrade, start right in the topology-on-raft mode
+            .set_upgrade_state_done(); // Start right in the topology-on-raft mode
     auto enable_features_mutation = builder.build();
     insert_join_request_mutations.push_back(std::move(enable_features_mutation));
 
@@ -1572,11 +1531,6 @@ future<> storage_service::update_topology_with_local_metadata(raft::server& raft
     co_await _sys_ks.local().set_must_synchronize_topology(false);
 }
 
-topology::upgrade_state_type storage_service::get_topology_upgrade_state() const {
-    SCYLLA_ASSERT(this_shard_id() == 0);
-    return _topology_state_machine._topology.upgrade_state;
-}
-
 future<> storage_service::await_tablets_rebuilt(raft::server_id replaced_id) {
     auto is_drained = [&] {
         return !get_token_metadata().tablets().has_replica_on(locator::host_id(replaced_id.uuid()));
@@ -1598,64 +1552,34 @@ future<> storage_service::start_sys_dist_ks() const {
 future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
         std::unordered_set<gms::inet_address> initial_contact_nodes,
         std::unordered_map<locator::host_id, gms::loaded_endpoint_state> loaded_endpoints,
-        std::unordered_map<locator::host_id, sstring> loaded_peer_features,
-        std::chrono::milliseconds delay,
         start_hint_manager start_hm,
         gms::generation_type new_generation) {
-    std::unordered_set<token> bootstrap_tokens;
     gms::application_state_map app_states;
-    /* The timestamp of the CDC streams generation that this node has proposed when joining.
-     * This value is nullopt only when:
-     * 1. this node is being upgraded from a non-CDC version,
-     * 2. this node is starting for the first time or restarting with CDC previously disabled,
-     *    in which case the value should become populated before we leave the join_topology procedure.
-     *
-     * Important: this variable is using only during the startup procedure. It is moved out from
-     * at the end of `join_topology`; the responsibility handling of CDC generations is passed
-     * to cdc::generation_service.
-     *
-     * DO NOT use this variable after `join_topology` (i.e. after we call `generation_service::after_join`
-     * and pass it the ownership of the timestamp.
-     */
-    std::optional<cdc::generation_id> cdc_gen_id;
-
     std::optional<replacement_info> ri;
-    std::optional<gms::inet_address> replace_address;
     std::optional<raft_group0::replace_info> raft_replace_info;
-    auto tmlock = std::make_unique<token_metadata_lock>(co_await get_token_metadata_lock());
-    auto tmptr = co_await get_mutable_token_metadata_ptr();
     if (is_replacing()) {
         if (_sys_ks.local().bootstrap_complete()) {
             throw std::runtime_error("Cannot replace address with a node that is already bootstrapped");
         }
-        ri = co_await prepare_replacement_info(initial_contact_nodes, loaded_peer_features);
+        ri = co_await prepare_replacement_info(initial_contact_nodes);
 
-        const auto& my_location = tmptr->get_topology().get_location();
+        const auto& my_location = _snitch.local()->get_location();
         if (my_location != ri->dc_rack) {
-            auto msg = fmt::format("Cannot replace node {}/{} with a node on a different data center or rack. Current location={}/{}, new location={}/{}",
-                    ri->host_id, ri->address, ri->dc_rack.dc, ri->dc_rack.rack, my_location.dc, my_location.rack);
+            auto msg = fmt::format("Cannot replace node {} with a node on a different data center or rack. Current location={}/{}, new location={}/{}",
+                    ri->host_id, ri->dc_rack.dc, ri->dc_rack.rack, my_location.dc, my_location.rack);
             slogger.error("{}", msg);
             throw std::runtime_error(msg);
         }
 
-        replace_address = ri->address;
         raft_replace_info = raft_group0::replace_info {
             .raft_id = raft::server_id{ri->host_id.uuid()},
         };
     } else if (should_bootstrap()) {
-        co_await check_for_endpoint_collision(initial_contact_nodes, loaded_peer_features);
+        co_await check_for_endpoint_collision(initial_contact_nodes);
     } else {
-        auto local_features = _feature_service.supported_feature_set();
         slogger.info("Performing gossip shadow round, initial_contact_nodes={}", initial_contact_nodes);
         co_await _gossiper.do_shadow_round(initial_contact_nodes, gms::gossiper::mandatory::no);
         _gossiper.check_snitch_name_matches(_snitch.local()->get_name());
-        // Check if the node is already removed from the cluster
-        auto local_host_id = get_token_metadata().get_my_id();
-        auto my_ip = get_broadcast_address();
-        if (!_gossiper.is_safe_for_restart(local_host_id)) {
-            throw std::runtime_error(::format("The node {} with host_id {} is removed from the cluster. Can not restart the removed node to join the cluster again!",
-                    my_ip, local_host_id));
-        }
         co_await _gossiper.reset_endpoint_state_map();
         for (const auto& [host_id, st] : loaded_endpoints) {
             // gossiping hasn't started yet
@@ -1681,22 +1605,6 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
             throw std::runtime_error("Cannot restart with join_ring=false because the node already owns tokens");
         }
         slogger.info("Restarting a node in NORMAL status");
-        // This node must know about its chosen tokens before other nodes do
-        // since they may start sending writes to this node after it gossips status = NORMAL.
-        // Therefore we update _token_metadata now, before gossip starts.
-        tmptr->update_topology(tmptr->get_my_id(), _snitch.local()->get_location(), locator::node::state::normal);
-        co_await tmptr->update_normal_tokens(my_tokens, tmptr->get_my_id());
-
-        cdc_gen_id = co_await _sys_ks.local().get_cdc_generation_id();
-        if (!cdc_gen_id) {
-            // We could not have completed joining if we didn't generate and persist a CDC streams timestamp,
-            // unless we are restarting after upgrading from non-CDC supported version.
-            // In that case we won't begin a CDC generation: it should be done by one of the nodes
-            // after it learns that it everyone supports the CDC feature.
-            cdc_log.warn(
-                    "Restarting node in NORMAL status with CDC enabled, but no streams timestamp was proposed"
-                    " by this node according to its local tables. Are we upgrading from a non-CDC supported version?");
-        }
     }
 
     // have to start the gossip service before we can see any info on other nodes.  this is necessary
@@ -1705,18 +1613,10 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
     // Seed the host ID-to-endpoint map with our own ID.
     auto local_host_id = get_token_metadata().get_my_id();
 
-    // Replicate the tokens early because once gossip runs other nodes
-    // might send reads/writes to this node. Replicate it early to make
-    // sure the tokens are valid on all the shards.
-    co_await replicate_to_all_cores(std::move(tmptr));
-    tmlock.reset();
-
     utils::get_local_injector().inject("stop_after_saving_tokens",
         [] { std::raise(SIGSTOP); });
 
     auto broadcast_rpc_address = get_token_metadata_ptr()->get_topology().my_cql_address();
-    // Ensure we know our own actual Schema UUID in preparation for updates
-    co_await db::schema_tables::recalculate_schema_version(_sys_ks, proxy, _feature_service);
 
     app_states.emplace(gms::application_state::NET_VERSION, versioned_value::network_version());
     app_states.emplace(gms::application_state::HOST_ID, versioned_value::host_id(local_host_id));
@@ -1729,10 +1629,6 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
     app_states.emplace(gms::application_state::VIEW_BACKLOG, versioned_value(""));
     app_states.emplace(gms::application_state::SCHEMA, versioned_value::schema(_db.local().get_version()));
     if (restarting_normal_node) {
-        // Order is important: both the CDC streams timestamp and tokens must be known when a node handles our status.
-        // Exception: there might be no CDC streams timestamp proposed by us if we're upgrading from a non-CDC version.
-        app_states.emplace(gms::application_state::TOKENS, versioned_value::tokens(my_tokens));
-        app_states.emplace(gms::application_state::CDC_GENERATION_ID, versioned_value::cdc_generation_id(cdc_gen_id));
         app_states.emplace(gms::application_state::STATUS, versioned_value::normal(my_tokens));
     }
     app_states.emplace(gms::application_state::SNITCH_NAME, versioned_value::snitch_name(_snitch.local()->get_name()));
@@ -1856,14 +1752,14 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
         }
     }
 
-    set_topology_change_kind(upgrade_state_to_topology_op_kind(_topology_state_machine._topology.upgrade_state));
-
     co_await update_topology_with_local_metadata(raft_server);
 
     // Node state is enough to know that bootstrap has completed, but to make legacy code happy
     // let it know that the bootstrap is completed as well
     co_await _sys_ks.local().set_bootstrap_state(db::system_keyspace::bootstrap_state::COMPLETED);
     set_mode(mode::NORMAL);
+    // Load schema version into the database object
+    co_await db::schema_tables::update_schema_version_and_announce(_sys_ks, proxy, co_await db::schema_tables::get_group0_schema_version(_sys_ks.local()));
 
     utils::get_local_injector().inject("stop_after_setting_mode_to_normal_raft_topology",
         [] { std::raise(SIGSTOP); });
@@ -2068,14 +1964,6 @@ std::optional<db::system_keyspace::peer_info> storage_service::get_peer_info_for
     return ret;
 }
 
-std::unordered_set<locator::token> storage_service::get_tokens_for(locator::host_id endpoint) {
-    auto tokens_string = _gossiper.get_application_state_value(endpoint, application_state::TOKENS);
-    slogger.trace("endpoint={}, tokens_string={}", endpoint, tokens_string);
-    auto ret = versioned_value::tokens_from_string(tokens_string);
-    slogger.trace("endpoint={}, tokens={}", endpoint, ret);
-    return ret;
-}
-
 std::optional<locator::endpoint_dc_rack> storage_service::get_dc_rack_for(const gms::endpoint_state& ep_state) {
     auto* dc = ep_state.get_application_state_ptr(gms::application_state::DC);
     auto* rack = ep_state.get_application_state_ptr(gms::application_state::RACK);
@@ -2221,22 +2109,8 @@ future<> storage_service::join_cluster(sharded<service::storage_proxy>& proxy,
                     get_broadcast_address() : recovery_leader_it->second.endpoint;
             initial_contact_nodes = std::unordered_set{recovery_leader_ip};
 
-            if (_group0->client().in_recovery()) {
-                throw std::runtime_error(format(
-                        "Entered RECOVERY mode and set recovery_leader to {}. RECOVERY mode is used in the "
-                        "gossip-based recovery procedure, while recovery_leader is used in the Raft-based recovery "
-                        "procedure. If the Raft-based topology is enabled in the whole cluster, use the Raft-based "
-                        "procedure. Otherwise, use the gossip-based procedure.", recovery_leader_id));
-            }
             if (!_sys_ks.local().bootstrap_complete()) {
                 throw std::runtime_error("Cannot bootstrap in the Raft-based recovery procedure");
-            }
-            // The Raft-based topology has been enabled if and only if features in system.topology are non-empty.
-            // Note that we cannot use the in-memory state machine here. It is not loaded at this point since
-            // the node hasn't joined the new group 0 yet.
-            if (!co_await _sys_ks.local().load_topology_features_state()) {
-                throw std::runtime_error(
-                        "Cannot start in the Raft-based recovery procedure - Raft-based topology has not been enabled");
             }
         }
     }
@@ -2253,19 +2127,7 @@ future<> storage_service::join_cluster(sharded<service::storage_proxy>& proxy,
                     g0_info.group0_id, g0_info.id, g0_info.ip_addr, recovery_leader_id, recovery_leader_ip));
         }
         slogger.info("Raft-based recovery procedure - found group 0 with ID {}", g0_info.group0_id);
-        set_topology_change_kind(topology_change_kind::raft);
-    } else if (_group0->client().in_recovery()) {
-        // The gossip-based recovery procedure.
-        slogger.info("Raft recovery - starting in legacy topology operations mode");
-        set_topology_change_kind(topology_change_kind::legacy);
     } else if (_group0->joined_group0()) {
-        // We are a part of group 0.
-        if (_topology_state_machine._topology.upgrade_state != topology::upgrade_state_type::done) {
-            throw std::runtime_error(
-                    "Cannot start - cluster is not yet upgraded to use raft topology and this version does not support legacy topology operations. "
-                    "If you are trying to upgrade the node then first upgrade the cluster to use raft topology.");
-        }
-        set_topology_change_kind(topology_change_kind::raft);
         slogger.info("The node is already in group 0");
     } else if (_sys_ks.local().bootstrap_complete()) {
         // setup_group0_if_exist() should already throw in this case, so do internal error here.
@@ -2280,7 +2142,6 @@ future<> storage_service::join_cluster(sharded<service::storage_proxy>& proxy,
         if (_group0->load_my_id() == g0_info.id) {
             // We're creating the group 0.
             slogger.info("We are creating the group 0. Start in raft topology operations mode");
-            set_topology_change_kind(topology_change_kind::raft);
         } else {
             // Ask the current member of the raft group about which mode to use
             auto params = join_node_query_params {};
@@ -2289,7 +2150,6 @@ future<> storage_service::join_cluster(sharded<service::storage_proxy>& proxy,
             switch (result.topo_mode) {
             case join_node_query_result::topology_mode::raft:
                 slogger.info("Will join existing cluster in raft topology operations mode");
-                set_topology_change_kind(topology_change_kind::raft);
                 break;
             case join_node_query_result::topology_mode::legacy:
                 throw std::runtime_error(
@@ -2307,7 +2167,7 @@ future<> storage_service::join_cluster(sharded<service::storage_proxy>& proxy,
     }
 
     co_return co_await join_topology(proxy, std::move(initial_contact_nodes),
-            std::move(loaded_endpoints), std::move(loaded_peer_features), get_ring_delay(), start_hm, new_generation);
+            std::move(loaded_endpoints), start_hm, new_generation);
 }
 
 future<token_metadata_change> storage_service::prepare_token_metadata_change(mutable_token_metadata_ptr tmptr, const schema_getter& schema_getter) {
@@ -2534,7 +2394,6 @@ future<> storage_service::stop() {
     co_await _async_gate.close();
     _tablet_split_monitor_event.signal();
     co_await std::move(_tablet_split_monitor);
-    _gossiper.set_topology_state_machine(nullptr);
 }
 
 future<> storage_service::wait_for_group0_stop() {
@@ -2546,10 +2405,10 @@ future<> storage_service::wait_for_group0_stop() {
     }
 }
 
-future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<locator::host_id, sstring>& loaded_peer_features) {
+future<> storage_service::check_for_endpoint_collision(std::unordered_set<gms::inet_address> initial_contact_nodes) {
     slogger.debug("Starting shadow gossip round to check for endpoint collision");
 
-    return seastar::async([this, initial_contact_nodes, loaded_peer_features] {
+    return seastar::async([this, initial_contact_nodes] {
         bool found_bootstrapping_node = false;
         auto local_features = _feature_service.supported_feature_set();
         do {
@@ -2580,7 +2439,7 @@ future<> storage_service::remove_endpoint(inet_address endpoint, gms::permit_id 
 }
 
 future<storage_service::replacement_info>
-storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes, const std::unordered_map<locator::host_id, sstring>& loaded_peer_features) {
+storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> initial_contact_nodes) {
     locator::host_id replace_host_id;
     gms::inet_address replace_address;
 
@@ -2630,58 +2489,14 @@ storage_service::prepare_replacement_info(std::unordered_set<gms::inet_address> 
         throw std::runtime_error(::format("Cannot replace_address {} because it has left the ring, status={}", replace_address, status));
     }
 
-    std::unordered_set<dht::token> tokens;
     auto dc_rack = get_dc_rack_for(replace_host_id).value_or(locator::endpoint_dc_rack::default_location);
 
     auto ri = replacement_info {
-        .tokens = std::move(tokens),
         .dc_rack = std::move(dc_rack),
         .host_id = std::move(replace_host_id),
-        .address = replace_address,
     };
 
-    bool node_ip_specified = false;
-    for (auto& hoep : parse_node_list(_db.local().get_config().ignore_dead_nodes_for_replace())) {
-        locator::host_id host_id;
-        gms::loaded_endpoint_state st;
-        // Resolve both host_id and endpoint
-        if (hoep.has_endpoint()) {
-            st.endpoint = hoep.endpoint();
-            node_ip_specified = true;
-        } else {
-            host_id = hoep.id();
-            auto res = _gossiper.get_node_ip(host_id);
-            if (!res) {
-                throw std::runtime_error(::format("Could not find ignored node with host_id {}", host_id));
-            }
-            st.endpoint = *res;
-        }
-        auto host_id_opt = _gossiper.try_get_host_id(st.endpoint);
-        if (!host_id_opt) {
-            throw std::runtime_error(::format("Ignore node {}/{} has no endpoint state", host_id, st.endpoint));
-        }
-        if (!host_id) {
-            host_id = *host_id_opt;
-            if (!host_id) {
-                throw std::runtime_error(::format("Could not find host_id for ignored node {}", st.endpoint));
-            }
-        }
-        auto esp = _gossiper.get_endpoint_state_ptr(host_id);
-        st.tokens = esp->get_tokens();
-        st.opt_dc_rack = esp->get_dc_rack();
-        ri.ignore_nodes.emplace(host_id, std::move(st));
-    }
-
-    if (node_ip_specified) {
-        slogger.warn("Warning: Using IP addresses for '--ignore-dead-nodes-for-replace' is deprecated and will"
-                     " be disabled in the next release. Please use host IDs instead. Provided values: {}",
-                     _db.local().get_config().ignore_dead_nodes_for_replace());
-    }
-
-    slogger.info("Host {}/{} is replacing {}/{} ignore_nodes={}", get_token_metadata().get_my_id(), get_broadcast_address(), replace_host_id, replace_address,
-            fmt::join(ri.ignore_nodes | std::views::transform ([] (const auto& x) {
-                return fmt::format("{}/{}", x.first, x.second.endpoint);
-            }), ","));
+    slogger.info("Host {}/{} is replacing {}/{}", get_token_metadata().get_my_id(), get_broadcast_address(), replace_host_id, replace_address);
     co_await _gossiper.reset_endpoint_state_map();
 
     co_return ri;
@@ -2879,13 +2694,8 @@ future<> storage_service::start_gossiping() {
             co_await ss._gossiper.container().invoke_on_all(&gms::gossiper::start);
             bool should_stop_gossiper = false; // undo action
             try {
-                auto cdc_gen_ts = co_await ss._sys_ks.local().get_cdc_generation_id();
-                if (!cdc_gen_ts) {
-                    cdc_log.warn("CDC generation timestamp missing when starting gossip");
-                }
                 co_await set_gossip_tokens(ss._gossiper,
-                        co_await ss._sys_ks.local().get_local_tokens(),
-                        cdc_gen_ts);
+                        co_await ss._sys_ks.local().get_local_tokens());
                 ss._gossiper.force_newer_generation();
                 co_await ss._gossiper.start_gossiping(gms::get_generation_number());
             } catch (...) {
@@ -2987,7 +2797,6 @@ future<> storage_service::raft_decommission() {
 future<> storage_service::decommission() {
     return run_with_api_lock(sstring("decommission"), [] (storage_service& ss) {
         return seastar::async([&ss] {
-            ss.check_ability_to_perform_topology_operation("decommission");
             if (ss._operation_mode != mode::NORMAL) {
                 throw std::runtime_error(::format("Node in {} state; wait for status to become normal or restart", ss._operation_mode));
             }
@@ -3141,7 +2950,6 @@ future<> storage_service::mark_excluded(const std::vector<locator::host_id>& hos
 future<> storage_service::removenode(locator::host_id host_id, locator::host_id_or_endpoint_list ignore_nodes_params) {
     return run_with_no_api_lock([host_id, ignore_nodes_params = std::move(ignore_nodes_params)] (storage_service& ss) mutable {
         return seastar::async([&ss, host_id, ignore_nodes_params = std::move(ignore_nodes_params)] () mutable {
-            ss.check_ability_to_perform_topology_operation("removenode");
             ss.raft_removenode(host_id, std::move(ignore_nodes_params)).get();
         });
     });
@@ -3153,8 +2961,6 @@ future<> storage_service::check_and_repair_cdc_streams() {
     if (!_cdc_gens.local_is_initialized()) {
         return make_exception_future<>(std::runtime_error("CDC generation service not initialized yet"));
     }
-
-    check_ability_to_perform_topology_operation("checkAndRepairCdcStreams");
 
     return raft_check_and_repair_cdc_streams();
 }
@@ -3615,7 +3421,7 @@ future<> storage_service::raft_rebuild(utils::optional_param sdc_param) {
 }
 
 future<> storage_service::raft_check_and_repair_cdc_streams() {
-    std::optional<cdc::generation_id_v2> last_committed_gen;
+    std::optional<cdc::generation_id> last_committed_gen;
     utils::UUID request_id;
 
     while (true) {
@@ -3714,57 +3520,14 @@ future<> storage_service::raft_check_and_repair_cdc_streams() {
 
 future<> storage_service::rebuild(utils::optional_param source_dc) {
     return run_with_api_lock(sstring("rebuild"), [source_dc] (storage_service& ss) -> future<> {
-        ss.check_ability_to_perform_topology_operation("rebuild");
         if (auto tablets_keyspaces = ss._db.local().get_tablets_keyspaces(); !tablets_keyspaces.empty()) {
             std::ranges::sort(tablets_keyspaces);
             slogger.warn("Rebuild is not supported for the following tablets-enabled keyspaces: {}: "
                     "Rebuild is not required for tablets-enabled keyspace after increasing replication factor. "
                     "However, recovering from local data loss on this node requires running repair on all nodes in the datacenter", tablets_keyspaces);
         }
-        if (ss.raft_topology_change_enabled()) {
-            co_await ss.raft_rebuild(source_dc);
-        } else {
-            slogger.info("rebuild from dc: {}", source_dc);
-            auto tmptr = ss.get_token_metadata_ptr();
-            auto ks_erms = ss._db.local().get_non_local_strategy_keyspaces_erms();
-            if (ss.is_repair_based_node_ops_enabled(streaming::stream_reason::rebuild)) {
-                co_await ss._repair.local().rebuild_with_repair(std::move(ks_erms), tmptr, std::move(source_dc), null_topology_guard);
-            } else {
-                auto streamer = make_lw_shared<dht::range_streamer>(ss._db, ss._stream_manager, tmptr, ss._abort_source,
-                        tmptr->get_my_id(), ss._snitch.local()->get_location(), "Rebuild", streaming::stream_reason::rebuild, null_topology_guard);
-                streamer->add_source_filter(std::make_unique<dht::range_streamer::failure_detector_source_filter>(ss._gossiper.get_unreachable_members()));
-                if (source_dc) {
-                    streamer->add_source_filter(std::make_unique<dht::range_streamer::single_datacenter_filter>(*source_dc));
-                }
-                for (const auto& [keyspace_name, erm] : ks_erms) {
-                    co_await streamer->add_ranges(keyspace_name, erm, co_await ss.get_ranges_for_endpoint(*erm, ss.my_host_id()), ss._gossiper, false);
-                }
-                try {
-                    co_await streamer->stream_async();
-                    slogger.info("Streaming for rebuild successful");
-                } catch (...) {
-                    auto ep = std::current_exception();
-                    // This is used exclusively through JMX, so log the full trace but only throw a simple RTE
-                    slogger.warn("Error while rebuilding node: {}", ep);
-                    std::rethrow_exception(std::move(ep));
-                }
-            }
-        }
+        co_await ss.raft_rebuild(source_dc);
     });
-}
-
-void storage_service::check_ability_to_perform_topology_operation(std::string_view operation_name) const {
-    switch (_topology_change_kind_enabled) {
-    case topology_change_kind::unknown:
-        throw std::runtime_error(fmt::format("{} is not allowed at this time - the node is still starting", operation_name));
-    case topology_change_kind::upgrading_to_raft:
-        throw std::runtime_error(fmt::format("{} is not allowed at this time - the node is still in the process"
-                " of upgrading to raft topology", operation_name));
-    case topology_change_kind::legacy:
-        return;
-    case topology_change_kind::raft:
-        return;
-    }
 }
 
 int32_t storage_service::get_exception_count() {
@@ -3934,48 +3697,6 @@ future<> storage_service::removenode_with_stream(locator::host_id leaving_node,
     });
 }
 
-future<> storage_service::excise(std::unordered_set<token> tokens, inet_address endpoint_ip,
-        locator::host_id endpoint_hid, gms::permit_id pid) {
-    slogger.info("Removing tokens {} for {}", tokens, endpoint_ip);
-    // FIXME: HintedHandOffManager.instance.deleteHintsForEndpoint(endpoint);
-    co_await remove_endpoint(endpoint_ip, pid);
-    auto tmlock = std::make_optional(co_await get_token_metadata_lock());
-    auto tmptr = co_await get_mutable_token_metadata_ptr();
-    tmptr->remove_endpoint(endpoint_hid);
-    tmptr->remove_bootstrap_tokens(tokens);
-
-    co_await update_topology_change_info(tmptr, ::format("excise {}", endpoint_ip));
-    co_await replicate_to_all_cores(std::move(tmptr));
-    tmlock.reset();
-
-    co_await notify_released(endpoint_hid);
-    co_await notify_left(endpoint_ip, endpoint_hid);
-}
-
-future<> storage_service::excise(std::unordered_set<token> tokens, inet_address endpoint_ip,
-        locator::host_id endpoint_hid, int64_t expire_time, gms::permit_id pid) {
-    add_expire_time_if_found(endpoint_hid, expire_time);
-    return excise(tokens, endpoint_ip, endpoint_hid, pid);
-}
-
-future<> storage_service::leave_ring() {
-    co_await _cdc_gens.local().leave_ring();
-    co_await _sys_ks.local().set_bootstrap_state(db::system_keyspace::bootstrap_state::NEEDS_BOOTSTRAP);
-    co_await mutate_token_metadata([this] (mutable_token_metadata_ptr tmptr) {
-        auto endpoint = get_broadcast_address();
-        const auto my_id = tmptr->get_my_id();
-        tmptr->remove_endpoint(my_id);
-        return update_topology_change_info(std::move(tmptr), ::format("leave_ring {}/{}", endpoint, my_id));
-    });
-
-    auto expire_time = _gossiper.compute_expire_time().time_since_epoch().count();
-    co_await _gossiper.add_local_application_state(gms::application_state::STATUS,
-            versioned_value::left(co_await _sys_ks.local().get_local_tokens(), expire_time));
-    auto delay = std::max(get_ring_delay(), gms::gossiper::INTERVAL);
-    slogger.info("Announcing that I have left the ring for {}ms", delay.count());
-    co_await sleep_abortable(delay, _abort_source);
-}
-
 future<>
 storage_service::stream_ranges(std::unordered_map<sstring, std::unordered_multimap<dht::token_range, locator::host_id>> ranges_to_stream_by_keyspace) {
     auto streamer = dht::range_streamer(_db, _stream_manager, get_token_metadata_ptr(), _abort_source, get_token_metadata_ptr()->get_my_id(), _snitch.local()->get_location(), "Unbootstrap", streaming::stream_reason::decommission, null_topology_guard);
@@ -4003,14 +3724,6 @@ storage_service::stream_ranges(std::unordered_map<sstring, std::unordered_multim
         auto ep = std::current_exception();
         slogger.warn("stream_ranges failed: {}", ep);
         std::rethrow_exception(std::move(ep));
-    }
-}
-
-void storage_service::add_expire_time_if_found(locator::host_id endpoint, int64_t expire_time) {
-    if (expire_time != 0L) {
-        using clk = gms::gossiper::clk;
-        auto time = clk::time_point(clk::duration(expire_time));
-        _gossiper.add_expire_time_for_endpoint(endpoint, time);
     }
 }
 
@@ -4981,14 +4694,6 @@ future<> storage_service::stream_tablet(locator::global_tablet_id tablet) {
             // Don't access trinfo after this.
             tm = {};
 
-            co_await utils::get_local_injector().inject("stream_sstable_files", [&] (auto& handler) -> future<> {
-                slogger.info("stream_sstable_files: waiting");
-                while (!handler.poll_for_message()) {
-                    co_await sleep_abortable(std::chrono::milliseconds(5), guard.get_abort_source());
-                }
-                slogger.info("stream_sstable_files: released");
-            });
-
             for (auto src : read_from) {
                 // Use file stream for tablet to stream data
                 auto ops_id = streaming::file_stream_id::create_random_id();
@@ -5622,10 +5327,6 @@ future<locator::load_stats> storage_service::load_stats_for_tablet_based_tables(
         tls.effective_capacity = si.available + sum_tablet_sizes;
     }
 
-    utils::get_local_injector().inject("clear_tablet_stats_in_load_stats", [&] {
-        load_stats.tablet_stats.erase(this_host);
-    });
-
     co_return std::move(load_stats);
 }
 
@@ -5775,13 +5476,6 @@ future<bool> storage_service::verify_topology_quiesced(token_metadata::version_t
 future<join_node_request_result> storage_service::join_node_request_handler(join_node_request_params params) {
     join_node_request_result result;
     rtlogger.info("received request to join from host_id: {}", params.host_id);
-
-    // Sanity check. We should already be using raft topology changes because
-    // the node asked us via join_node_query about which node to use and
-    // we responded that they should use raft. We cannot go back from raft
-    // to legacy (unless we switch to recovery between handling join_node_query
-    // and join_node_request, which is extremely unlikely).
-    check_ability_to_perform_topology_operation("join");
 
     if (params.cluster_name != _db.local().get_config().cluster_name()) {
         result.result = join_node_request_result::rejected{
@@ -6369,26 +6063,6 @@ storage_service::get_ranges_for_endpoint(const locator::effective_replication_ma
     return erm.get_ranges(ep);
 }
 
-// Caller is responsible to hold token_metadata valid until the returned future is resolved
-future<dht::token_range_vector>
-storage_service::get_all_ranges(const std::vector<token>& sorted_tokens) const {
-    if (sorted_tokens.empty())
-        co_return dht::token_range_vector();
-    int size = sorted_tokens.size();
-    dht::token_range_vector ranges;
-    ranges.reserve(size + 1);
-    ranges.push_back(dht::token_range::make_ending_with(interval_bound<token>(sorted_tokens[0], true)));
-    co_await coroutine::maybe_yield();
-    for (int i = 1; i < size; ++i) {
-        dht::token_range r(wrapping_interval<token>::bound(sorted_tokens[i - 1], false), wrapping_interval<token>::bound(sorted_tokens[i], true));
-        ranges.push_back(r);
-        co_await coroutine::maybe_yield();
-    }
-    ranges.push_back(dht::token_range::make_starting_with(interval_bound<token>(sorted_tokens[size-1], false)));
-
-    co_return ranges;
-}
-
 inet_address_vector_replica_set
 storage_service::get_natural_endpoints(const sstring& keyspace, const sstring& cf, const sstring& key) const {
     auto& table = _db.local().find_column_family(keyspace, cf);
@@ -6550,23 +6224,6 @@ future<> storage_service::notify_client_routes_change(const client_routes_servic
     co_await _client_routes.local().notify_client_routes_change(client_route_keys);
 }
 
-bool storage_service::is_normal_state_handled_on_boot(locator::host_id node) {
-    return _normal_state_handled_on_boot.contains(node);
-}
-
-storage_service::topology_change_kind storage_service::upgrade_state_to_topology_op_kind(topology::upgrade_state_type upgrade_state) const {
-    switch (upgrade_state) {
-    case topology::upgrade_state_type::done:
-        return topology_change_kind::raft;
-    case topology::upgrade_state_type::not_upgraded:
-        // Did not start upgrading to raft topology yet - use legacy
-        return topology_change_kind::legacy;
-    default:
-        // Upgrade is in progress - disallow topology operations
-        return topology_change_kind::upgrading_to_raft;
-    }
-}
-
 future<bool> storage_service::is_vnodes_cleanup_allowed(sstring keyspace) {
     return container().invoke_on(0, [keyspace = std::move(keyspace)] (storage_service& ss) {
         const auto my_id = ss.get_token_metadata().get_my_id();
@@ -6614,18 +6271,6 @@ future<> storage_service::start_maintenance_mode() {
         token_metadata->update_topology(my_host_id(), _snitch.local()->get_location(), locator::node::state::normal, smp::count);
         return token_metadata->update_normal_tokens({ dht::token{} }, my_host_id());
     }, acquire_merge_lock::yes);
-}
-
-void storage_service::set_topology_change_kind(topology_change_kind kind) {
-    _topology_change_kind_enabled = kind;
-    _gossiper.set_topology_state_machine(kind == topology_change_kind::raft ? & _topology_state_machine : nullptr);
-}
-
-bool storage_service::raft_topology_change_enabled() const {
-    if (this_shard_id() != 0) {
-        on_internal_error(slogger, "raft_topology_change_enabled() must run on shard 0");
-    }
-    return _topology_change_kind_enabled == topology_change_kind::raft;
 }
 
 future<> storage_service::register_protocol_server(protocol_server& server, bool start_instantly) {

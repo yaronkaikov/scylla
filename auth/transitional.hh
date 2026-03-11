@@ -62,7 +62,7 @@ class transitional_authorizer : public authorizer {
     std::unique_ptr<authorizer> _authorizer;
 
 public:
-    transitional_authorizer(cql3::query_processor& qp, ::service::raft_group0_client& g0, ::service::migration_manager& mm);
+    transitional_authorizer(cql3::query_processor& qp);
     transitional_authorizer(std::unique_ptr<authorizer> a);
     ~transitional_authorizer();
 

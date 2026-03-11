@@ -99,7 +99,6 @@
 
 #include "cdc/log.hh"
 #include "cdc/generation_service.hh"
-#include "service/qos/standard_service_level_distributed_data_accessor.hh"
 #include "service/storage_proxy.hh"
 #include "service/mapreduce_service.hh"
 #include "alternator/controller.hh"
@@ -1466,6 +1465,31 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             sys_ks.local().build_bootstrap_info().get();
 
+            if (sys_ks.local().bootstrap_complete()) {
+                // Check as early as possible if the cluster is fully upgraded to use Raft, since if it's not, then this node cannot be started with the current version.
+                if (sys_ks.local().load_group0_upgrade_state().get() != "use_post_raft_procedures") {
+                    throw std::runtime_error("The cluster is not yet fully upgraded to use raft. This means that you try to upgrade"
+                        " a node of a cluster that is not using Raft yet. This is no longer supported. Please first complete the upgrade of the cluster to use Raft");
+                }
+
+                if (sys_ks.local().load_topology_upgrade_state().get() != "done") {
+                    throw std::runtime_error(
+                        "Cannot start - cluster is not yet upgraded to use raft topology and this version does not support legacy topology operations. "
+                        "If you are trying to upgrade the node then first upgrade the cluster to use raft topology.");
+                }
+
+                if (sys_ks.local().get_auth_version().get() != db::auth_version_t::v2) {
+                    throw std::runtime_error(
+                        "Cannot start - cluster is not yet upgraded to use auth v2 and this version does not support legacy auth. "
+                        "If you are trying to upgrade the node then first upgrade the cluster to use auth v2.");
+                }
+                if (sys_ks.local().get_service_levels_version().get() != 2) {
+                    throw std::runtime_error(
+                        "Cannot start - cluster is not yet upgraded to use service levels v2 and this version does not support legacy service levels. "
+                        "If you are trying to upgrade the node then first upgrade the cluster to use service levels v2.");
+                }
+            }
+
             const auto listen_address = utils::resolve(cfg->listen_address, family).get();
             const auto host_id = initialize_local_info_thread(sys_ks, snitch, listen_address, *cfg, broadcast_addr, broadcast_rpc_addr);
 
@@ -1604,6 +1628,18 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             }
             auto group0_id = sys_ks.local().get_raft_group0_id().get();
 
+            checkpoint(stop_signal, "starting topology state machine");
+            sharded<service::topology_state_machine> tsm;
+            tsm.start().get();
+            auto stop_tsm = defer_verbose_shutdown("topology_state_machine", [&tsm] {
+                tsm.stop().get();
+            });
+            auto notify_topology = [&tsm] (auto) {
+                tsm.local().event.broadcast();
+            };
+            auto tablets_per_shard_goal_observer = cfg->tablets_per_shard_goal.observe(notify_topology);
+            auto tablets_initial_scale_factor_observer = cfg->tablets_initial_scale_factor.observe(notify_topology);
+
             // Fail on a gossiper seeds lookup error only if the node is not bootstrapped.
             const bool fail_on_lookup_error = !sys_ks.local().bootstrap_complete();
 
@@ -1627,7 +1663,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             debug::the_gossiper = &gossiper;
-            gossiper.start(std::ref(stop_signal.as_sharded_abort_source()), std::ref(token_metadata), std::ref(messaging), std::move(get_gossiper_cfg), std::ref(gossip_address_map)).get();
+            gossiper.start(std::ref(stop_signal.as_sharded_abort_source()), std::ref(token_metadata), std::ref(messaging), std::move(get_gossiper_cfg), std::ref(gossip_address_map), std::ref(tsm)).get();
             auto stop_gossiper = defer_verbose_shutdown("gossiper", [&gossiper] {
                 // call stop on each instance, but leave the sharded<> pointers alive
                 gossiper.invoke_on_all(&gms::gossiper::stop).get();
@@ -1729,18 +1765,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             auto stop_raft = defer_verbose_shutdown("Raft", [&raft_gr] {
                 raft_gr.stop().get();
             });
-
-            checkpoint(stop_signal, "starting topology state machine");
-            sharded<service::topology_state_machine> tsm;
-            tsm.start().get();
-            auto stop_tsm = defer_verbose_shutdown("topology_state_machine", [&tsm] {
-                tsm.stop().get();
-            });
-            auto notify_topology = [&tsm] (auto) {
-                tsm.local().event.broadcast();
-            };
-            auto tablets_per_shard_goal_observer = cfg->tablets_per_shard_goal.observe(notify_topology);
-            auto tablets_initial_scale_factor_observer = cfg->tablets_initial_scale_factor.observe(notify_topology);
 
             auto compression_dict_updated_callback = [&sstable_compressor_factory] (std::string_view name) -> future<> {
                 auto dict = co_await sys_ks.local().query_dict(name);
@@ -1893,11 +1917,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
                 api::unset_server_raft(ctx).get();
             });
 
-            group0_client.init().get();
-
             checkpoint(stop_signal, "initializing system schema");
             db::schema_tables::save_system_schema(qp.local()).get();
-            db::schema_tables::recalculate_schema_version(sys_ks, proxy, feature_service.local()).get();
 
             // making compaction manager api available, after system keyspace has already been established.
             api::set_server_compaction_manager(ctx, cm).get();
@@ -2026,23 +2047,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             checkpoint(stop_signal, "starting CDC Generation Management service");
-            /* This service uses the system distributed keyspace.
-             * It will only do that *after* the node has joined the token ring, and the token ring joining
-             * procedure (`storage_service::init_server`) is responsible for initializing sys_dist_ks.
-             * Hence the service will start using sys_dist_ks only after it was initialized.
-             *
-             * However, there is a problem with the service shutdown order: sys_dist_ks is stopped
-             * *before* CDC generation service is stopped (`storage_service::drain_on_shutdown` below),
-             * so CDC generation service takes sharded<db::sys_dist_ks> and must check local_is_initialized()
-             * every time it accesses it (because it may have been stopped already), then take local_shared()
-             * which will prevent sys_dist_ks from being destroyed while the service operates on it.
-             */
             cdc::generation_service::config cdc_config;
-            cdc_config.ignore_msb_bits = cfg->murmur3_partitioner_ignore_msb_bits();
             cdc_config.ring_delay = std::chrono::milliseconds(cfg->ring_delay_ms());
-            cdc_config.dont_rewrite_streams = cfg->cdc_dont_rewrite_streams();
-            cdc_generation_service.start(std::move(cdc_config), std::ref(gossiper), std::ref(sys_dist_ks), std::ref(sys_ks),
-                    std::ref(stop_signal.as_sharded_abort_source()), std::ref(token_metadata), std::ref(feature_service), std::ref(db)).get();
+            cdc_generation_service.start(std::move(cdc_config), std::ref(sys_ks), std::ref(db)).get();
             auto stop_cdc_generation_service = defer_verbose_shutdown("CDC Generation Management service", [] {
                 cdc_generation_service.stop().get();
             });
@@ -2094,8 +2101,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
 
             if (cfg->maintenance_socket() != "ignore") {
                 checkpoint(stop_signal, "starting maintenance auth service");
-                maintenance_auth_service.start(std::ref(qp), std::ref(group0_client), std::ref(mm_notifier),
-                        auth::make_authorizer_factory(auth::allow_all_authorizer_name, qp, group0_client, mm),
+                maintenance_auth_service.start(std::ref(qp), std::ref(group0_client),
+                        auth::make_authorizer_factory(auth::allow_all_authorizer_name, qp),
                         auth::make_maintenance_socket_authenticator_factory(qp, group0_client, mm, auth_cache),
                         auth::make_maintenance_socket_role_manager_factory(qp, group0_client, mm, auth_cache),
                         maintenance_socket_enabled::yes, std::ref(auth_cache)).get();
@@ -2216,7 +2223,6 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // Setup group0 early in case the node is bootstrapped already and the group exists.
             // Need to do it before allowing incoming messaging service connections since
             // storage proxy's and migration manager's verbs may access group0.
-            // This will also disable migration manager schema pulls if needed.
             group0_service.setup_group0_if_exist(sys_ks.local(), ss.local(), qp.local(), mm.local()).get();
 
             // The call to setup_group0_if_exists() above guarantees that, if group0 is
@@ -2349,14 +2355,9 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             // with raft leader elected as only then service level mutation is put
             // into scylla_local table. Calling it here avoids starting new cluster with
             // older version only to immediately migrate it to the latest in the background.
-            sl_controller.invoke_on_all([&qp, &group0_client] (qos::service_level_controller& controller) -> future<> {
-                return controller.reload_distributed_data_accessor(
-                        qp.local(), group0_client, sys_ks.local(), sys_dist_ks.local());
+            sl_controller.invoke_on_all([&qp, &group0_client] (qos::service_level_controller& controller) {
+                controller.reload_distributed_data_accessor(qp.local(), group0_client);
             }).get();
-
-            sl_controller.local().maybe_start_legacy_update_from_distributed_data([cfg] () {
-                return std::chrono::duration_cast<steady_clock_type::duration>(std::chrono::milliseconds(cfg->service_levels_interval()));
-            }, ss.local(), group0_client);
 
             // Initialize virtual table in system_distributed keyspace after joining the cluster, so
             // that the keyspace is ready
@@ -2372,8 +2373,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             checkpoint(stop_signal, "starting auth service");
-            auth_service.start(std::ref(qp), std::ref(group0_client), std::ref(mm_notifier),
-                    auth::make_authorizer_factory(cfg->authorizer(), qp, group0_client, mm),
+            auth_service.start(std::ref(qp), std::ref(group0_client),
+                    auth::make_authorizer_factory(cfg->authorizer(), qp),
                     auth::make_authenticator_factory(cfg->authenticator(), qp, group0_client, mm, auth_cache),
                     auth::make_role_manager_factory(cfg->role_manager(), qp, group0_client, mm, auth_cache),
                     maintenance_socket_enabled::no, std::ref(auth_cache)).get();
@@ -2405,9 +2406,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             });
 
             // update the service level cache after the SL data accessor and auth service are initialized.
-            if (sl_controller.local().is_v2()) {
-                sl_controller.local().update_cache(qos::update_both_cache_levels::yes).get();
-            }
+            sl_controller.local().update_cache(qos::update_both_cache_levels::yes).get();
 
             sl_controller.invoke_on_all([&lifecycle_notifier] (qos::service_level_controller& controller) {
                 lifecycle_notifier.local().register_subscriber(&controller);
