@@ -13,7 +13,7 @@
 #include <string_view>
 #include "alternator/auth.hh"
 #include <fmt/format.h>
-#include "auth/password_authenticator.hh"
+#include "db/consistency_level_type.hh"
 #include "db/system_keyspace.hh"
 #include "service/storage_proxy.hh"
 #include "alternator/executor.hh"
@@ -40,7 +40,7 @@ future<std::string> get_key_from_roles(service::storage_proxy& proxy, std::strin
     auto partition_slice = query::partition_slice(std::move(bounds), {}, query::column_id_vector{salted_hash_col->id, can_login_col->id}, selection->get_query_options());
     auto command = ::make_lw_shared<query::read_command>(schema->id(), schema->version(), partition_slice,
             proxy.get_max_result_size(partition_slice), query::tombstone_limit(proxy.get_tombstone_limit()));
-    auto cl = auth::password_authenticator::consistency_for_user(username);
+    auto cl = db::consistency_level::LOCAL_ONE;
 
     service::client_state client_state{service::client_state::internal_tag()};
     service::storage_proxy::coordinator_query_result qr = co_await proxy.query(schema, std::move(command), std::move(partition_ranges), cl,

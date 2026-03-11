@@ -162,15 +162,6 @@ future<> password_authenticator::stop() {
     return _stopped.handle_exception_type([] (const sleep_aborted&) { }).handle_exception_type([](const abort_requested_exception&) {});
 }
 
-db::consistency_level password_authenticator::consistency_for_user(std::string_view role_name) {
-    // TODO: this is plain dung. Why treat hardcoded default special, but for example a user-created
-    // super user uses plain LOCAL_ONE?
-    if (role_name == meta::DEFAULT_SUPERUSER_NAME) {
-        return db::consistency_level::QUORUM;
-    }
-    return db::consistency_level::LOCAL_ONE;
-}
-
 std::string_view password_authenticator::qualified_java_name() const {
     return password_authenticator_name;
 }
@@ -294,7 +285,7 @@ future<std::optional<sstring>> password_authenticator::get_password_hash(std::st
 
     const auto res = co_await _qp.execute_internal(
             query,
-            consistency_for_user(role_name),
+            db::consistency_level::LOCAL_ONE,
             internal_distributed_query_state(),
             {role_name},
             cql3::query_processor::cache_internal::yes);

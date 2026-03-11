@@ -44,14 +44,6 @@ namespace auth {
 
 static logging::logger log("standard_role_manager");
 
-static db::consistency_level consistency_for_role(std::string_view role_name) noexcept {
-    if (role_name == meta::DEFAULT_SUPERUSER_NAME) {
-        return db::consistency_level::QUORUM;
-    }
-
-    return db::consistency_level::LOCAL_ONE;
-}
-
 future<std::optional<standard_role_manager::record>> standard_role_manager::find_record(std::string_view role_name) {
     auto name = sstring(role_name);
     auto role = _cache.get(name);
@@ -242,7 +234,7 @@ future<> standard_role_manager::drop(std::string_view role_name, ::service::grou
                 ROLE_MEMBERS_CF);
         const auto members = co_await _qp.execute_internal(
                 query,
-                consistency_for_role(role_name),
+                db::consistency_level::LOCAL_ONE,
                 internal_distributed_query_state(),
                 {sstring(role_name)},
                 cql3::query_processor::cache_internal::no);
@@ -437,7 +429,7 @@ future<role_set> standard_role_manager::query_all(::service::query_state& qs) {
 
     const auto results = co_await _qp.execute_internal(
             query,
-            db::consistency_level::QUORUM,
+            db::consistency_level::LOCAL_ONE,
             qs,
             cql3::query_processor::cache_internal::yes);
 

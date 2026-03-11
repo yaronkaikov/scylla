@@ -13,7 +13,6 @@
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/shared_future.hh>
 
-#include "db/consistency_level_type.hh"
 #include "auth/authenticator.hh"
 #include "auth/passwords.hh"
 #include "auth/cache.hh"
@@ -50,7 +49,6 @@ class password_authenticator : public authenticator {
     constexpr static auth::passwords::scheme _scheme = passwords::scheme::sha_512;
 
 public:
-    static db::consistency_level consistency_for_user(std::string_view role_name);
     static std::string default_superuser(cql3::query_processor& qp);
 
     password_authenticator(cql3::query_processor&, ::service::raft_group0_client&, ::service::migration_manager&, cache&);
