@@ -374,6 +374,49 @@ public:
 inline time_estimated_histogram time_estimated_histogram_merge(time_estimated_histogram a, const time_estimated_histogram& b) {
     return a.merge(b);
 }
+/**
+ * estimated_histogram_with_max will be used to replace the estimated_histogram class.
+ * @see estimated_histogram
+ * While the original estimated_histogram define its bucket range in the constructor, the
+ * estimated_histogram_with_max is a template class where the bucket range is defined by
+ * the Max template parameter.
+ * The buckets starts at 1 and goes up to Max with a precision of 4 which
+ * is approximate 1.2 growth factor between buckets.
+ *
+ * The estimated_histogram_with_max api is similar to the estimated_histogram.
+ * As such it supports duration histogram, where the values are in microseconds.
+*/
+
+template<uint64_t Max>
+struct estimated_histogram_with_max: public approx_exponential_histogram<1, Max, 4> {
+    using clock = std::chrono::steady_clock;
+    using duration = clock::duration;
+
+    estimated_histogram_with_max<Max>& merge(const estimated_histogram_with_max<Max>& b) {
+        approx_exponential_histogram<1, Max, 4>::merge(b);
+        return *this;
+    }
+
+    using approx_exponential_histogram<1, Max, 4>::add;
+    friend estimated_histogram_with_max<Max> merge(estimated_histogram_with_max<Max> a, const estimated_histogram_with_max<Max>& b);
+
+    /**
+     * The estimated_histogram_with_max api is similar to the estimated_histogram.
+     * As such it supports duration histogram, where the stored values are in microseconds.
+     */
+
+    void add_nano(int64_t n) {
+        add(n/1000);
+    }
+    void add(duration latency) {
+        add(std::chrono::duration_cast<std::chrono::microseconds>(latency).count());
+    }
+};
+
+template<uint64_t Max>
+inline estimated_histogram_with_max<Max> estimated_histogram_with_max_merge(estimated_histogram_with_max<Max> a, const estimated_histogram_with_max<Max>& b) {
+    return a.merge(b);
+}
 
 struct estimated_histogram {
     using clock = std::chrono::steady_clock;
