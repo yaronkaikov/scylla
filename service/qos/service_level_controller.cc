@@ -443,20 +443,6 @@ future<std::optional<service::group0_guard>> service_level_controller::migrate_t
 }
 
 
-future<std::optional<service_level_options>> service_level_controller::auth_integration::find_effective_service_level(const sstring& role_name) {
-    const auto _ = _stop_gate.hold();
-
-    auto effective_sl_it = _cache.find(role_name);
-    co_return effective_sl_it != _cache.end()
-        ? std::optional<service_level_options>(effective_sl_it->second)
-        : std::nullopt;
-}
-
-future<std::optional<service_level_options>> service_level_controller::find_effective_service_level(const sstring& role_name) {
-    SCYLLA_ASSERT(_auth_integration != nullptr);
-    return _auth_integration->find_effective_service_level(role_name);
-}
-
 std::optional<service_level_options> service_level_controller::auth_integration::find_cached_effective_service_level(const sstring& role_name) {
     auto effective_sl_it = _cache.find(role_name);
     return effective_sl_it != _cache.end() 
@@ -569,7 +555,7 @@ future<scheduling_group> service_level_controller::auth_integration::get_user_sc
     const auto _ = _stop_gate.hold();
 
     if (usr && usr->name) {
-        auto sl_opt = co_await find_effective_service_level(*usr->name);
+        auto sl_opt = find_cached_effective_service_level(*usr->name);
         auto& sl_name = (sl_opt && sl_opt->shares_name) ? *sl_opt->shares_name : default_service_level_name;
         co_return _sl_controller.get_scheduling_group(sl_name);
     }

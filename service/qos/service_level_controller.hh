@@ -144,8 +144,6 @@ public:
 
         /// Find the effective service level for a given role.
         /// If there is no applicable service level for it, `std::nullopt` is returned instead.
-        future<std::optional<service_level_options>> find_effective_service_level(const sstring& role_name);
-        /// Synchronous version of `find_effective_service_level` that only checks the cache.
         std::optional<service_level_options> find_cached_effective_service_level(const sstring& role_name);
 
         /// Execute a function within the service level context of a user, get_user_scheduling_group - async version 
@@ -156,11 +154,8 @@ public:
         template <typename Func, typename Ret = std::invoke_result_t<Func>>
             requires std::invocable<Func>
         futurize_t<Ret> with_user_service_level(const std::optional<auth::authenticated_user>& user, Func&& func) {
-            // No need to hold `_stop_gate` here. It'll be held during the call to `find_effective_service_level`,
-            // and after that it's not necessary. We do NOT hold it here to avoid postpoing finishing `stop`.
-
             if (user && user->name) {
-                const std::optional<service_level_options> maybe_sl_opts = co_await find_effective_service_level(*user->name);
+                const std::optional<service_level_options> maybe_sl_opts = find_cached_effective_service_level(*user->name);
                 const sstring& sl_name = maybe_sl_opts && maybe_sl_opts->shares_name
                         ? *maybe_sl_opts->shares_name
                         : service_level_controller::default_service_level_name;
@@ -384,10 +379,6 @@ public:
      * @return the effective service level options - they may in particular be a combination
      *         of options from multiple service levels
      */
-    future<std::optional<service_level_options>> find_effective_service_level(const sstring& role_name);
-
-    // Synchronous equivalent of `find_effective_service_level`. 
-    // The method uses only effective service level cache, so it requires service levels in v2.
     std::optional<service_level_options> find_cached_effective_service_level(const sstring& role_name);
 
     /**
