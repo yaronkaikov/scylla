@@ -81,7 +81,7 @@ async def wait_for_cql(cql: Session, host: Host, deadline: float) -> None:
             logging.info(f"Driver not connected to {host} yet")
             return None
         return True
-    await wait_for(cql_ready, deadline)
+    await wait_for(cql_ready, deadline, period=0.1)
 
 
 async def wait_for_cql_and_get_hosts(cql: Session, servers: list[ServerInfo], deadline: float) \
