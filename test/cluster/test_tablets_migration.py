@@ -4,8 +4,9 @@
 # SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
 #
 from collections import defaultdict
+from typing import Optional, Type
+from aiohttp.client_exceptions import ServerDisconnectedError
 
-from cassandra.query import SimpleStatement, ConsistencyLevel
 from test.pylib.manager_client import ManagerClient
 from test.pylib.rest_client import HTTPError, read_barrier
 from test.pylib.tablets import get_tablet_replica, get_all_tablet_replicas, get_tablet_info
@@ -17,8 +18,16 @@ import logging
 import asyncio
 import os
 import glob
+import re
 
 logger = logging.getLogger(__name__)
+
+async def await_api_task(task, allowed_exception: Optional[Type[Exception]]=None, allowed_error: Optional[str]=None):
+    try:
+        await task
+    except allowed_exception as e:
+        if allowed_error and not re.search(allowed_error, str(e)):
+            raise
 
 
 @pytest.mark.parametrize("action", ['move', 'add_replica', 'del_replica'])
@@ -298,14 +307,14 @@ async def test_tablet_back_and_forth_migration(manager: ManagerClient):
         new_replica = (host_ids[1], 0)
 
         logger.info(f"Moving tablet {old_replica} -> {new_replica}")
-        manager.api.move_tablet(servers[0].ip_addr, ks, "test", old_replica[0], old_replica[1], new_replica[0], new_replica[1], 0)
+        await manager.api.move_tablet(servers[0].ip_addr, ks, "test", old_replica[0], old_replica[1], new_replica[0], new_replica[1], 0)
 
         await assert_rows(1)
         await cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES ({2}, {2});")
         await assert_rows(2)
 
         logger.info(f"Moving tablet {new_replica} -> {old_replica}")
-        manager.api.move_tablet(servers[0].ip_addr, ks, "test", new_replica[0], new_replica[1], old_replica[0], old_replica[1], 0)
+        await manager.api.move_tablet(servers[0].ip_addr, ks, "test", new_replica[0], new_replica[1], old_replica[0], old_replica[1], 0)
 
         await assert_rows(2)
         await cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES ({3}, {3});")
@@ -400,8 +409,7 @@ async def test_staging_backlog_is_preserved_with_file_based_streaming(manager: M
         logger.info(f"SSTable count in staging dir of server 1: {s1_sstables_in_staging}")
 
         logger.info("Allowing view update generator to progress again")
-        for server in servers:
-            manager.api.disable_injection(server.ip_addr, 'view_update_generator_consume_staging_sstable')
+        await asyncio.gather(*[manager.api.disable_injection(server.ip_addr, 'view_update_generator_consume_staging_sstable') for server in servers])
 
         assert s0_sstables_in_staging > 0
         assert s0_sstables_in_staging == s1_sstables_in_staging
@@ -472,6 +480,8 @@ async def test_restart_leaving_replica_during_cleanup(manager: ManagerClient, mi
 
         await asyncio.gather(*[manager.api.disable_injection(s.ip_addr, injection) for s in servers])
 
+        await await_api_task(move_task, allowed_exception=HTTPError, allowed_error="abort_requested_exception")
+
         await manager.enable_tablet_balancing()
 
         # Trigger tablet merge to reproduce #23481
@@ -541,5 +551,7 @@ async def test_restart_in_cleanup_stage_after_cleanup(manager: ManagerClient):
         await wait_for_cql_and_get_hosts(manager.get_cql(), servers, time.time() + 30)
 
         await asyncio.gather(*[manager.api.message_injection(s.ip_addr, "wait_after_tablet_cleanup") for s in servers])
+
+        await await_api_task(move_task, allowed_exception=ServerDisconnectedError)
 
         await manager.api.quiesce_topology(servers[0].ip_addr)
