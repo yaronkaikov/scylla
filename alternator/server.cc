@@ -771,7 +771,7 @@ future<executor::request_return_type> server::handle_api_request(std::unique_ptr
     if (!username.empty()) {
         client_state.set_login(auth::authenticated_user(username));
     }
-    co_await client_state.maybe_update_per_service_level_params();
+    client_state.maybe_update_per_service_level_params();
 
     tracing::trace_state_ptr trace_state = maybe_trace_query(client_state, username, op, content, _max_users_query_size_in_trace_output.get());
     tracing::trace(trace_state, "{}", op);

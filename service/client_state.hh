@@ -382,7 +382,7 @@ private:
 public:
     template<typename Cmd = auth::command_desc> future<bool> check_has_permission(Cmd) const;
     template<typename Cmd = auth::command_desc> future<> ensure_has_permission(Cmd) const;
-    future<> maybe_update_per_service_level_params();
+    void maybe_update_per_service_level_params();
     void update_per_service_level_params(qos::service_level_options& slo);
 
     /**

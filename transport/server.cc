@@ -1008,7 +1008,7 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_st
         if (opt_user) {
             client_state.set_login(std::move(*opt_user));
             co_await client_state.check_user_can_login();
-            co_await client_state.maybe_update_per_service_level_params();
+            client_state.maybe_update_per_service_level_params();
             res = make_ready(stream, trace_state);
         } else {
             res = make_autheticate(stream, a.qualified_java_name(), trace_state);
@@ -1063,10 +1063,8 @@ future<std::unique_ptr<cql_server::response>> cql_server::connection::process_au
                 client_state.set_login(ff.get());
                 update_scheduling_group();
                 auto f = client_state.check_user_can_login();
-                f = f.then([&client_state] {
-                    return client_state.maybe_update_per_service_level_params();
-                });
-                return f.then([this, stream, challenge = std::move(challenge), trace_state]() mutable {
+                return f.then([this, &client_state, stream, challenge = std::move(challenge), trace_state]() mutable {
+                    client_state.maybe_update_per_service_level_params();
                     _authenticating = false;
                     _ready = true;
                     on_connection_ready();
