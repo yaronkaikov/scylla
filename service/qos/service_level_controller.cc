@@ -551,19 +551,6 @@ scheduling_group service_level_controller::get_scheduling_group(sstring service_
     }
 }
 
-future<scheduling_group> service_level_controller::auth_integration::get_user_scheduling_group(const std::optional<auth::authenticated_user>& usr) {
-    const auto _ = _stop_gate.hold();
-
-    if (usr && usr->name) {
-        auto sl_opt = find_cached_effective_service_level(*usr->name);
-        auto& sl_name = (sl_opt && sl_opt->shares_name) ? *sl_opt->shares_name : default_service_level_name;
-        co_return _sl_controller.get_scheduling_group(sl_name);
-    }
-    else {
-        co_return _sl_controller.get_default_scheduling_group();
-    }
-}
-
 scheduling_group service_level_controller::auth_integration::get_user_cached_scheduling_group(const std::optional<auth::authenticated_user>& usr) {
     if (usr && usr->name) {
         auto sl_opt = find_cached_effective_service_level(*usr->name);
@@ -572,16 +559,6 @@ scheduling_group service_level_controller::auth_integration::get_user_cached_sch
     } else {
         return _sl_controller.get_default_scheduling_group();
     }
-}
-
-future<scheduling_group> service_level_controller::get_user_scheduling_group(const std::optional<auth::authenticated_user>& usr) {
-    // The maintenance socket can communicate with Scylla before `auth_integration`
-    // is registered, and we need to prepare for it.
-    if (!_auth_integration) {
-        return make_ready_future<scheduling_group>(get_default_scheduling_group());
-    }
-
-    return _auth_integration->get_user_scheduling_group(usr);
 }
 
 scheduling_group service_level_controller::get_cached_user_scheduling_group(const std::optional<auth::authenticated_user>& usr) {
