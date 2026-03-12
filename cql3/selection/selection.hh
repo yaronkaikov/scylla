@@ -356,7 +356,7 @@ public:
                     add_value(*def, static_row_iterator);
                     break;
                 default:
-                    SCYLLA_ASSERT(0);
+                    throwing_assert(0);
                 }
             }
             _builder.complete_row();

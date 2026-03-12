@@ -876,7 +876,7 @@ cast_test_assignment(const cast& c, data_dictionary::database db, const sstring&
             return assignment_testable::test_result::NOT_ASSIGNABLE;
         }
     } catch (exceptions::invalid_request_exception& e) {
-        abort();
+        throwing_assert(0 && "cast_test_assignment exception");
     }
 }
 

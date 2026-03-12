@@ -737,7 +737,7 @@ query_processor::prepare(sstring query_string, const service::client_state& clie
                                 bound_terms,
                                 std::numeric_limits<uint16_t>::max()));
                 }
-                SCYLLA_ASSERT(bound_terms == prepared->bound_names.size());
+                throwing_assert(bound_terms == prepared->bound_names.size());
                 return make_ready_future<std::unique_ptr<statements::prepared_statement>>(std::move(prepared));
             });
 
