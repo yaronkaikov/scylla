@@ -356,11 +356,11 @@ future<std::vector<cql3::description>> service::describe_roles(bool with_hashed_
 
     const bool authenticator_uses_password_hashes = _authenticator->uses_password_hashes();
 
-    auto produce_create_statement = [with_hashed_passwords] (const sstring& formatted_role_name,
+    const auto default_su = cql3::util::maybe_quote(default_superuser(_qp));
+
+    auto produce_create_statement = [&default_su, with_hashed_passwords] (const sstring& formatted_role_name,
             const std::optional<sstring>& maybe_hashed_password, bool can_login, bool is_superuser) {
-        // Even after applying formatting to a role, `formatted_role_name` can only equal `meta::DEFAULT_SUPER_NAME`
-        // if the original identifier was equal to it.
-        const sstring role_part = formatted_role_name == meta::DEFAULT_SUPERUSER_NAME
+        const sstring role_part = formatted_role_name == default_su
                 ? seastar::format("IF NOT EXISTS {}", formatted_role_name)
                 : formatted_role_name;
 
