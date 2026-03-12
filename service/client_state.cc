@@ -319,13 +319,12 @@ future<> service::client_state::ensure_exists(const auth::resource& r) const {
     });
 }
 
-future<> service::client_state::maybe_update_per_service_level_params() {
+void service::client_state::maybe_update_per_service_level_params() {
     if (_sl_controller && _user && _user->name) {
-        auto slo_opt = co_await _sl_controller->find_effective_service_level(_user->name.value());
+        auto slo_opt = _sl_controller->find_cached_effective_service_level(_user->name.value());
         if (!slo_opt) {
-            co_return;
+            return;
         }
-        
         update_per_service_level_params(*slo_opt);
     }
 }

@@ -38,7 +38,6 @@ public:
     virtual future<> drop_service_level(sstring service_level_name, service::group0_batch& mc) const override;
     virtual future<> commit_mutations(service::group0_batch&& mc, abort_source& as) const override;
 
-    virtual bool can_use_effective_service_level_cache() const override;
     static future<utils::chunked_vector<mutation>> set_service_level_mutations(cql3::query_processor& qp, sstring service_level_name, qos::service_level_options slo, api::timestamp_type timestamp);
 };
 

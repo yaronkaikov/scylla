@@ -117,9 +117,6 @@ public:
         virtual future<> drop_service_level(sstring service_level_name, service::group0_batch& mc) const = 0;
         virtual future<> commit_mutations(service::group0_batch&& mc, abort_source& as) const = 0;
 
-        // Returns whether effective service level cache can be populated and used.
-        // This is equivalent to checking whether auth + raft have been migrated to raft.
-        virtual bool can_use_effective_service_level_cache() const = 0;
     };
     using service_level_distributed_data_accessor_ptr = ::shared_ptr<service_level_distributed_data_accessor>;
 
@@ -147,23 +144,16 @@ public:
 
         /// Find the effective service level for a given role.
         /// If there is no applicable service level for it, `std::nullopt` is returned instead.
-        future<std::optional<service_level_options>> find_effective_service_level(const sstring& role_name);
-        /// Synchronous version of `find_effective_service_level` that only checks the cache.
         std::optional<service_level_options> find_cached_effective_service_level(const sstring& role_name);
 
-        /// Execute a function within the service level context of a user, get_user_scheduling_group - async version 
-        /// get_user_cached_scheduling_group - sync version (used for v2 servers).
-        future<scheduling_group> get_user_scheduling_group(const std::optional<auth::authenticated_user>& usr);
+        /// Get the scheduling group for a user based on their effective service level.
         scheduling_group get_user_cached_scheduling_group(const std::optional<auth::authenticated_user>& usr);
 
         template <typename Func, typename Ret = std::invoke_result_t<Func>>
             requires std::invocable<Func>
         futurize_t<Ret> with_user_service_level(const std::optional<auth::authenticated_user>& user, Func&& func) {
-            // No need to hold `_stop_gate` here. It'll be held during the call to `find_effective_service_level`,
-            // and after that it's not necessary. We do NOT hold it here to avoid postpoing finishing `stop`.
-
             if (user && user->name) {
-                const std::optional<service_level_options> maybe_sl_opts = co_await find_effective_service_level(*user->name);
+                const std::optional<service_level_options> maybe_sl_opts = find_cached_effective_service_level(*user->name);
                 const sstring& sl_name = maybe_sl_opts && maybe_sl_opts->shares_name
                         ? *maybe_sl_opts->shares_name
                         : service_level_controller::default_service_level_name;
@@ -329,12 +319,6 @@ public:
      */
     scheduling_group get_scheduling_group(sstring service_level_name);
     /**
-     * Get the scheduling group of a specific user
-     * @param user - the user for determining the service level
-     * @return if the user is authenticated the user's scheduling group. otherwise get_scheduling_group("default")
-     */
-    future<scheduling_group> get_user_scheduling_group(const std::optional<auth::authenticated_user>& usr);
-    /**
      * Get the scheduling group of a specific user for the service level cache
      * @param user - the user for determining the service level
      * @return if the user is authenticated the user's scheduling group. otherwise get_scheduling_group("default")
@@ -380,13 +364,6 @@ public:
     future<service_levels_info> get_distributed_service_levels(qos::query_context ctx);
     future<service_levels_info> get_distributed_service_level(sstring service_level_name);
 
-    /*
-    * Returns whether effective service level cache can be populated and used.
-    * This is equivalent to checking whether auth + raft have been migrated to raft.
-    */
-    bool can_use_effective_service_level_cache() const;
-    
-    
     /**
      * Returns the service level options **in effect** for a user having the given
      * collection of roles.
@@ -394,10 +371,6 @@ public:
      * @return the effective service level options - they may in particular be a combination
      *         of options from multiple service levels
      */
-    future<std::optional<service_level_options>> find_effective_service_level(const sstring& role_name);
-
-    // Synchronous equivalent of `find_effective_service_level`. 
-    // The method uses only effective service level cache, so it requires service levels in v2.
     std::optional<service_level_options> find_cached_effective_service_level(const sstring& role_name);
 
     /**
