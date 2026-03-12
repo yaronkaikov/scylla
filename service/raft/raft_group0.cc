@@ -352,7 +352,7 @@ future<group0_info> persistent_discovery::run(
 
         if (std::holds_alternative<discovery::pause>(output)) {
             group0_log.trace("server {} pausing discovery...", my_addr.id);
-            co_await seastar::sleep_abortable(std::chrono::milliseconds{1000}, as);
+            co_await seastar::sleep_abortable(std::chrono::milliseconds{100}, as);
             continue;
         }
 
