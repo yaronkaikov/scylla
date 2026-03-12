@@ -63,7 +63,7 @@ default_authorizer::authorize(const role_or_anonymous& maybe_role, const resourc
 
     const sstring query = seastar::format("SELECT {} FROM {}.{} WHERE {} = ? AND {} = ?",
             PERMISSIONS_NAME,
-            get_auth_ks_name(_qp),
+            db::system_keyspace::NAME,
             PERMISSIONS_CF,
             ROLE_NAME,
             RESOURCE_NAME);
@@ -87,7 +87,7 @@ default_authorizer::modify(
         std::string_view op,
         ::service::group0_batch& mc) {
     const sstring query = seastar::format("UPDATE {}.{} SET {} = {} {} ? WHERE {} = ? AND {} = ?",
-            get_auth_ks_name(_qp),
+            db::system_keyspace::NAME,
             PERMISSIONS_CF,
             PERMISSIONS_NAME,
             PERMISSIONS_NAME,
@@ -112,7 +112,7 @@ future<std::vector<permission_details>> default_authorizer::list_all() const {
             ROLE_NAME,
             RESOURCE_NAME,
             PERMISSIONS_NAME,
-            get_auth_ks_name(_qp),
+            db::system_keyspace::NAME,
             PERMISSIONS_CF);
 
     const auto results = co_await _qp.execute_internal(
@@ -137,7 +137,7 @@ future<std::vector<permission_details>> default_authorizer::list_all() const {
 future<> default_authorizer::revoke_all(std::string_view role_name, ::service::group0_batch& mc) {
     try {
         const sstring query = seastar::format("DELETE FROM {}.{} WHERE {} = ?",
-                get_auth_ks_name(_qp),
+                db::system_keyspace::NAME,
                 PERMISSIONS_CF,
                 ROLE_NAME);
         co_await collect_mutations(_qp, mc, query, {sstring(role_name)});
@@ -157,7 +157,7 @@ future<> default_authorizer::revoke_all(const resource& resource, ::service::gro
     auto gen = [this, name] (api::timestamp_type t) -> ::service::mutations_generator {
         const sstring query = seastar::format("SELECT {} FROM {}.{} WHERE {} = ? ALLOW FILTERING",
                 ROLE_NAME,
-                get_auth_ks_name(_qp),
+                db::system_keyspace::NAME,
                 PERMISSIONS_CF,
                 RESOURCE_NAME);
         auto res = co_await _qp.execute_internal(
@@ -167,7 +167,7 @@ future<> default_authorizer::revoke_all(const resource& resource, ::service::gro
                 cql3::query_processor::cache_internal::no);
         for (const auto& r : *res) {
             const sstring query = seastar::format("DELETE FROM {}.{} WHERE {} = ? AND {} = ?",
-                    get_auth_ks_name(_qp),
+                    db::system_keyspace::NAME,
                     PERMISSIONS_CF,
                     ROLE_NAME,
                     RESOURCE_NAME);
@@ -192,7 +192,7 @@ void default_authorizer::revoke_all_keyspace_resources(const resource& ks_resour
         const sstring query = seastar::format("SELECT {}, {} FROM {}.{}",
                 ROLE_NAME,
                 RESOURCE_NAME,
-                get_auth_ks_name(_qp),
+                db::system_keyspace::NAME,
                 PERMISSIONS_CF);
         auto res = co_await _qp.execute_internal(
                 query,
@@ -207,7 +207,7 @@ void default_authorizer::revoke_all_keyspace_resources(const resource& ks_resour
                 continue;
             }
             const sstring query = seastar::format("DELETE FROM {}.{} WHERE {} = ? AND {} = ?",
-                    get_auth_ks_name(_qp),
+                    db::system_keyspace::NAME,
                     PERMISSIONS_CF,
                     ROLE_NAME,
                     RESOURCE_NAME);

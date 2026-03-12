@@ -40,7 +40,6 @@ class standard_role_manager final : public role_manager {
     cache& _cache;
     future<> _stopped;
     abort_source _as;
-    std::string _superuser;
     shared_promise<> _superuser_created_promise;
 
 public:

@@ -28,6 +28,7 @@
 #include "service/migration_manager.hh"
 #include "cql3/query_processor.hh"
 #include "db/config.hh"
+#include "db/system_keyspace.hh"
 
 namespace auth {
 
@@ -35,15 +36,9 @@ constexpr std::string_view password_authenticator_name("org.apache.cassandra.aut
 
 // name of the hash column.
 static constexpr std::string_view SALTED_HASH = "salted_hash";
-static const sstring DEFAULT_USER_PASSWORD = sstring(meta::DEFAULT_SUPERUSER_NAME);
-
 static logging::logger plogger("password_authenticator");
 
 static thread_local auto rng_for_salt = std::default_random_engine(std::random_device{}());
-
-std::string password_authenticator::default_superuser(cql3::query_processor& qp) {
-    return qp.db().get_config().auth_superuser_name();
-}
 
 password_authenticator::~password_authenticator() {
 }
@@ -62,7 +57,7 @@ static bool has_salted_hash(const cql3::untyped_result_set_row& row) {
 
 sstring password_authenticator::update_row_query() const {
     return seastar::format("UPDATE {}.{} SET {} = ? WHERE {} = ?",
-            get_auth_ks_name(_qp),
+            db::system_keyspace::NAME,
             meta::roles_table::name,
             SALTED_HASH,
             meta::roles_table::role_col_name);
@@ -70,10 +65,10 @@ sstring password_authenticator::update_row_query() const {
 
 future<> password_authenticator::maybe_create_default_password() {
     auto needs_password = [this] () -> future<bool> {
-        if (_superuser.empty()) {
+        if (default_superuser(_qp).empty()) {
             co_return false;
         }
-        const sstring query = seastar::format("SELECT * FROM {}.{} WHERE is_superuser = true ALLOW FILTERING", get_auth_ks_name(_qp), meta::roles_table::name);
+        const sstring query = seastar::format("SELECT * FROM {}.{} WHERE is_superuser = true ALLOW FILTERING", db::system_keyspace::NAME, meta::roles_table::name);
         auto results = co_await _qp.execute_internal(query,
                 db::consistency_level::LOCAL_ONE,
                 internal_distributed_query_state(), cql3::query_processor::cache_internal::yes);
@@ -83,7 +78,7 @@ future<> password_authenticator::maybe_create_default_password() {
         bool has_default = false;
         bool has_superuser_with_password = false;
         for (auto& result : *results) {
-            if (result.get_as<sstring>(meta::roles_table::role_col_name) == _superuser) {
+            if (result.get_as<sstring>(meta::roles_table::role_col_name) == default_superuser(_qp)) {
                 has_default = true;
             }
             if (has_salted_hash(result)) {
@@ -109,7 +104,7 @@ future<> password_authenticator::maybe_create_default_password() {
         co_return;
     }
     const auto update_query = update_row_query();
-    co_await collect_mutations(_qp, batch, update_query, {salted_pwd, _superuser});
+    co_await collect_mutations(_qp, batch, update_query, {salted_pwd, default_superuser(_qp)});
     co_await std::move(batch).commit(_group0_client, _as, get_raft_timeout());
     plogger.info("Created default superuser authentication record.");
 }
@@ -136,8 +131,6 @@ future<> password_authenticator::maybe_create_default_password_with_retries() {
 
 future<> password_authenticator::start() {
     return once_among_shards([this] {
-        _superuser = default_superuser(_qp);
-
         // Verify that at least one hashing scheme is supported.
         passwords::detail::verify_scheme(_scheme);
         plogger.info("Using password hashing scheme: {}", passwords::detail::prefix_for_scheme(_scheme));
@@ -159,15 +152,6 @@ future<> password_authenticator::start() {
 future<> password_authenticator::stop() {
     _as.request_abort();
     return _stopped.handle_exception_type([] (const sleep_aborted&) { }).handle_exception_type([](const abort_requested_exception&) {});
-}
-
-db::consistency_level password_authenticator::consistency_for_user(std::string_view role_name) {
-    // TODO: this is plain dung. Why treat hardcoded default special, but for example a user-created
-    // super user uses plain LOCAL_ONE?
-    if (role_name == meta::DEFAULT_SUPERUSER_NAME) {
-        return db::consistency_level::QUORUM;
-    }
-    return db::consistency_level::LOCAL_ONE;
 }
 
 std::string_view password_authenticator::qualified_java_name() const {
@@ -254,7 +238,7 @@ future<> password_authenticator::alter(std::string_view role_name, const authent
     const auto password = std::get<password_option>(*options.credentials).password;
 
     const sstring query = seastar::format("UPDATE {}.{} SET {} = ? WHERE {} = ?",
-            get_auth_ks_name(_qp),
+            db::system_keyspace::NAME,
             meta::roles_table::name,
             SALTED_HASH,
             meta::roles_table::role_col_name);
@@ -265,7 +249,7 @@ future<> password_authenticator::alter(std::string_view role_name, const authent
 future<> password_authenticator::drop(std::string_view name, ::service::group0_batch& mc) {
     const sstring query = seastar::format("DELETE {} FROM {}.{} WHERE {} = ?",
             SALTED_HASH,
-            get_auth_ks_name(_qp),
+            db::system_keyspace::NAME,
             meta::roles_table::name,
             meta::roles_table::role_col_name);
     co_await collect_mutations(_qp, mc, query, {sstring(name)});
@@ -287,13 +271,13 @@ future<std::optional<sstring>> password_authenticator::get_password_hash(std::st
     // that a map lookup string->statement is not gonna kill us much.
     const sstring query = seastar::format("SELECT {} FROM {}.{} WHERE {} = ?",
                 SALTED_HASH,
-                get_auth_ks_name(_qp),
+                db::system_keyspace::NAME,
                 meta::roles_table::name,
                 meta::roles_table::role_col_name);
 
     const auto res = co_await _qp.execute_internal(
             query,
-            consistency_for_user(role_name),
+            db::consistency_level::LOCAL_ONE,
             internal_distributed_query_state(),
             {role_name},
             cql3::query_processor::cache_internal::yes);

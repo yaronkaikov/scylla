@@ -37,7 +37,6 @@ namespace legacy {
 extern constinit const std::string_view AUTH_KS;
 } // namespace legacy
 
-constexpr std::string_view DEFAULT_SUPERUSER_NAME("cassandra");
 extern constinit const std::string_view AUTH_PACKAGE_NAME;
 
 } // namespace meta
@@ -46,8 +45,7 @@ constexpr std::string_view PERMISSIONS_CF = "role_permissions";
 constexpr std::string_view ROLE_MEMBERS_CF = "role_members";
 constexpr std::string_view ROLE_ATTRIBUTES_CF = "role_attributes";
 
-// Auth data is stored in the system keyspace.
-std::string_view get_auth_ks_name(cql3::query_processor& qp);
+std::string default_superuser(cql3::query_processor& qp);
 
 template <class Task>
 future<> once_among_shards(Task&& f) {
