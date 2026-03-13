@@ -321,11 +321,12 @@ std::optional<schema_with_source> try_load_schema_autodetect(const bpo::variable
     return {};
 }
 
-const std::vector<sstables::shared_sstable> load_sstables(schema_ptr schema, sstables::sstables_manager& sst_man, sstables::storage_manager& sstm, const std::vector<sstring>& sstable_names) {
+const std::vector<sstables::shared_sstable> load_sstables(schema_ptr schema, sstables::sstables_manager& sst_man, sstables::storage_manager& sstm,
+        const std::vector<sstring>& sstable_names, bool ignore_component_digest_mismatch) {
     std::vector<sstables::shared_sstable> sstables;
     sstables.resize(sstable_names.size());
 
-    parallel_for_each(sstable_names, [schema, &sst_man, &sstm, &sstable_names, &sstables] (const sstring& sst_name) -> future<> {
+    parallel_for_each(sstable_names, [schema, &sst_man, &sstm, &sstable_names, &sstables, ignore_component_digest_mismatch] (const sstring& sst_name) -> future<> {
         const auto i = std::distance(sstable_names.begin(), std::find(sstable_names.begin(), sstable_names.end(), sst_name));
         auto sst_path = std::filesystem::path(sst_name);
 
@@ -369,6 +370,7 @@ const std::vector<sstables::shared_sstable> load_sstables(schema_ptr schema, sst
             auto open_cfg = sstables::sstable_open_config{
                 .load_first_and_last_position_metadata = false,
                 .keep_sharding_metadata = true,
+                .ignore_component_digest_mismatch = ignore_component_digest_mismatch,
             };
             co_await sst->load(schema->get_sharder(), open_cfg);
         } catch (...) {
@@ -2652,6 +2654,8 @@ For more information, see: {}
                 typed_option<std::string>("output-dir", ".", "directory to place the output sstable(s) to"),
                 typed_option<std::string>("sstable-version", "sstable version to use, defaults to the same version as ScyllaDB would"),
                 typed_option<>("all", "upgrade all sstables, even if they are already at the requested version"),
+                typed_option<>("ignore-component-digest-mismatch", "ignore component digest mismatches when loading sstables;"
+                        " useful for recovering sstables with corrupted non-vital components or working around bugs in digest calculation"),
             }},
             upgrade_operation},
 /* dump-schema */
@@ -3008,8 +3012,9 @@ $ scylla sstable validate /path/to/md-123456-big-Data.db /path/to/md-123457-big-
                 fmt::print(std::cerr, "error processing arguments: duplicate sstable arguments found\n");
                 return 1;
             }
+            bool ignore_component_digest_mismatch = app_config.contains("ignore-component-digest-mismatch");
             try {
-                sstables = load_sstables(schema, sst_man, sstm.local(), sstable_names);
+                sstables = load_sstables(schema, sst_man, sstm.local(), sstable_names, ignore_component_digest_mismatch);
             } catch (...) {
                 fmt::print(std::cerr, "error loading sstables: {}\n", std::current_exception());
                 return 1;

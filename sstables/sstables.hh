@@ -334,7 +334,7 @@ public:
     // (e.g. parse error), it will return with validation error count seen up to
     // the abort. In the latter case it will call the error-handler before doing so.
     future<uint64_t> validate(reader_permit permit, abort_source& abort,
-            std::function<void(sstring)> error_handler, sstables::read_monitor& monitor = default_read_monitor());
+            std::function<void(sstring)> error_handler, sstables::read_monitor& monitor = default_read_monitor(), bool validate_index = false);
 
     encoding_stats get_encoding_stats_for_compaction() const;
 
@@ -635,6 +635,7 @@ private:
     // Total memory reclaimed so far from this sstable
     size_t _total_memory_reclaimed{0};
     bool _unlinked{false};
+    bool _ignore_component_digest_mismatch{false};
 
     // The mutate semaphore is used to serialize operations like rewrite_statistics
     // with linking or moving the sstable between directories.
@@ -642,18 +643,23 @@ private:
     std::optional<sstring> _cloned_to_sstable_filename;
     // Used only for writing sstable.
     scylla_metadata::components_digests _components_digests;
+    uint32_t _toc_digest{};
 public:
     bool has_component(component_type f) const;
     sstables_manager& manager() { return _manager; }
     const sstables_manager& manager() const { return _manager; }
 
-    static future<std::vector<sstring>> read_and_parse_toc(file f);
+    static future<std::pair<std::vector<sstring>, uint32_t>> read_and_parse_toc(file f);
 private:
     void unused(); // Called when reference count drops to zero
     future<file> open_file(component_type, open_flags, file_open_options = {}) const noexcept;
 
     template <component_type Type, typename T>
     future<> read_simple(T& comp);
+    template <component_type Type, typename T>
+    future<std::optional<uint32_t>> read_simple_with_digest(T& comp);
+    template <component_type Type, typename T>
+    future<> read_simple_and_verify_digest(T& comp);
     future<> do_read_simple(component_type type,
                             noncopyable_function<future<> (version_types, file&&, uint64_t sz)> read_component);
     // this variant closes the file on parse completion
@@ -739,6 +745,10 @@ private:
     // and so max_local_deletion_time should be discarded for those.
     void validate_max_local_deletion_time();
     void validate_partitioner();
+    void validate_component_digest(component_type type, uint32_t computed_digest) const;
+    future<> validate_index_digest() const;
+    future<uint32_t> compute_component_file_digest(component_type type) const;
+    future<uint32_t> compute_component_file_digest(file f, size_t size) const;
 
     // Loads first and last partition keys from appropriate components into `_first` and `_last`.
     void set_first_and_last_keys();
