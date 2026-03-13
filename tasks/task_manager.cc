@@ -425,6 +425,9 @@ future<utils::chunked_vector<task_identity>> task_manager::virtual_task::impl::g
                         .task_id = id
                     };
                 }) | std::ranges::to<utils::chunked_vector<task_identity>>();
+            }).handle_exception([host_id, parent_id] (std::exception_ptr ex) {
+                tmlogger.warn("Failed to get children of virtual task with id={} from node {}: {}", parent_id, host_id, ex);
+                return utils::chunked_vector<task_identity>{};
             });
     }, utils::chunked_vector<task_identity>{}, [] (auto a, auto&& b) {
         std::move(b.begin(), b.end(), std::back_inserter(a));
