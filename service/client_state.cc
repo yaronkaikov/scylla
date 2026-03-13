@@ -368,3 +368,27 @@ future<> service::client_state::set_client_options(
         _client_options.emplace_back(std::move(cached_key), std::move(cached_value));
     }
 }
+
+service::forwarded_client_state::forwarded_client_state(
+    sstring keyspace,
+    std::optional<sstring> username,
+    ::timeout_config timeout_config,
+    uint64_t protocol_extensions_mask,
+    gms::inet_address remote_address,
+    uint16_t remote_port)
+    : keyspace(std::move(keyspace))
+    , username(std::move(username))
+    , timeout_config(std::move(timeout_config))
+    , protocol_extensions_mask(protocol_extensions_mask)
+    , remote_address(std::move(remote_address))
+    , remote_port(remote_port)
+{ }
+
+service::forwarded_client_state::forwarded_client_state(const client_state& cs)
+    : keyspace(cs.get_raw_keyspace())
+    , username(cs.user() ? std::optional<sstring>{cs.user()->name} : std::nullopt)
+    , timeout_config(cs.get_timeout_config())
+    , protocol_extensions_mask(static_cast<uint64_t>(cs.get_protocol_extensions().mask()))
+    , remote_address(cs.get_client_address())
+    , remote_port(cs.get_client_port())
+{ }

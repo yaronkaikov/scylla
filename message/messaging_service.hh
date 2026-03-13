@@ -212,7 +212,9 @@ enum class messaging_verb : int32_t {
     NOTIFY_BANNED = 83,
     SNAPSHOT_WITH_TABLETS = 84,
     RAFT_READ_BARRIER = 85,
-    LAST = 86,
+    FORWARD_CQL_EXECUTE = 86,
+    FORWARD_CQL_PREPARE = 87,
+    LAST = 88,
 };
 
 } // namespace netw
