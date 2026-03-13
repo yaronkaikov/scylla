@@ -418,17 +418,17 @@ future<utils::chunked_vector<task_identity>> task_manager::virtual_task::impl::g
         co_await handler.wait_for_message(std::chrono::steady_clock::now() + std::chrono::seconds{60});
     });
     co_return co_await map_reduce(nodes, [ms, parent_id] (auto host_id) -> future<utils::chunked_vector<task_identity>> {
-            return ser::tasks_rpc_verbs::send_tasks_get_children(ms, host_id, parent_id).then([host_id] (auto resp) {
-                return resp | std::views::transform([host_id] (auto id) {
-                    return task_identity{
-                        .host_id = host_id,
-                        .task_id = id
-                    };
-                }) | std::ranges::to<utils::chunked_vector<task_identity>>();
-            }).handle_exception([host_id, parent_id] (std::exception_ptr ex) {
-                tmlogger.warn("Failed to get children of virtual task with id={} from node {}: {}", parent_id, host_id, ex);
-                return utils::chunked_vector<task_identity>{};
-            });
+        return ser::tasks_rpc_verbs::send_tasks_get_children(ms, host_id, parent_id).then([host_id] (auto resp) {
+            return resp | std::views::transform([host_id] (auto id) {
+                return task_identity{
+                    .host_id = host_id,
+                    .task_id = id
+                };
+            }) | std::ranges::to<utils::chunked_vector<task_identity>>();
+        }).handle_exception([host_id, parent_id] (std::exception_ptr ex) {
+            tmlogger.warn("Failed to get children of virtual task with id={} from node {}: {}", parent_id, host_id, ex);
+            return utils::chunked_vector<task_identity>{};
+        });
     }, utils::chunked_vector<task_identity>{}, [] (auto a, auto&& b) {
         std::move(b.begin(), b.end(), std::back_inserter(a));
         return a;
