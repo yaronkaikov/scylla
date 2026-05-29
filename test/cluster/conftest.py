@@ -375,7 +375,19 @@ async def scylla_2025_1(request, build_mode, internet_dependency_enabled) -> Asy
 @pytest.fixture(scope="function", params=list(KeyProvider))
 async def key_provider(request, tmpdir, scylla_binary):
     """Encryption providers fixture"""
-    async with make_key_provider_factory(request.param, tmpdir, scylla_binary) as res:
+    import subprocess
+    provider = request.param
+    if provider == KeyProvider.kmip:
+        # Check if the scylla binary was built with KMIP support.
+        # The stub implementation (when KMIP is not enabled) contains the string
+        # "KMIP support not enabled" in the binary.
+        result = subprocess.run(
+            ['grep', '-q', 'KMIP support not enabled', scylla_binary],
+            capture_output=True
+        )
+        if result.returncode == 0:
+            pytest.skip("KMIP support not enabled in this build")
+    async with make_key_provider_factory(provider, tmpdir, scylla_binary) as res:
         yield res
 
 

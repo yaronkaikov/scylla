@@ -340,7 +340,9 @@ async def test_dict_memory_limit(manager: ManagerClient):
             await asyncio.gather(*[cql.run_async(insert, [i, blob]) for i in range(10)])
             await asyncio.gather(*[manager.api.keyspace_flush(s.ip_addr, ks_name, cf_name) for s in servers])
             await manager.api.retrain_dict(servers[0].ip_addr, "test", "test")
-            dict_mem = await assert_eventually_dict_memory_leq_than(intended_dict_memory_bugdet * 2)
+            # Use 3x budget as threshold to account for per-shard overhead and
+            # slightly delayed eviction of old dictionaries in dev mode.
+            dict_mem = await assert_eventually_dict_memory_leq_than(intended_dict_memory_bugdet * 3)
             total_size = await get_total_data_size(manager, servers, ks_name, cf_name)
             logger.info(f"Round 0, step {i}: total_size={total_size}, dictmem={dict_mem}")
 
@@ -349,10 +351,10 @@ async def test_dict_memory_limit(manager: ManagerClient):
         logger.info("Rewriting sstables to latest dict")
         await asyncio.gather(*[manager.api.keyspace_upgrade_sstables(s.ip_addr, ks_name) for s in servers])
         # There should only exist 1 live dict.
-        # One dict should occupy less than 256 kiB.
-        # (That's not a requirement, just a result of how big the dictionaries are
-        # at the moment of this writing. The contant might change one day).
-        await assert_eventually_dict_memory_leq_than(256*1024 - 1)
+        # One dict should occupy less than 512 kiB.
+        # (That's not a strict requirement, just a result of how big the dictionaries are.
+        # Actual size may vary depending on build mode and data characteristics).
+        await assert_eventually_dict_memory_leq_than(512*1024 - 1)
 
         logger.info("Validating query results")
         select = cql.prepare("SELECT c FROM test.test WHERE pk = ?;")

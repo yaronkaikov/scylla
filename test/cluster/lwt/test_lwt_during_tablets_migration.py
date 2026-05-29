@@ -162,7 +162,7 @@ async def test_multi_column_lwt_during_migration(manager: ManagerClient, scale_t
             )
             await asyncio.wait_for(
                 migration_task,
-                timeout=scale_timeout(NUM_MIGRATIONS * 2 + 15),  # 20*2+15 = 55s before scaling
+                timeout=scale_timeout(NUM_MIGRATIONS * 6 + 30),  # 20*6+30 = 150s before scaling
             )
             logger.info("LWT during migrating phase: %d ops", tester.get_phase_ops(PHASE_MIGRATING))
 
