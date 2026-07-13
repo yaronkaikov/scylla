@@ -287,6 +287,7 @@ jobs:
           RUN_ARTIFACTS=false
           SKIP_UNITTEST_CUSTOM=false
           FORCE_ON_CLOUD=false
+          CODE_COVERAGE=false
           PYTEST_EXTRA_OPTIONS=""
 
           # Check labels
@@ -301,6 +302,9 @@ jobs:
           fi
           if echo "$LABELS" | grep -q "ci/force_on_cloud"; then
             FORCE_ON_CLOUD=true
+          fi
+          if echo "$LABELS" | grep -q "coverage"; then
+            CODE_COVERAGE=true
           fi
 
           # Collect ci/consider-as-closed/<issue> labels
@@ -320,6 +324,7 @@ jobs:
           echo "run_artifacts=$RUN_ARTIFACTS" >> "$GITHUB_OUTPUT"
           echo "skip_unittest_custom=$SKIP_UNITTEST_CUSTOM" >> "$GITHUB_OUTPUT"
           echo "force_on_cloud=$FORCE_ON_CLOUD" >> "$GITHUB_OUTPUT"
+          echo "code_coverage=$CODE_COVERAGE" >> "$GITHUB_OUTPUT"
           echo "pytest_extra_options=$PYTEST_EXTRA_OPTIONS" >> "$GITHUB_OUTPUT"
 
       - name: Determine target folder
@@ -511,6 +516,7 @@ jobs:
           RUN_ARTIFACTS="${{ steps.required-checks.outputs.artifacts_required }}"
           SKIP_UNITTEST_CUSTOM="${{ steps.pr-details.outputs.skip_unittest_custom }}"
           FORCE_ON_CLOUD="${{ steps.pr-details.outputs.force_on_cloud }}"
+          CODE_COVERAGE="${{ steps.pr-details.outputs.code_coverage }}"
           RUN_GDB_ONLY="${{ steps.required-checks.outputs.gdb_required }}"
           PYTEST_EXTRA_OPTIONS="${{ steps.pr-details.outputs.pytest_extra_options }}"
 
@@ -521,6 +527,7 @@ jobs:
           echo "  RUN_ARTIFACT_TESTS=$RUN_ARTIFACTS"
           echo "  SKIP_UNIT_TEST_CUSTOM=$SKIP_UNITTEST_CUSTOM"
           echo "  FORCE_ON_CLOUD=$FORCE_ON_CLOUD"
+          echo "  CODE_COVERAGE=$CODE_COVERAGE"
           echo "  RUN_ONLY_SCYLLA_GDB=$RUN_GDB_ONLY"
           echo "  PYTEST_EXTRA_COMMANDLINE_OPTIONS=$PYTEST_EXTRA_OPTIONS"
 
@@ -536,6 +543,7 @@ jobs:
             --data-urlencode "RUN_ARTIFACT_TESTS=$RUN_ARTIFACTS" \
             --data-urlencode "SKIP_UNIT_TEST_CUSTOM=$SKIP_UNITTEST_CUSTOM" \
             --data-urlencode "FORCE_ON_CLOUD=$FORCE_ON_CLOUD" \
+            --data-urlencode "CODE_COVERAGE=$CODE_COVERAGE" \
             --data-urlencode "RUN_ONLY_SCYLLA_GDB=$RUN_GDB_ONLY" \
             --data-urlencode "PYTEST_EXTRA_COMMANDLINE_OPTIONS=$PYTEST_EXTRA_OPTIONS" \
             -w "\n%{http_code}")
