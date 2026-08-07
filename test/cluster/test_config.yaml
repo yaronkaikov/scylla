@@ -41,6 +41,7 @@ run_in_dev:
   - test_not_enough_token_owners
   - test_replace_alive_node
   - dtest/error_example_test
+  - dtest/simple_driver_test
   - dtest/alternator_tests
   - dtest/bypass_cache_test
   - dtest/auth_roles_test
