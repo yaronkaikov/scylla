@@ -1,0 +1,4 @@
+# The suite only runs short-lived `scylla <flag>` invocations; there is
+# nothing worth measuring for coverage, and the profiles would only slow
+# the run down.
+coverage: false
