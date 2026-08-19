@@ -428,6 +428,13 @@ async def main() -> int:
     return exit_code
 
 
+@dataclasses.dataclass(frozen=True)
+class CoverageSuite:
+    name: str
+    mode: str
+    path: pathlib.Path
+
+
 async def process_coverage(options):
     total_processing_time = time.time()
     logger = LogPrefixAdapter(logging.getLogger("coverage"), {'prefix' : 'coverage'})
@@ -445,13 +452,21 @@ async def process_coverage(options):
                                                                logger = logger)
     logger.debug(f"Binary ids map is: {files_to_ids_map}")
     logger.info("Done getting binary ids for coverage conversion")
-    # get the suits that have actually been ran
+    # get the suits that have actually been ran, based on the coverage directories
+    # that `create_cluster_factory` (test/pylib/runner.py) wrote raw profiles into:
+    # <tmpdir>/<mode>/coverage/<suite_name>/. A suite only has a directory here if it
+    # was actually instrumented and run, so this also replaces the old need_coverage() check.
     suits_to_exclude = ["pylib_test", "dist_test", "nodetool"]
     sources_to_exclude = [line for line in open("coverage_excludes.txt", 'r').read().split('\n') if line and not line.startswith('#')]
-    ran_suites = list({test.suite for test in TestSuite.all_tests() if test.suite.need_coverage()})
+    ran_suites = [
+        CoverageSuite(name=suite_dir.name, mode=mode, path=suite_dir)
+        for mode in modes_for_coverage
+        for suite_dir in (pathlib.Path(options.tmpdir) / mode / "coverage").glob("*")
+        if suite_dir.is_dir() and suite_dir.name not in suits_to_exclude
+    ]
 
-    def suite_coverage_path(suite) -> pathlib.Path:
-        return pathlib.Path(suite.options.tmpdir) / suite.mode / 'coverage' / suite.name
+    def suite_coverage_path(suite: CoverageSuite) -> pathlib.Path:
+        return suite.path
 
     def pathsize(path : pathlib.Path):
         if path.is_file():
