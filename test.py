@@ -637,6 +637,13 @@ async def process_coverage(options):
         suits_trace_files.setdefault(suite.mode, {})[suite.name] = target_trace_file
         logger.info(f"{suite.name}: Done combinig lcov trace files - {humanfriendly.format_timespan(stat.data.time)}")
 
+    if not suits_trace_files:
+        logger.warning("No coverage data was collected for any suite. Common reasons:\n\t"
+            "1. The tested binaries weren't built with coverage instrumentation "
+            "(configure.py --coverage or --mode=coverage).\n\t"
+            "2. None of the modes passed to --coverage-mode actually ran any tests.")
+        return
+
     #4. combine the suite lcovs into per mode trace files
     modes_trace_files  = {}
     for mode, suite_traces in suits_trace_files.items():
