@@ -443,7 +443,8 @@ class ScyllaClusterManager:
                             expected_server_up_state: ServerUpState = ServerUpState.SERVING,
                             cmdline_options_override: list[str] | None = None,
                             append_env_override: dict[str, str] | None = None,
-                            auth_provider: dict[str, str] | None = None) -> None:
+                            auth_provider: dict[str, str] | None = None,
+                            start_timeout: float | None = None) -> None:
         """Start a specified server (must be stopped.)"""
 
         await self.cluster.server_start(
@@ -454,6 +455,7 @@ class ScyllaClusterManager:
             cmdline_options_override=cmdline_options_override,
             append_env_override=append_env_override,
             auth_provider=auth_provider,
+            start_timeout=start_timeout,
         )
 
     @manager_op
@@ -486,7 +488,8 @@ class ScyllaClusterManager:
                          seeds: list[IPAddress] | None = None,
                          server_encryption: str = "none",
                          expected_error: str | None = None,
-                         expected_server_up_state: ServerUpState = ServerUpState.SERVING) -> ServerInfo:
+                         expected_server_up_state: ServerUpState = ServerUpState.SERVING,
+                         start_timeout: float | None = None) -> ServerInfo:
         """Add a new server."""
 
         return await self.cluster.add_server(
@@ -500,6 +503,7 @@ class ScyllaClusterManager:
             server_encryption=server_encryption,
             expected_error=expected_error,
             expected_server_up_state=expected_server_up_state,
+            start_timeout=start_timeout,
         )
 
     @manager_op(timeout=None)
@@ -1098,6 +1102,7 @@ class ScyllaClusterManager:
                 cmdline_options_override=cmdline_options_override,
                 append_env_override=append_env_override,
                 auth_provider=auth_provider,
+                start_timeout=timeout,
             )
         await self.server_sees_others(server_id, wait_others, interval = wait_interval)
         if expected_error is None and connect_driver:
@@ -1233,6 +1238,7 @@ class ScyllaClusterManager:
                     server_encryption=server_encryption,
                     expected_error=expected_error,
                     expected_server_up_state=expected_server_up_state,
+                    start_timeout=timeout,
                 )
         except Exception as exc:
             raise RuntimeError("Failed to add server") from exc

@@ -22,6 +22,7 @@ from test.pylib.internal_types import ServerInfo
 from test.pylib.util import get_enabled_features, wait_for, wait_for_feature, wait_for_cql_and_get_hosts, wait_for_view
 from test.pylib.scylla_cluster import ReplaceConfig
 from test.pylib.scylla_cluster_manager import ScyllaClusterManager
+from test.pylib.scylla_server import ScyllaServer
 from test.cluster.util import create_new_test_keyspace, new_test_keyspace, reconnect_driver, ensure_group0_leader_on, trigger_stepdown
 from test.cluster.tasks.task_manager_client import TaskManagerClient
 
@@ -2267,7 +2268,7 @@ async def test_replace_during_migration_tablet_followers(manager: ScyllaClusterM
 
 
 @pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
-async def test_replace_during_migration_tablet_followers_unflushed(manager: ScyllaClusterManager):
+async def test_replace_during_migration_tablet_followers_unflushed(manager: ScyllaClusterManager, scale_timeout):
     """Verify that repair-based replace streams unflushed data from tablet-only followers.
 
     Same setup as test_replace_during_migration_tablet_followers, except that
@@ -2330,7 +2331,8 @@ async def test_replace_during_migration_tablet_followers_unflushed(manager: Scyl
         new_server = await manager.server_add(replace_cfg,
                                               cmdline=replaced_cmdline,
                                               property_file=replaced_server.property_file(),
-                                              config=cfg)
+                                              config=cfg,
+                                              timeout=scale_timeout(ScyllaServer.TOPOLOGY_TIMEOUT))
 
         await reconnect_driver(manager)
         cql, _ = await manager.get_ready_cql(follower_servers + [new_server])

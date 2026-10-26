@@ -147,7 +147,8 @@ class ScyllaCluster:
                          seeds: Optional[List[IPAddress]] = None,
                          server_encryption: str = "none",
                          expected_error: Optional[str] = None,
-                         expected_server_up_state: ServerUpState = ServerUpState.SERVING) -> ServerInfo:
+                         expected_server_up_state: ServerUpState = ServerUpState.SERVING,
+                         start_timeout: Optional[float] = None) -> ServerInfo:
         """Add a new server to the cluster"""
 
         assert start or not expected_error, \
@@ -250,7 +251,7 @@ class ScyllaCluster:
             self.starting[server.server_id] = server
             self.logger.info("Cluster %s adding server...", self)
             if start:
-                await server.install_and_start(self.api, expected_error, expected_server_up_state)
+                await server.install_and_start(self.api, expected_error, expected_server_up_state, start_timeout)
             else:
                 await server.install()
         except asyncio.CancelledError:
@@ -393,7 +394,8 @@ class ScyllaCluster:
                            expected_server_up_state: ServerUpState = ServerUpState.SERVING,
                            cmdline_options_override: list[str] | None = None,
                            append_env_override: dict[str, str] | None = None,
-                           auth_provider: dict[str, str] | None = None) -> None:
+                           auth_provider: dict[str, str] | None = None,
+                           start_timeout: float | None = None) -> None:
         """Start a server.
 
         Replace CLI options and environment variables with `cmdline_options_override` and `append_env_override`
@@ -430,6 +432,7 @@ class ScyllaCluster:
             expected_server_up_state=expected_server_up_state,
             cmdline_options_override=cmdline_options_override,
             append_env_override=append_env_override,
+            start_timeout=start_timeout,
         )
         if expected_error is not None:
             self.running.pop(server_id)

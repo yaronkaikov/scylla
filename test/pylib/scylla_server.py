@@ -503,7 +503,8 @@ class ScyllaServer:
     async def install_and_start(self,
                                 api: ScyllaRESTAPIClient,
                                 expected_error: Optional[str] = None,
-                                expected_server_up_state: ServerUpState = ServerUpState.SERVING) -> None:
+                                expected_server_up_state: ServerUpState = ServerUpState.SERVING,
+                                start_timeout: Optional[float] = None) -> None:
         """Setup and start this server."""
 
         await self.install()
@@ -511,7 +512,7 @@ class ScyllaServer:
         self.logger.info("starting server at host %s in %s...", self.ip_addr, self.workdir.name)
 
         try:
-            await self.start(api, expected_error, expected_server_up_state)
+            await self.start(api, expected_error, expected_server_up_state, start_timeout=start_timeout)
         except:
             await self.stop()
             raise
@@ -879,11 +880,15 @@ class ScyllaServer:
                     expected_error: Optional[str] = None,
                     expected_server_up_state: ServerUpState = ServerUpState.SERVING,
                     cmdline_options_override: list[str] | None = None,
-                    append_env_override: dict[str, str] | None = None) -> None:
+                    append_env_override: dict[str, str] | None = None,
+                    start_timeout: float | None = None) -> None:
         """Start an installed server.
 
         Use `cmdline_options_override` and `append_env_override` instead of `self.cmdline_options` and
         `self.append_env` correspondingly if provided.
+
+        Wait up to `start_timeout` seconds (TOPOLOGY_TIMEOUT if None) for the server
+        to reach `expected_server_up_state`.
 
         May be used for restarts.
         """
@@ -946,7 +951,9 @@ class ScyllaServer:
                 return True
             return False
 
-        while time.time() < self.start_time + self.TOPOLOGY_TIMEOUT and not self.stop_event.is_set():
+        if start_timeout is None:
+            start_timeout = self.TOPOLOGY_TIMEOUT
+        while time.time() < self.start_time + start_timeout and not self.stop_event.is_set():
             assert self.cmd is not None
             if self.cmd.returncode is not None:
                 self.cmd = None

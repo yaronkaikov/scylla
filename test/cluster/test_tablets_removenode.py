@@ -7,6 +7,7 @@
 from cassandra.query import SimpleStatement, ConsistencyLevel # type: ignore
 
 from test.pylib.scylla_cluster_manager import ScyllaClusterManager
+from test.pylib.scylla_server import ScyllaServer
 
 import pytest
 import asyncio
@@ -60,7 +61,7 @@ async def test_removenode_with_coordinator_restart(manager: ScyllaClusterManager
     await manager.remove_node(servers[1].server_id, servers[2].server_id)
 
 
-async def test_replace(manager: ScyllaClusterManager):
+async def test_replace(manager: ScyllaClusterManager, scale_timeout):
     logger.info("Bootstrapping cluster")
     cmdline = [
         '--logger-log-level', 'storage_service=trace',
@@ -117,7 +118,8 @@ async def test_replace(manager: ScyllaClusterManager):
     logger.info('Replacing a node')
     await manager.server_stop_gracefully(servers[0].server_id)
     replace_cfg = ReplaceConfig(replaced_id = servers[0].server_id, reuse_ip_addr = False, use_host_id = True)
-    servers.append(await manager.server_add(replace_cfg, config=config))
+    servers.append(await manager.server_add(replace_cfg, config=config,
+                                            timeout=scale_timeout(ScyllaServer.TOPOLOGY_TIMEOUT)))
     servers = servers[1:]
 
     key_count = await finish_writes()
